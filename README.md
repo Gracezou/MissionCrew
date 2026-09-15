@@ -103,7 +103,7 @@ scripts/serve.sh stop       # 停止
 |---|---|---|
 | `claude` (Claude Code) | `claude_code` | 原生双向 stream-json；自带 haiku / sonnet / opus / fable 别名清单 |
 | `codex` (OpenAI Codex) | `codex` | 原生 app-server；模型清单从当前账号动态读取 |
-| `pi` | `pi` | 原生 RPC（平台 vendored 安装）；承接自定义 API 模型 |
+| `pi` | `pi` | 原生 RPC（vendored 安装优先，回退系统级 pi）；承接自定义 API 模型 |
 | `grok` (Grok Build) | `grok_build` | ACP stdio |
 | `copilot` (GitHub Copilot CLI) | `copilot` | ACP stdio |
 | `kimi` (Kimi CLI) | `kimi` | ACP stdio |
@@ -120,13 +120,16 @@ scripts/serve.sh stop       # 停止
 
 除本机 CLI 外，MissionCrew 也支持直接接入 **OpenAI / Anthropic 兼容的 API**——自建推理服务、网关代理、第三方托管都可以，接口协议支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Google Generative AI。这类模型由 [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent) 执行：平台不重写 agent 循环，复用 pi 的工具执行与会话管理，通过它的 RPC 模式对接。接入步骤：
 
-1. **安装 pi**。pi 由平台以 vendored 方式装在数据目录内，检测只认这份安装、不探测系统级 pi。首次使用需要 Node.js/npm，手动装一次（数据目录不是默认值时替换路径前缀）：
+1. **安装 pi**。两种方式任选其一，检测时 vendored 安装优先，没有再回退到 `PATH` 上的系统级 pi：
+
+   - **Homebrew（系统级）**：`brew install pi-coding-agent`，页面「更新」按钮执行 `brew upgrade pi-coding-agent`；
+   - **vendored（装在数据目录内）**：需要 Node.js/npm，手动装一次（数据目录不是默认值时替换路径前缀），「更新」按钮只写 vendor 目录，不会 `-g` 污染全局：
 
    ```bash
    npm install --prefix ~/.missioncrew/pi/vendor --no-fund --no-audit @mariozechner/pi-coding-agent@latest
    ```
 
-   然后在「全局设置」点「重新检测」注册并启用 `pi`；之后的升级由该页的「更新」按钮完成，只写 vendor 目录，不会 `-g` 污染全局。
+   然后在「全局设置」点「重新检测」注册并启用 `pi`。其他来源的系统级 pi（如 `npm -g`）也能识别，但平台不代管升级。无论哪种安装，pi 的配置与会话都重定向到数据目录，不读写 `~/.pi`。
 2. **添加接入**。在「全局设置 → 自定义模型接入」新增一条：接入名、接口协议、Base URL、API Key（字面量或 `$ENV_VAR` 引用，密钥不会回传浏览器）和模型 id 列表。
 3. **绑定角色**。保存后模型以 `接入名/模型id` 的形态出现在角色编辑器的模型清单中，给角色选择 runtime `pi` 和该模型即可使用。
 

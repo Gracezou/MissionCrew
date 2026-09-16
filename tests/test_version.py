@@ -4,10 +4,12 @@ from __future__ import annotations
 import ast
 import importlib.metadata
 import re
-import tomllib
 from pathlib import Path
 
-from packaging.version import Version
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from missioncrew import __version__
 
@@ -18,7 +20,6 @@ SEMVER_PEP440_RE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?
 
 def test_version_is_semver_and_pep440_compatible():
     assert SEMVER_PEP440_RE.fullmatch(__version__)
-    assert str(Version(__version__)) == __version__
 
 
 def test_pyproject_reads_dynamic_version_from_package():

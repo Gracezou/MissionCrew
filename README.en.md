@@ -23,7 +23,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
-Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md).
+Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md). [Changelog](CHANGELOG.md) is in Chinese too, but tracks every user-facing change per release.
 
 ## Quick start
 
@@ -86,7 +86,7 @@ Conventions:
 |---|---|---|
 | `claude` (Claude Code) | `claude_code` | Native bidirectional stream-json; built-in haiku / sonnet / opus / fable aliases |
 | `codex` (OpenAI Codex) | `codex` | Native app-server; model list read from the current account |
-| `pi` | `pi` | Native RPC (vendored install); executes custom API models |
+| `pi` | `pi` | Native RPC (vendored install first, falls back to a system pi); executes custom API models |
 | `grok` (Grok Build) | `grok_build` | ACP stdio |
 | `copilot` (GitHub Copilot CLI) | `copilot` | ACP stdio |
 | `kimi` (Kimi CLI) | `kimi` | ACP stdio |
@@ -103,13 +103,16 @@ Protocol flows, detection and upgrade mechanics, where model lists come from, an
 
 Besides local CLIs, MissionCrew can talk directly to **OpenAI / Anthropic compatible APIs** — self-hosted inference servers, gateways, third-party hosting — over the OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Google Generative AI protocols. These models are executed by [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent): the platform does not reimplement an agent loop; it reuses pi's tool execution and session management through pi's RPC mode. Setup:
 
-1. **Install pi.** pi is vendored inside the platform data directory; detection only recognises that copy and never a system-wide pi. Node.js/npm is required. Install it once by hand (adjust the prefix if you changed `MISSIONCREW_HOME`):
+1. **Install pi.** Pick either option; detection prefers the vendored copy and falls back to a `pi` on `PATH`:
+
+   - **Homebrew (system-wide)**: `brew install pi-coding-agent`; the *Update* button runs `brew upgrade pi-coding-agent`.
+   - **Vendored (inside the data directory)**: requires Node.js/npm; install it once by hand (adjust the prefix if you changed `MISSIONCREW_HOME`). The *Update* button only touches the vendor directory — never a global `-g` install:
 
    ```bash
    npm install --prefix .missioncrew/pi/vendor --no-fund --no-audit @mariozechner/pi-coding-agent@latest
    ```
 
-   Then click **Re-detect** in *Global settings* to register and enable `pi`. Later upgrades use the *Update* button on that page and only touch the vendor directory — never a global `-g` install.
+   Then click **Re-detect** in *Global settings* to register and enable `pi`. A system pi from another source (e.g. `npm -g`) is detected too, but the platform does not manage its upgrades. Either way pi's config and sessions are redirected into the data directory; `~/.pi` is never touched.
 2. **Add a provider.** Under *Global settings → Custom model providers* add an entry: name, protocol, base URL, API key (a literal or a `$ENV_VAR` reference; keys are never sent back to the browser) and the list of model ids.
 3. **Bind a role.** After saving, the models appear in the role editor's model list as `provider/model-id`; give the role runtime `pi` and that model.
 

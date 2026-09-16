@@ -17,7 +17,7 @@ Runtime 指本机安装的 Agent CLI(代码中的 `Backend`)。它是**全局资
 | `copilot` | `copilot` | ACP stdio | npm(`@github/copilot`) |
 | `cursor-agent` | `cursor` | 打印模式 CLI | `cursor-agent update` |
 | `codebuddy` | `codebuddy` | 打印模式 CLI | npm(`@tencent-ai/codebuddy-code`) |
-| `pi` | `pi` | 原生 RPC(vendored) | npm(`@mariozechner/pi-coding-agent`,仅写平台 vendor 目录) |
+| `pi` | `pi` | 原生 RPC(vendored 优先,回退系统 PATH) | vendored:npm(`@mariozechner/pi-coding-agent`,仅写平台 vendor 目录);brew:`brew upgrade pi-coding-agent`;其他系统级安装不代管 |
 | `kimi` | `kimi` | ACP stdio | `kimi upgrade`(不做最新版比对) |
 | `kiro-cli` | `kiro` | ACP stdio | 不支持自动更新 |
 | `qodercli` | `qoder` | ACP stdio | 不支持自动更新 |
@@ -135,7 +135,7 @@ pi 用于把**裸 OpenAI / Anthropic 兼容 API** 接成可协作的 Agent:平�
 
 隔离约定:
 
-- **二进制 vendored**:pi 安装在 `MC_HOME/pi/vendor`(`npm install --prefix`),检测只认这份安装,不探测系统 PATH,升级也只写 vendor 目录,绝不 `-g`;
+- **二进制定位**:优先用 `MC_HOME/pi/vendor`(`npm install --prefix`)里的 vendored 安装,缺失时回退到系统 PATH 上的 `pi`(如 `brew install pi-coding-agent`)。升级跟随安装来源:vendored 只写 vendor 目录,解析后位于 Homebrew `Cellar` 的走 `brew upgrade`,其他系统级安装返回不支持,任何情况都绝不 `npm -g`;
 - **配置自包含**:启动时注入 `PI_CODING_AGENT_DIR=MC_HOME/pi/agent`,models.json、皮肤化配置全部落在平台数据目录,不读写 `~/.pi`;会话 JSONL 固定落在 `MC_HOME/pi/sessions`(`--session-dir`),扩展发现被禁用(`--no-extensions`);
 - **裸 API 配置**:`MC_HOME/pi/agent/models.json` 按 pi 原生格式声明 provider(`baseUrl` + `api`(openai-completions/openai-responses/anthropic-messages/google-generative-ai)+ `apiKey`(字面量或 `$ENV_VAR`)+ 模型清单);执行单元即 `provider/model`,模型目录与该文件同源。这份文件是下方「自定义模型接入」能力的存储实现,不直接暴露给用户。
 
@@ -165,7 +165,7 @@ Codex 的 workspace-write 沙箱还会把每个可写根下的 `.git`、`.agents
 
 每个工具的静态声明（检测可执行名、命令模板、能力、模型清单、effort 兜底档位、升级渠道、ACP 特例）按工具拆在 `runtime/clis/` 子包里，一个工具一个模块（`clis/grok.py`、`clis/kimi.py`…）；`adapters.py` 把声明汇总成 `DEFAULT_COMMANDS`、`ACP_SERVE_COMMANDS`、`KNOWN_CLIS`、`KNOWN_MODELS`、`EFFORT_SUPPORT`、`UPDATE_SPECS` 这些注册表。新增工具时加一个声明模块并追加进 `clis.SPECS` 即可，不需要动执行器；执行行为仍由统一的 `CliAdapter`/`AcpAdapter` 承担，有原生 provider 的工具（claude/codex/pi）执行与 effort 档位在各自 provider 类里。
 
-工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`locate_binary`/`configured_models`/`update_plan`（pi 的 vendored 安装三件套；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
+工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`locate_binary`/`configured_models`/`update_plan`（pi 的安装定位三件套，vendored 优先、回退 PATH；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
 
 模板占位符(`render_command`):
 
@@ -213,7 +213,7 @@ Agent Tool 公共区块列出当前角色的动作 scope，并注入 `MISSIONCRE
 
 ## 检测与注册
 
-- **检测**(`detect_report`):对检测表逐个 `which` 探测 PATH,已安装的再跑 `--version` 提取语义版本号(输出中匹配不到语义版本就留空——有些安装 shim 会输出无关提示文本);pi 例外,只认平台 vendored 安装(`MC_HOME/pi/vendor`),不探测系统 PATH;
+- **检测**(`detect_report`):对检测表逐个 `which` 探测 PATH,已安装的再跑 `--version` 提取语义版本号(输出中匹配不到语义版本就留空——有些安装 shim 会输出无关提示文本);pi 例外,优先平台 vendored 安装(`MC_HOME/pi/vendor`),缺失时才回退系统 PATH;
 - **注册**(`detect_backends`):一个工具一条注册记录,写入二进制路径、版本、默认能力/档位/成本,并刷新工具自带模型清单:按 `KNOWN_MODELS` 预置(目前只有 claude:`""`(CLI 默认)/haiku/sonnet/opus/fable),声明了 `configured_models` 钩子的工具(pi)则从平台 `models.json` 动态读取;
 - Runtime 管理页只呈现工具、版本与安装状态;每条记录有启用开关,停用的 runtime 不能被角色绑定(保存时 400),已绑定角色的执行会明确报"不可用"。
 

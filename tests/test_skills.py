@@ -114,7 +114,9 @@ def test_zip_import_detects_skill_packages_preserves_files_and_confirms_overwrit
     assert (root / "release" / "scripts" / "release.sh").is_file()
     assert (root / "release" / "references" / "checklist.md").is_file()
     assert (root / "audit" / "SKILL.md").is_file()
-    assert not (root / "audit" / "skill.md").exists()
+    audit_files = os.listdir(root / "audit")
+    assert "SKILL.md" in audit_files
+    assert "skill.md" not in audit_files
 
     edited = client.post("/api/projects/webshop/skills", json={
         "id": "release", "name": "release", "description": "发布检查",

@@ -9,6 +9,16 @@ const API_LABELS = {
   "google-generative-ai": "Google Generative AI",
 };
 
+const MODEL_ID_SEPARATOR_RE = /[\r\n,，;；]+/;
+const MODEL_ID_INVALID_RE = /[\s,，;；\u0000-\u001f\u007f]/;
+
+const parseModelIds = value => String(value || "")
+  .split(MODEL_ID_SEPARATOR_RE).map(id => id.trim()).filter(Boolean);
+
+const modelIdValidationError = id => MODEL_ID_INVALID_RE.test(id)
+  ? `模型 id ${id} 不能包含空白、逗号、分号或控制字符`
+  : "";
+
 let modelProviders = { config: { providers: {} }, apis: [], executor: {}, path: "" };
 
 const providerEntries = () =>
@@ -98,7 +108,7 @@ function editModelProvider(name) {
       name ? ";留空表示不修改" : ""})</label>
     <input type="password" id="mp-key" value="${esc(spec.apiKey || "")}"
       placeholder="${name && spec.apiKeySaved ? "已保存,留空则不修改" : "sk-... 或 $OPENAI_API_KEY"}">
-    <label>模型 id(每行一个;顺序即角色配置里的展示顺序)</label>
+    <label>模型 id(换行、逗号或分号分隔;顺序即角色配置里的展示顺序)</label>
     <textarea id="mp-models" rows="6"
       placeholder="gpt-5.2&#10;gpt-5.2-mini">${esc(modelIds(spec).join("\n"))}</textarea>`,
     `<button class="action" onclick="saveModelProvider(${name ? `'${esc(name)}'` : "null"})">保存</button>
@@ -109,8 +119,7 @@ function editModelProvider(name) {
 async function saveModelProvider(original) {
   const name = document.getElementById("mp-name").value.trim();
   const baseUrl = document.getElementById("mp-base").value.trim();
-  const ids = document.getElementById("mp-models").value
-    .split("\n").map(line => line.trim()).filter(Boolean);
+  const ids = parseModelIds(document.getElementById("mp-models").value);
   if (!name) { uiAlert("接入名不能为空"); return; }
   // 接入名会拼进 "接入名/模型 id",斜杠等字符会让模型解析歧义
   if (!/^[A-Za-z0-9._-]+$/.test(name)) {
@@ -118,6 +127,8 @@ async function saveModelProvider(original) {
   }
   if (!baseUrl) { uiAlert("Base URL 不能为空"); return; }
   if (!ids.length) { uiAlert("至少声明一个模型 id"); return; }
+  const badId = ids.find(id => modelIdValidationError(id));
+  if (badId) { uiAlert(modelIdValidationError(badId)); return; }
   if (!original && modelProviders.config.providers[name]) {
     uiAlert(`接入名 ${name} 已存在`); return;
   }

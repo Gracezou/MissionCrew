@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +18,8 @@ from missioncrew.runtime.pi import (PiRuntimeProvider, read_pi_models,
                                     validate_pi_providers)
 
 FAKE_PI = str(Path(__file__).with_name("fake_pi_rpc.py"))
+SETTINGS_MODELS_JS = (Path(__file__).resolve().parents[1] / "missioncrew" /
+                      "web" / "js" / "settings-models.js")
 
 
 class _Fallback(RuntimeProvider):
@@ -290,6 +294,46 @@ def test_validate_pi_providers_rejects_bad_shapes():
     assert validate_pi_providers({"providers": {
         "a/b": {"baseUrl": "https://x", "api": "openai-completions",
                 "models": [{"id": "m"}]}}}) != ""
+
+
+@pytest.mark.parametrize("model_id", [
+    "deepseek-flash;", "deepseek,flash", "deepseek；flash", "deepseek，flash",
+    "deepseek flash", "deepseek\tflash", "deepseek\x00flash", 123,
+])
+def test_validate_pi_providers_rejects_invalid_model_ids(model_id):
+    error = validate_pi_providers({"providers": {
+        "CPA": {"baseUrl": "https://x", "api": "openai-completions",
+                "models": [{"id": model_id}]}}})
+    assert error
+    if isinstance(model_id, str):
+        assert "不能包含空白、逗号、分号或控制字符" in error
+    else:
+        assert "模型必须带 id" in error
+
+
+def test_settings_model_ids_split_common_separators_and_validate_whitespace():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the model provider form parser")
+    script = r"""
+const fs = require("fs"), vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+vm.runInContext(source, context);
+const parsed = vm.runInContext(`parseModelIds(${JSON.stringify(process.argv[2])})`, context);
+const error = vm.runInContext(`modelIdValidationError(${JSON.stringify(process.argv[3])})`, context);
+process.stdout.write(JSON.stringify({ parsed, error }));
+"""
+    result = subprocess.run(
+        [node, "-e", script, str(SETTINGS_MODELS_JS),
+         " glm-5.2; deepseek-flash，glm-5.3-flash\n deepseek-v4-pro ",
+         "deepseek flash"],
+        text=True, capture_output=True, check=True)
+    actual = json.loads(result.stdout)
+    assert actual["parsed"] == [
+        "glm-5.2", "deepseek-flash", "glm-5.3-flash", "deepseek-v4-pro"]
+    assert "不能包含空白、逗号、分号或控制字符" in actual["error"]
 
 
 def test_managed_pi_binary_relocates_with_data_dir(monkeypatch):

@@ -12,11 +12,11 @@
 
 ### 新增
 
-- 接入原生 Claude Code、Codex 双向协议 provider,支持后台命令与自唤醒汇报
-- 接入 pi RPC 原生 provider,支持裸 OpenAI / Anthropic / Google 兼容 API 的自定义模型接入
+- claude、codex 从打印模式升级为原生双向协议 provider(stream-json / app-server),支持后台命令与自唤醒汇报
+- pi 从打印模式升级为 RPC 原生 provider,支持裸 OpenAI / Anthropic / Google 兼容 API 的自定义模型接入
 - pi 找不到平台内置安装时回退到 PATH 上的系统级安装,Homebrew 安装走 `brew upgrade` 更新
-- 接入 Grok、Copilot、Kimi、Kiro、Qoder、Trae 等 ACP stdio 协议 Agent CLI
-- 接入 OpenCode、Cursor、CodeBuddy 等打印模式 Agent CLI
+- 新增内置 ACP stdio 客户端(长驻会话,空闲 30 分钟自动回收,自动应答权限请求):kimi、kiro、qoder、trae 由此接入,grok 与 copilot 从打印模式迁移过来
+- 展示 OpenCode 执行阶段进度,捕获会话 id 支持续接
 - 项目可选「无主控」模式,所有角色同权、可互相派发
 - Task 重构为标签驱动的 Issue:自定义看板列(标签表达式/属性分组)、外部数据源同步(如 GitCode Issue)、追加式状态简报、可恢复删除
 - 定时自动化:crontab 触发脚本调用 Agent Tool API,新任务命中标签规则后自动派发进频道

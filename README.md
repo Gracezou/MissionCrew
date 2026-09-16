@@ -32,6 +32,7 @@ MissionCrew 为 Agent 提供一系列接口脚本，Agent 可以用执行命令�
 - [harness 工作区边界](docs/agent-harness-workspace.md)：Agent 工作区、任务快照与业务代码仓之间的读写边界
 - [项目 Skill 目录](docs/skills.md)：完整目录形态的项目 Skill 的投放、同步与版本管理
 - [命令行工具](docs/cli.md)：`mc` 子命令速查，与 Web/API 同一套业务校验的终端形态
+- [更新日志](CHANGELOG.md)：各版本对用户可感知的变化
 
 ## 快速开始
 

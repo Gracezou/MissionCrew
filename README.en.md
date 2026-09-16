@@ -23,7 +23,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
-Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md).
+Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md). [Changelog](CHANGELOG.md) is in Chinese too, but tracks every user-facing change per release.
 
 ## Quick start
 

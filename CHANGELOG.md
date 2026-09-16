@@ -2,7 +2,7 @@
 
 本文件记录 MissionCrew 各版本对用户可感知的变化,格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-版本号遵循 SemVer(`MAJOR.MINOR.PATCH`,PEP 440 兼容):1.0 之前,含新功能或不兼容变更升 MINOR,只有修复升 PATCH,不兼容变更会在下方的「不兼容」小节写明迁移方式;发布流程与 tag 规则见 [CONTRIBUTING.md](CONTRIBUTING.md#版本与发布)。
+版本号遵循 SemVer(`MAJOR.MINOR.PATCH`,PEP 440 兼容):1.0 之前,含新功能或不兼容变更升 MINOR,只有修复升 PATCH,不兼容变更会在下方的「不兼容」小节写明迁移方式;分支与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md#版本与发布)。
 
 ## [Unreleased]
 

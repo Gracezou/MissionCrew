@@ -24,7 +24,7 @@ uv run mc serve          # 本地起服务,访问 http://127.0.0.1:8321
 
 ## 提交 PR
 
-1. 从 `main` 拉分支，保持一个 PR 只做一件事。
+1. 有进行中的版本分支(`release/vX.Y.Z`)时从该分支拉，没有进行中的版本分支才从 `main` 拉；保持一个 PR 只做一件事。
 2. 跑通 `uv run pytest -q`；涉及前端改动请在浏览器里实际验证。
 3. 涉及对外行为（CLI 参数、API、Agent Tool 动作、目录布局）的改动，同步更新 `README.md` 或 `docs/` 中对应的文档。
 4. PR 描述写清动机、做法和验证方式。
@@ -33,8 +33,8 @@ uv run mc serve          # 本地起服务,访问 http://127.0.0.1:8321
 
 - 版本号遵循 SemVer(`MAJOR.MINOR.PATCH`,PEP 440 兼容)。1.0 之前:含新功能或不兼容变更 → MINOR+1(不兼容变更必须在 CHANGELOG 的「不兼容」小节写清迁移方式);只有修复 → PATCH+1;预发布版本写 `X.Y.ZrcN`。Agent Tool API、数据目录结构、CLI 稳定后再升级到 1.0。
 - 单一版本来源是 `missioncrew/__init__.py::__version__`,`pyproject.toml`、`missioncrew/runtime/acp.py` 里的 clientInfo 等其他位置一律引用它,不得再硬编码版本号。
-- 发布 tag 格式为 `vX.Y.Z`,打在合入 `main` 后的发布提交上,需要人类同意后才打。
-- 发布流程:把 `CHANGELOG.md` 的 `[Unreleased]` 段落改成对应版本段(附日期)→ 修改 `__version__` → 提交 `chore: 发布 vX.Y.Z` → 合入 `main` 后打 tag。
+- 每个版本一个分支 `release/vX.Y.Z`(不直接叫 `vX.Y.Z`,避免与同名 tag 冲突)。第一个版本分支从 `main` 创建，之后的版本分支从上一个版本分支创建；日常开发分支从当前进行中的版本分支拉出，完成后以 `--no-ff` 合并回该版本分支。版本分支何时合入 `main` 由人类决定。
+- 发布流程:在版本分支上把 `CHANGELOG.md` 的 `[Unreleased]` 段落改成对应版本段(附日期)→ 修改 `__version__` → 提交 `chore: 发布 vX.Y.Z`。默认不打 tag；需要时由人类决定，格式为 `vX.Y.Z`。
 - 用户可感知的 feat/fix 提交,要同时在 `CHANGELOG.md` 的 `[Unreleased]` 里补一行(按「新增/变更/修复/不兼容」分类),不要留到发布前才补。
 
 ## 安全问题

@@ -1,6 +1,6 @@
 [project]
 name = "missioncrew"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Channel 驱动的本地多 Agent 协作平台，支持 Issue 化 Task 与项目资料"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["missioncrew"]
+
+[tool.hatch.version]
+path = "missioncrew/__init__.py"
 
 [dependency-groups]
 dev = [

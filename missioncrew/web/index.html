@@ -242,6 +242,7 @@
                 <button class="ghost compact" onclick="document.getElementById('skill-zip-input').click()">上传 ZIP</button>
                 <button class="ghost compact" onclick="openSkillFolderImport()">导入本地目录</button>
                 <button class="ghost compact" onclick="rescanSkillLibrary()">重新扫描</button>
+                <button class="ghost compact" onclick="openProjectImportDialog('skill', selectedSkillId || '')">复制到其他项目</button>
                 <button class="ghost compact" onclick="editSkill(null)">＋ 新建</button>
               </div>
             </div>
@@ -483,6 +484,7 @@
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/projects.js"></script>
 <script src="/assets/js/settings-project.js"></script>
+<script src="/assets/js/project-imports.js"></script>
 <script src="/assets/js/project-configs.js"></script>
 <script src="/assets/js/documents.js"></script>
 <script src="/assets/js/recycle-bin.js"></script>

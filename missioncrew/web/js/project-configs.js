@@ -1011,6 +1011,9 @@ const guidelineViewer = createTextViewer({
   },
   extrasHtml: mode => {
     const guideline = selectedGuideline();
+    const copyButton = guideline
+      ? `<button class="ghost compact" type="button" data-name="${esc(guideline.name)}"
+          onclick="openProjectImportDialog('guideline', this.dataset.name)">复制到其他项目</button>` : "";
     const deleteButton = guideline
       ? `<button class="danger" type="button" data-name="${esc(guideline.name)}"
           onclick="deleteGuideline(this.dataset.name)">删除</button>` : "";
@@ -1019,9 +1022,9 @@ const guidelineViewer = createTextViewer({
           <span class="switch ${guideline?.enabled === false ? "" : "on"}" id="gf-enabled"
             role="switch" tabindex="0"
             onclick="this.classList.toggle('on');guidelineViewer.markDirty()"></span></label>
-        ${deleteButton}`;
+        ${copyButton}${deleteButton}`;
     }
-    return deleteButton;
+    return copyButton + deleteButton;
   },
   scrollSelectors: () => ["#guidelines-view", "#gf-content", ".viewer-edit-preview"],
   onChange: () => updateConfigChatContext(),

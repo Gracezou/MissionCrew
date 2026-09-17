@@ -76,6 +76,8 @@ function automationDetailHtml(automation, runs) {
         <span class="muted">${esc(automationShortId(automation))}</span></div>
       <div class="content-topbar-actions">
         <button class="ghost compact" onclick="renderAutomationPage(true)">刷新</button>
+        <button class="ghost compact" data-id="${esc(automationShortId(automation))}"
+          onclick="openProjectImportDialog('automation', this.dataset.id)">复制到其他项目</button>
         <button class="ghost compact" data-id="${esc(automation.id)}"
           onclick="openAutomationEditor(this.dataset.id)">编辑</button>
         <button class="action compact" data-id="${esc(automation.id)}" ${automation.running ? "disabled" : ""}

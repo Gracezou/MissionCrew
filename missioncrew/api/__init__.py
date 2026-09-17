@@ -13,8 +13,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from .. import __version__
 from . import (agent_tools, automations, backends, boards, chat, documents,
-               guidelines, projects, recycle_bin, resources, roles, spa, system,
-               tasks, uploads)
+               guidelines, project_imports, projects, recycle_bin, resources,
+               roles, spa, system, tasks, uploads)
 from .context import ApiContext
 
 
@@ -44,8 +44,8 @@ def create_app() -> FastAPI:
     # JSON/JS 文本响应压缩率高,弱网(远程隧道)访问时显著缩短加载时间
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     for module in (system, chat, agent_tools, roles, projects, resources, guidelines,
-                   documents, boards, recycle_bin, backends, tasks, automations,
-                   uploads):
+                   project_imports, documents, boards, recycle_bin, backends, tasks,
+                   automations, uploads):
         module.register(app, ctx)
     spa.register(app, ctx)   # catch-all 兜底,必须最后
     return app

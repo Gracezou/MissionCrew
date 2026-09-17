@@ -14,6 +14,11 @@ function renderGlobalRoleTable() {
   const table = document.getElementById("global-role-table");
   if (!table) return;
   const defaultOrchestratorId = globalRoleTemplates().find(role => role.enabled !== false)?.id;
+  const warning = document.getElementById("global-role-warning");
+  if (warning) {   // 允许全部默认停用(批量重配的中间态),但必须让人看见后果
+    warning.hidden = !globalRoleTemplates().length || Boolean(defaultOrchestratorId);
+    warning.textContent = "当前没有默认启用的模板，新项目无法创建；请至少把一个模板设为「新项目中默认启用」。";
+  }
   const rows = globalRoleTemplates().map(role => {
     const execution = role.runtime_id
       ? `${esc(role.runtime_id)} / ${esc(role.model || "(CLI 默认)")}` +

@@ -369,6 +369,47 @@ def test_new_project_rejects_when_all_role_templates_are_disabled(client, seeded
     assert seeded.list_roles("all-disabled") == []
 
 
+def test_platform_bootstrap_skips_instead_of_failing_when_all_templates_disabled(store):
+    """全部模板默认停用是合法的重配中间态:平台自举静默跳过,不抛 RuntimeError。"""
+    for backend in seed_mod.DEMO_BACKENDS:
+        store.put_backend(backend)
+    seed_mod.ensure_role_templates(store)
+    for template in store.list_role_templates():
+        template.enabled = False
+        store.put_role_template(template)
+
+    seed_mod.ensure_default_project(store)
+    assert store.list_projects() == []          # 没建出半个项目,也没有异常
+
+    enabled = store.list_role_templates()[1]    # 恢复第二个模板:主控应当跟着它走
+    enabled.enabled = True
+    store.put_role_template(enabled)
+    seed_mod.ensure_default_project(store)
+    assert [project.id for project in store.list_projects()] == ["default"]
+    assert store.get_project("default").orchestrator_role_id == enabled.id
+    assert store.get_role("default", enabled.id).enabled is True
+    disabled_copy = next(role for role in store.list_roles("default")
+                         if role.id != enabled.id)
+    assert disabled_copy.enabled is False
+
+
+def test_runtime_detect_does_not_500_when_all_templates_disabled(
+        client, seeded, monkeypatch):
+    """Runtime 检测会顺带自举默认项目;模板全停用时它必须照常返回。"""
+    monkeypatch.setattr(runtime_manager, "detect_report", lambda *a, **kw: [])
+    monkeypatch.setattr(runtime_manager, "detect_backends", lambda *a, **kw: [])
+    for project in seeded.list_projects():
+        seeded.delete_project(project.id)
+    for template in seeded.list_role_templates():
+        template.enabled = False
+        seeded.put_role_template(template)
+
+    response = client.post("/api/backends/detect")
+
+    assert response.status_code == 200
+    assert seeded.list_projects() == []
+
+
 def test_global_role_template_validation_and_delete_guard(client, seeded):
     bad = client.post("/api/role-templates", json={
         "id": "bad", "runtime_id": "missing", "capabilities": ["coding"],
@@ -726,6 +767,13 @@ def test_global_settings_exposes_new_project_role_templates(client):
     assert "新项目中默认启用" in js
     assert "默认停用" in js
     assert 'id="rf-enabled"' in js
+    # 全部模板默认停用是允许的中间态,但页面必须显式警示并挡住必定失败的创建
+    projects_js = client.get("/assets/js/projects.js").text
+    css = client.get("/assets/css/app.css").text
+    assert 'id="global-role-warning"' in html and 'id="np-create"' in html
+    assert ".section-warn {" in css and ".section-warn[hidden] { display: none; }" in css
+    assert "当前没有默认启用的模板，新项目无法创建" in js
+    assert 'document.getElementById("np-create").disabled = !defaultOrchestrator' in projects_js
 
 
 def test_system_runtime_status_page_and_api_cover_all_instance_modes(

@@ -161,7 +161,6 @@ def project_roles_from_templates(store: Store, project_id: str) -> list[Role]:
     templates = store.list_role_templates()
     if not templates:
         raise RuntimeError("全局角色模板为空,请先检测并启用 runtime,再到全局设置中配置角色")
-    first_enabled_role(templates)
     roles = []
     for template in templates:
         backend = store.get_backend(template.runtime_id)
@@ -174,6 +173,9 @@ def project_roles_from_templates(store: Store, project_id: str) -> list[Role]:
         data = template.to_dict()
         data["project_id"] = project_id
         roles.append(Role.from_dict(data))
+    # 结构性问题(runtime 缺失/停用)先报完,再校验「至少有一个默认启用的模板」;
+    # 这里只做前置校验,返回值由调用方各自取,避免写完项目才发现没有可用主控。
+    first_enabled_role(roles)
     return roles
 
 
@@ -224,10 +226,16 @@ def ensure_default_project(store: Store) -> None:
     if store.list_projects() or not has_enabled_runtime(store):
         return
     ensure_role_templates(store)
-    roles = project_roles_from_templates(store, "default")
+    try:
+        roles = project_roles_from_templates(store, "default")
+        orchestrator = first_enabled_role(roles).id
+    except RuntimeError:
+        # 模板全部默认停用、或模板绑定的 runtime 不可用时跳过自举:平台自愈不该
+        # 因为用户的模板配置中间态而报错,用户显式建项目时仍会拿到明确错误。
+        return
     store.put_project(Project(id="default", name="默认项目",
                               description="首次使用自动创建,可在项目页改名或新建其他项目",
-                              orchestrator_role_id=first_enabled_role(roles).id))
+                              orchestrator_role_id=orchestrator))
     init_project(store, "default", roles)
 
 

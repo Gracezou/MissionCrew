@@ -27,15 +27,17 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         data = body.model_dump()
         is_new = existing is None
         new_roles = None
+        default_orchestrator = ""
         if is_new:
             try:
                 new_roles = seed_mod.project_roles_from_templates(store, body.id)
+                default_orchestrator = seed_mod.first_enabled_role(new_roles).id
             except RuntimeError as exc:
                 raise HTTPException(400, str(exc))
         # None = 保留现值(新项目取首个已启用模板);空字符串 = 无主控模式
         if body.orchestrator_role_id is None:
             orchestrator = (existing.orchestrator_role_id if existing
-                            else seed_mod.first_enabled_role(new_roles).id)
+                            else default_orchestrator)
         else:
             orchestrator = body.orchestrator_role_id.strip()
         if orchestrator and existing:

@@ -37,6 +37,42 @@ def test_project_add_uses_first_enabled_role_template(seeded, tmp_path):
     assert seeded.get_role("cli-project", "lead").enabled is False
 
 
+def test_project_add_keeps_orchestrator_when_yaml_omits_it(seeded, tmp_path):
+    """更新已有项目时 YAML 不写主控就保留现值:Project.from_dict 的默认 "lead"
+    不能变成一次用户没要求过的校验(主控恰好被用量联动停用时会误报)。"""
+    project = seeded.get_project("webshop")
+    project.orchestrator_role_id = "dev"
+    seeded.put_project(project)
+    lead = seeded.get_role("webshop", "lead")
+    lead.enabled = False
+    seeded.put_role(lead)
+    project_file = tmp_path / "project.yaml"
+    project_file.write_text(yaml.safe_dump({"id": "webshop", "name": "WebShop 改名"}))
+
+    result = CliRunner().invoke(
+        cli.app, ["project", "add", "--file", str(project_file)])
+
+    assert result.exit_code == 0, result.output
+    updated = seeded.get_project("webshop")
+    assert updated.name == "WebShop 改名"
+    assert updated.orchestrator_role_id == "dev"    # 未被 from_dict 的默认值改写
+
+
+def test_project_add_rejects_disabled_orchestrator_on_existing_project(seeded, tmp_path):
+    lead = seeded.get_role("webshop", "lead")
+    lead.enabled = False
+    seeded.put_role(lead)
+    project_file = tmp_path / "project.yaml"
+    project_file.write_text(yaml.safe_dump({
+        "id": "webshop", "name": "WebShop", "orchestrator_role_id": "lead"}))
+
+    result = CliRunner().invoke(
+        cli.app, ["project", "add", "--file", str(project_file)])
+
+    assert result.exit_code != 0
+    assert "主控角色已停用" in result.output
+
+
 def test_project_add_rejects_when_all_role_templates_are_disabled(seeded, tmp_path):
     for template in seeded.list_role_templates():
         template.enabled = False

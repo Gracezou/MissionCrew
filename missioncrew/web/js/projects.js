@@ -10,6 +10,9 @@ function openNewProject() {
       ? `将复制 ${templates.length} 个全局角色模板，默认主控为 @${defaultOrchestrator.id}；并创建 general 频道。`
       : `将复制 ${templates.length} 个全局角色模板，但当前没有默认启用的模板，无法创建项目。`)
     : "当前没有全局角色模板，请先到全局设置中配置。";
+  // 没有可作主控的模板时必定被服务端拒绝，直接置灰创建按钮；对话框仍可打开，
+  // 让用户看到原因，而不是点一次才吃到 400。
+  document.getElementById("np-create").disabled = !defaultOrchestrator;
   pdlg.showModal();
 }
 

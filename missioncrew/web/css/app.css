@@ -615,7 +615,8 @@
   .skill-scan-issues ul { margin: 5px 0 0; padding-left: 20px; }
   .skill-folder-import { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 
-  /* Skill 页：与准则页同款工作区；库信息与操作在顶部，正文区左文件树右编辑。 */
+  /* Skill 页：与准则页同款工作区；库信息与操作在顶部，正文区左文件树右编辑。
+     准则页与自动化页复用同一页头，项目级操作（如跨项目复制）常驻页头。 */
   .skill-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .skill-page-head { flex: none; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
   .skill-head-row { display: flex; align-items: center; justify-content: space-between;
@@ -1435,6 +1436,7 @@
 .project-import-item input { margin-top: 3px; }
 .project-import-item span { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
 .project-import-item small { flex-basis: 100%; color: var(--muted); }
+.project-import-warning { margin: 8px 0 0; color: var(--warn); }
 .project-import-results > p { margin-top: 0; }
 .project-import-results ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .project-import-results li { display: grid; grid-template-columns: minmax(120px, auto) auto 1fr;
@@ -1452,6 +1454,7 @@
 .automation-side-status.automation-st-failed,
 .automation-side-status.automation-st-timeout { background: var(--bad); }
 .automation-workspace { overflow: auto; }
+.project-resource-head { margin-bottom: 14px; }
 .automation-page-head { display: flex; align-items: center; justify-content: space-between;
   gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .automation-page-head > div:first-child { display: flex; align-items: baseline; gap: 9px; min-width: 0; }

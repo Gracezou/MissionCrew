@@ -21,6 +21,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 target_project_id=target_project_id,
                 resource_type=body.resource_type,
                 item_ids=body.item_ids,
+                agent_tools=ctx.chat.agent_tools,
+                running_automation_ids=ctx.automations.running_ids(),
                 conflict_strategy=body.conflict_strategy,
             )
         except ValueError as exc:

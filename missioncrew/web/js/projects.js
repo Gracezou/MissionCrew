@@ -4,8 +4,11 @@ function openNewProject() {
   document.getElementById("np-name").value = "";
   document.getElementById("np-desc").value = "";
   const templates = globalRoleTemplates();
+  const defaultOrchestrator = templates.find(role => role.enabled !== false);
   document.getElementById("np-role-summary").textContent = templates.length
-    ? `将复制 ${templates.length} 个全局角色模板，默认主控为 @${templates[0].id}；并创建 general 频道。`
+    ? (defaultOrchestrator
+      ? `将复制 ${templates.length} 个全局角色模板，默认主控为 @${defaultOrchestrator.id}；并创建 general 频道。`
+      : `将复制 ${templates.length} 个全局角色模板，但当前没有默认启用的模板，无法创建项目。`)
     : "当前没有全局角色模板，请先到全局设置中配置。";
   pdlg.showModal();
 }

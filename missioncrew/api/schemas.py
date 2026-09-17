@@ -99,6 +99,7 @@ class ContentChannelInput(BaseModel):
 
 class RoleTemplateInput(BaseModel):
     id: str
+    enabled: bool = True        # 复制到新项目时的初始启用状态
     runtime_id: str            # 角色定义时固定的 runtime,必填
     model: str = ""            # 空 = CLI 默认模型
     effort: str = ""           # 推理力度,仅支持的 runtime 可设;空 = CLI 默认

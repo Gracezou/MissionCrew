@@ -145,16 +145,25 @@ def project_add(file: Path = typer.Option(..., help="项目定义 YAML 文件"))
             new_roles = seed_mod.project_roles_from_templates(store, p.id)
         except RuntimeError as exc:
             raise typer.BadParameter(str(exc))
-        # YAML 未写该键时用模板首项;显式写空字符串即无主控模式
+        # YAML 未写该键时用首个已启用模板;显式写空字符串即无主控模式
         p.orchestrator_role_id = (str(data.get("orchestrator_role_id") or "")
                                   if "orchestrator_role_id" in data
-                                  else new_roles[0].id)
-    if (not is_new and p.orchestrator_role_id
-            and store.get_role(p.id, p.orchestrator_role_id) is None):
-        raise typer.BadParameter(f"主控角色不属于当前项目: @{p.orchestrator_role_id}")
-    if (is_new and p.orchestrator_role_id
-            and p.orchestrator_role_id not in {role.id for role in new_roles}):
-        raise typer.BadParameter(f"主控角色不属于全局角色模板: @{p.orchestrator_role_id}")
+                                  else seed_mod.first_enabled_role(new_roles).id)
+    if not is_new and p.orchestrator_role_id:
+        orchestrator_role = store.get_role(p.id, p.orchestrator_role_id)
+        if orchestrator_role is None:
+            raise typer.BadParameter(f"主控角色不属于当前项目: @{p.orchestrator_role_id}")
+        if not orchestrator_role.enabled:
+            raise typer.BadParameter(f"主控角色已停用，请先启用: @{p.orchestrator_role_id}")
+    if is_new and p.orchestrator_role_id:
+        orchestrator_role = next(
+            (role for role in new_roles if role.id == p.orchestrator_role_id), None)
+        if orchestrator_role is None:
+            raise typer.BadParameter(
+                f"主控角色不属于全局角色模板: @{p.orchestrator_role_id}")
+        if not orchestrator_role.enabled:
+            raise typer.BadParameter(
+                f"主控角色默认停用，请先启用模板: @{p.orchestrator_role_id}")
     store.put_project(p)
     materialize_project_skills(p, overwrite=True)
     sync_project_skill_library(store, p)

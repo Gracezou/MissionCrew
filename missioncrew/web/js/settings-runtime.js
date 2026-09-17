@@ -13,7 +13,8 @@ async function renderGlobalSettings() {
 function renderGlobalRoleTable() {
   const table = document.getElementById("global-role-table");
   if (!table) return;
-  const rows = globalRoleTemplates().map((role, index) => {
+  const defaultOrchestratorId = globalRoleTemplates().find(role => role.enabled !== false)?.id;
+  const rows = globalRoleTemplates().map(role => {
     const execution = role.runtime_id
       ? `${esc(role.runtime_id)} / ${esc(role.model || "(CLI 默认)")}` +
         (role.effort ? ` / effort ${esc(role.effort)}` : "")
@@ -23,7 +24,8 @@ function renderGlobalRoleTable() {
           ondragstart="globalRoleDragStart(event)" ondragend="globalRoleDragEnd()">⠿</td>
       <td><span class="role-dot" style="background:${esc(role.color || "#888")};display:inline-block"></span>
           <b>@${esc(role.id)}</b> ${esc(role.name)}
-          ${index === 0 ? `<span class="pill">新项目默认主控</span>` : ""}
+          ${role.id === defaultOrchestratorId ? `<span class="pill">新项目默认主控</span>` : ""}
+          ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}
           ${role.usage_linkage_enabled ? `<span class="pill">用量联动</span>` : ""}</td>
       <td class="muted">${esc(role.preference || "—")}</td>
       <td>${abilityPills(role) || "—"}</td>
@@ -84,7 +86,7 @@ function editGlobalRoleTemplate(id) {
   const role = globalRoleTemplates().find(item => item.id === id) || {
     id: "", name: "", description: "", capabilities: [], preference: "",
     runtime_id: "", model: "", effort: "", color: "#3564d7",
-    usage_linkage_enabled: false,
+    usage_linkage_enabled: false, enabled: true,
   };
   const abilityChips = Object.entries(traitMeta.abilities).map(([key, label]) =>
     `<span class="chip ${(role.capabilities || []).includes(key) ? "on" : ""}" data-cap="${key}"
@@ -109,6 +111,12 @@ function editGlobalRoleTemplate(id) {
       <div><label>模型(清单来自 runtime)</label><select id="rf-model"></select></div>
       <div><label>Effort(推理力度)</label><select id="rf-effort"></select></div>
     </div>
+    <label class="role-usage-linkage-field"
+      onclick="const control=this.querySelector('#rf-enabled');control.classList.toggle('on');control.setAttribute('aria-checked',String(control.classList.contains('on')))">
+      <span><b>新项目中默认启用</b><small>关闭后仍会复制到新项目，但不会接收任务，也不能作为项目主控。</small></span>
+      <span class="switch ${role.enabled !== false ? "on" : ""}" id="rf-enabled" role="switch"
+        aria-checked="${role.enabled !== false}"></span>
+    </label>
     ${roleUsageLinkageField(role)}
     <label>角色定位/人格(给角色本人与主控看:写清"是谁、怎么工作"的专长画像;平台原样装配、不改写,任务由 @ 消息提供)</label>
     <textarea id="rf-desc" rows="3">${esc(role.description)}</textarea>
@@ -137,6 +145,7 @@ async function saveGlobalRoleTemplate() {
     model: document.getElementById("rf-model").value,
     effort: document.getElementById("rf-effort").value,
     usage_linkage_enabled: document.getElementById("rf-usage-linkage").classList.contains("on"),
+    enabled: document.getElementById("rf-enabled").classList.contains("on"),
   };
   if (!body.id) { uiAlert("角色 id 不能为空"); return; }
   if (!runtimeId) { uiAlert("请为角色选择 runtime"); return; }

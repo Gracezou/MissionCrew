@@ -103,6 +103,7 @@ def test_project_role_batch_import_requires_confirmed_overwrites_and_preserves_l
         {
             "id": "imported-writer", "name": "导入写手", "runtime_id": "std-1",
             "model": "pro", "capabilities": ["coding"], "preference": "文档",
+            "enabled": False,
         },
         {
             "id": "dev", "name": "导入开发者", "runtime_id": "std-1",
@@ -132,6 +133,7 @@ def test_project_role_batch_import_requires_confirmed_overwrites_and_preserves_l
     assert dev.name == "导入开发者"
     assert dev.enabled is False               # 实时启停状态不随配置导入改变
     assert dev.sort_order == original_order   # 覆盖不改变现有位置
+    # enabled 只对全局模板表示新项目初始状态；项目导入不迁移实时启停状态。
     assert writer.project_id == "webshop" and writer.enabled is True
     assert writer.sort_order > max(
         role.sort_order for role in seeded.list_roles("webshop") if role.id != writer.id)
@@ -161,6 +163,76 @@ def test_global_role_batch_import_requires_confirmed_overwrites_and_keeps_order(
     assert lead.sort_order == original.sort_order
     assert added.sort_order > max(
         role.sort_order for role in seeded.list_role_templates() if role.id != added.id)
+
+
+def test_global_role_template_enabled_state_survives_save_and_import(client, seeded):
+    saved = client.post("/api/role-templates", json={
+        "id": "disabled-template", "name": "默认停用",
+        "runtime_id": "std-1", "model": "pro", "enabled": False,
+    })
+    assert saved.status_code == 200
+    assert saved.json()["enabled"] is False
+    templates = {role["id"]: role for role in client.get("/api/role-templates").json()}
+    assert templates["disabled-template"]["enabled"] is False
+
+    legacy = client.post("/api/role-templates", json={
+        "id": "legacy-default", "runtime_id": "std-1", "model": "pro",
+    })
+    assert legacy.status_code == 200
+    assert legacy.json()["enabled"] is True
+
+    imported = client.post("/api/role-templates/import", json={
+        "roles": [{
+            "id": "disabled-import", "runtime_id": "std-1", "model": "pro",
+            "enabled": False,
+        }],
+    })
+    assert imported.status_code == 200
+    assert seeded.get_role_template("disabled-import").enabled is False
+    exported = {role["id"]: role for role in client.get("/api/role-templates").json()}
+    assert exported["disabled-import"]["enabled"] is False
+
+
+def test_global_role_template_without_enabled_keeps_existing_state(client, seeded):
+    assert client.post("/api/role-templates", json={
+        "id": "keep-disabled", "runtime_id": "std-1", "model": "pro", "enabled": False,
+    }).status_code == 200
+    # 旧客户端编辑模板时不带 enabled，不应把默认停用悄悄改回启用。
+    resaved = client.post("/api/role-templates", json={
+        "id": "keep-disabled", "name": "改名", "runtime_id": "std-1", "model": "pro",
+    })
+    assert resaved.status_code == 200
+    assert resaved.json()["enabled"] is False
+    assert resaved.json()["name"] == "改名"
+
+    imported = client.post("/api/role-templates/import", json={
+        "roles": [
+            {"id": "keep-disabled", "runtime_id": "std-1", "model": "pro"},
+            {"id": "legacy-import", "runtime_id": "std-1", "model": "pro"},
+        ],
+        "overwrite_ids": ["keep-disabled"],
+    })
+    assert imported.status_code == 200
+    assert seeded.get_role_template("keep-disabled").enabled is False
+    assert seeded.get_role_template("legacy-import").enabled is True
+
+    enabled_again = client.post("/api/role-templates/import", json={
+        "roles": [{"id": "keep-disabled", "runtime_id": "std-1", "model": "pro",
+                   "enabled": True}],
+        "overwrite_ids": ["keep-disabled"],
+    })
+    assert enabled_again.status_code == 200
+    assert seeded.get_role_template("keep-disabled").enabled is True
+
+
+def test_role_template_enabled_change_does_not_touch_existing_projects(client, seeded):
+    assert seeded.get_role("webshop", "dev").enabled is True
+    template = client.get("/api/role-templates").json()
+    dev = next(role for role in template if role["id"] == "dev")
+    saved = client.post("/api/role-templates", json={**dev, "enabled": False})
+    assert saved.status_code == 200
+    assert seeded.get_role_template("dev").enabled is False
+    assert seeded.get_role("webshop", "dev").enabled is True
 
 
 def test_role_batch_import_rejects_duplicate_ids_before_writing(client, seeded):
@@ -237,7 +309,7 @@ def test_current_orchestrator_cannot_be_disabled_or_selected_while_disabled(
     assert "主控角色已停用" in selected.json()["detail"]
 
 
-def test_global_role_templates_seed_new_projects_and_first_is_default(client, seeded):
+def test_global_role_templates_seed_new_projects_and_first_enabled_is_default(client, seeded):
     templates = client.get("/api/role-templates").json()
     assert [role["id"] for role in templates][:3] == ["lead", "dev", "reviewer"]
     assert client.get("/api/overview").json()["role_templates"] == templates
@@ -246,7 +318,7 @@ def test_global_role_templates_seed_new_projects_and_first_is_default(client, se
         "id": "coordinator", "name": "协调者", "runtime_id": "exp-1",
         "model": "ultra", "effort": "high", "capabilities": ["reasoning"],
         "description": "负责新项目调度", "preference": "先规划", "color": "#112233",
-        "usage_linkage_enabled": True,
+        "usage_linkage_enabled": True, "enabled": False,
     }
     assert client.post("/api/role-templates", json=coordinator).status_code == 200
     ids = ["coordinator", *[role["id"] for role in templates]]
@@ -254,10 +326,11 @@ def test_global_role_templates_seed_new_projects_and_first_is_default(client, se
 
     created = client.post("/api/projects", json={"id": "templated", "name": "Templated"})
     assert created.status_code == 200
-    assert created.json()["orchestrator_role_id"] == "coordinator"
+    assert created.json()["orchestrator_role_id"] == "lead"
     copied = seeded.get_role("templated", "coordinator")
     assert (copied.runtime_id, copied.model, copied.effort) == ("exp-1", "ultra", "high")
     assert copied.usage_linkage_enabled is True
+    assert copied.enabled is False
     assert copied.description == "负责新项目调度"
     assert [role.id for role in seeded.list_roles("templated")] == ids
 
@@ -267,6 +340,33 @@ def test_global_role_templates_seed_new_projects_and_first_is_default(client, se
     assert seeded.get_role("templated", "coordinator").name == "协调者"
     assert seeded.get_project("webshop").orchestrator_role_id == "lead"
     assert seeded.get_role("webshop", "coordinator") is None
+
+
+def test_new_project_rejects_disabled_explicit_orchestrator(client, seeded):
+    template = seeded.get_role_template("lead")
+    template.enabled = False
+    seeded.put_role_template(template)
+    response = client.post("/api/projects", json={
+        "id": "disabled-lead", "name": "Disabled lead",
+        "orchestrator_role_id": "lead",
+    })
+    assert response.status_code == 400
+    assert "主控角色默认停用" in response.json()["detail"]
+    assert seeded.get_project("disabled-lead") is None
+    assert seeded.list_roles("disabled-lead") == []
+
+
+def test_new_project_rejects_when_all_role_templates_are_disabled(client, seeded):
+    for template in seeded.list_role_templates():
+        template.enabled = False
+        seeded.put_role_template(template)
+    response = client.post("/api/projects", json={
+        "id": "all-disabled", "name": "All disabled",
+    })
+    assert response.status_code == 400
+    assert "全部为默认停用" in response.json()["detail"]
+    assert seeded.get_project("all-disabled") is None
+    assert seeded.list_roles("all-disabled") == []
 
 
 def test_global_role_template_validation_and_delete_guard(client, seeded):
@@ -620,9 +720,12 @@ def test_global_settings_exposes_new_project_role_templates(client):
     html = client.get("/").text
     js = client.get("/assets/js/settings-runtime.js").text
     assert 'id="global-role-table"' in html
-    assert "第一项是新项目的默认主控" in html
+    assert "排序最前的已启用模板是新项目默认主控" in html
     assert "/api/role-templates/reorder" in js
     assert "editGlobalRoleTemplate" in js
+    assert "新项目中默认启用" in js
+    assert "默认停用" in js
+    assert 'id="rf-enabled"' in js
 
 
 def test_system_runtime_status_page_and_api_cover_all_instance_modes(
@@ -784,6 +887,9 @@ def test_role_settings_expose_selective_file_import_export_with_overwrite_previe
     assert "chooseRoleImportFile('global')" in html
     assert "openRoleExportDialog('global')" in html
     assert 'const ROLE_FILE_FORMAT = "missioncrew.roles"' in js
+    assert "function roleFileItem(role, withTemplateEnabled = false)" in js
+    assert 'roleFileItem(role, scope === "global")' in js
+    assert 'scope === "global" && payload.scope === "global"' in js
     assert 'data-role-transfer-index="${index}"' in js
     assert "将覆盖现有角色" in js
     assert "不会覆盖现有角色" in js

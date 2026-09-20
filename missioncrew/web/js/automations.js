@@ -243,6 +243,7 @@ registerViewerDirtyChecker(automationFormDirty);
 async function renderAutomationPage(refresh = false) {
   const detail = document.getElementById("automation-detail");
   if (!detail || currentTab !== "automations") return;
+  projectConfigLabel("automation-proj-label");
   if (automationEditingId !== undefined) { renderSidebar(); return; }
   const request = ++automationPageRequest;
   const workspace = detail.closest(".automation-workspace");

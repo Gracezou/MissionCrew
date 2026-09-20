@@ -615,7 +615,8 @@
   .skill-scan-issues ul { margin: 5px 0 0; padding-left: 20px; }
   .skill-folder-import { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 
-  /* Skill 页：与准则页同款工作区；库信息与操作在顶部，正文区左文件树右编辑。 */
+  /* Skill 页：与准则页同款工作区；库信息与操作在顶部，正文区左文件树右编辑。
+     准则页与自动化页复用同一页头，项目级操作（如跨项目复制）常驻页头。 */
   .skill-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .skill-page-head { flex: none; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
   .skill-head-row { display: flex; align-items: center; justify-content: space-between;
@@ -1422,6 +1423,29 @@
 
 /* ---- 自动化脚本(侧栏 + 独立详情页) ---- */
 .automation-side-item { display: flex; align-items: center; gap: 7px; padding-left: 20px; }
+.project-import-source { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0; }
+.project-import-items-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 14px; }
+.project-import-items-head > label { margin: 0; }
+.project-import-items { display: grid; gap: 6px; max-height: 300px; overflow: auto;
+  padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--card-2); }
+.project-import-item { display: grid !important; grid-template-columns: auto minmax(0, 1fr);
+  align-items: start; gap: 9px; margin: 0 !important; padding: 8px; border-radius: 6px;
+  color: var(--text) !important; cursor: pointer; }
+.project-import-item:hover { background: var(--card); }
+.project-import-item input { margin-top: 3px; }
+.project-import-item span { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.project-import-item small { flex-basis: 100%; color: var(--muted); }
+.project-import-warning { margin: 8px 0 0; color: var(--warn); }
+.project-import-results > p { margin-top: 0; }
+.project-import-results ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.project-import-results li { display: grid; grid-template-columns: minmax(120px, auto) auto 1fr;
+  align-items: baseline; gap: 6px 10px; padding: 9px 10px; border: 1px solid var(--line);
+  border-radius: 7px; }
+.project-import-results li small { grid-column: 1 / -1; color: var(--muted); }
+.project-import-copied strong, .project-import-overwritten strong { color: var(--ok); }
+.project-import-skipped strong { color: var(--muted); }
+.project-import-failed strong { color: var(--bad); }
 .automation-side-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .automation-side-status { flex: none; width: 7px; height: 7px; margin-left: auto;
   border-radius: 50%; background: var(--muted); }
@@ -1430,6 +1454,7 @@
 .automation-side-status.automation-st-failed,
 .automation-side-status.automation-st-timeout { background: var(--bad); }
 .automation-workspace { overflow: auto; }
+.project-resource-head { margin-bottom: 14px; }
 .automation-page-head { display: flex; align-items: center; justify-content: space-between;
   gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .automation-page-head > div:first-child { display: flex; align-items: baseline; gap: 9px; min-width: 0; }

@@ -135,6 +135,18 @@ Skill 的事实源是项目托管 Skill 目录，每个 Skill 至少包含 `SKIL
 - `POST /api/projects/<project>/skills/<skill-id>/compare`
 - `POST /api/projects/<project>/skills/<skill-id>/restore`
 
+### 跨项目复制
+
+准则、Skill 和自动化页面可把当前项目中的一个或多个条目复制到其他项目。目标存在同标识条目时必须显式选择 `skip`（默认）或 `overwrite`；接口对每个条目分别返回 `copied`、`skipped`、`overwritten` 或 `failed` 及原因，不会静默覆盖。
+
+Skill 复制当前完整目录快照（包括脚本、引用、素材和可执行权限），目标项目生成一条新的导入版本；源项目的历史提交不会嫁接到目标项目，两个项目之后各自维护历史。自动化在目标项目按 `<目标项目>:<短 id>` 重建，一律以停用状态落地，并清空最近运行时间、状态和创建角色，等待人在目标项目确认后启用。覆盖自动化会丢弃目标原脚本（不进回收站），同时清掉目标的旧运行记录并回收其脚本令牌；目标自动化正在运行时该条返回 `failed`。复制过程不会修改源项目。逐条失败原因不包含数据目录绝对路径，单条失败不影响同批其他条目的结果。
+
+主要 API：
+
+- `POST /api/projects/<target-project>/import`
+
+请求体包含 `source_project_id`、`resource_type`（`guideline` / `skill` / `automation`）、`item_ids` 和可选 `conflict_strategy`（`skip` / `overwrite`）。这是普通 Web API；本版本没有增加对应的 Agent Tool 动作。
+
 ### 项目文档
 
 文档的事实源是项目文档工作树，独立 bare Git 仓库保存版本历史。聊天角色通过 `document.publish` Agent Tool 动作发布文件，通过 `document.rename` 移动或重命名文件；直接编辑后的执行结束快照只作为旧会话兼容。人类也可以在 Web 文档页一次选择多个文件上传：未选中文档时保存到文档库根目录，选中文档时保存到该文档所在目录；同名文件必须确认后才能覆盖，且每个文件分别形成版本。单文件上限为 50 MB。

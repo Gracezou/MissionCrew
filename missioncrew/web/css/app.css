@@ -780,6 +780,11 @@
   .danger:hover { background: var(--bad-soft); }
   .section { margin-bottom: 34px; scroll-margin-top: 56px; }
   .section > h2 { font-size: 14.5px; margin: 0 0 10px; display: flex; align-items: center; }
+  /* 设置页里需要人看见、但不阻断操作的提示(如模板全部默认停用) */
+  .section-warn { margin: 0 0 10px; padding: 7px 10px; border-radius: 6px;
+                  border: 1px solid var(--warn); background: var(--warn-soft);
+                  color: var(--warn); font-size: 12.5px; }
+  .section-warn[hidden] { display: none; }
   /* 系统全局 Runtime 状态：十秒轮询，表格保持紧凑并允许横向滚动。 */
   .runtime-status-head { display: flex; align-items: flex-start; justify-content: space-between;
                          gap: 18px; margin-bottom: 18px; }

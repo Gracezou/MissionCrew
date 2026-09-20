@@ -99,6 +99,9 @@ class ContentChannelInput(BaseModel):
 
 class RoleTemplateInput(BaseModel):
     id: str
+    # 复制到新项目时的初始启用状态;仅全局模板生效,
+    # 项目角色的实时启停走 /api/roles/{id}/enabled,不由本字段改写
+    enabled: bool = True
     runtime_id: str            # 角色定义时固定的 runtime,必填
     model: str = ""            # 空 = CLI 默认模型
     effort: str = ""           # 推理力度,仅支持的 runtime 可设;空 = CLI 默认

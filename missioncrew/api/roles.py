@@ -129,7 +129,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         imported: list[str] = []
         for item in body.roles:
             previous = current.get(item.id)
-            data = item.model_dump(exclude={"sort_order"})
+            data = item.model_dump(exclude={"sort_order", "enabled"})
             role = Role(
                 **data,
                 project_id=project.id,
@@ -173,8 +173,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         validate_config(body)
         data = body.model_dump()
         data["project_id"] = ""
+        existing = store.get_role_template(body.id)
+        # 旧客户端不带 enabled 时保留模板现有的新项目默认启停状态。
+        if "enabled" not in body.model_fields_set and existing:
+            data["enabled"] = existing.enabled
         if data["sort_order"] is None:
-            existing = store.get_role_template(body.id)
             data["sort_order"] = existing.sort_order if existing else 10 + max(
                 (role.sort_order for role in store.list_role_templates()), default=0)
         role = Role(**data)
@@ -204,6 +207,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         for item in body.roles:
             previous = current.get(item.id)
             data = item.model_dump(exclude={"sort_order"})
+            if "enabled" not in item.model_fields_set and previous:
+                data["enabled"] = previous.enabled   # 文件未携带时不改已有模板
             role = Role(
                 **data,
                 project_id="",

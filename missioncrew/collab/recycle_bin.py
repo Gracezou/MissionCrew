@@ -9,8 +9,9 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from ..core.config import projects_dir
 from ..core.models import Board, Channel, Project, ProjectResource, Role, Task
@@ -21,6 +22,7 @@ from .guidelines import delete_guideline, save_guideline
 from .resource_urls import (channel_resource_url, dashboard_resource_url,
                             guideline_resource_url, missioncrew_resource_url,
                             skill_resource_url, task_resource_url)
+from .skills import _project_lock as _skill_lock
 from .skills import (project_skill_library_dir, sync_project_skill_library,
                      write_skill_context)
 from .skill_versions import skill_version_library
@@ -41,8 +43,21 @@ class RecycleConflictError(Exception):
 
 
 def _project_lock(project_id: str) -> threading.RLock:
+    """回收站的项目锁。要同时持有 Skill 锁时必须经 _skill_then_recycle_lock。"""
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(project_id, threading.RLock())
+
+
+@contextmanager
+def _skill_then_recycle_lock(project_id: str) -> Iterator[None]:
+    """同时持有两把项目锁的唯一入口，顺序固定为「先 Skill 锁、后回收站锁」。
+
+    Skill 覆盖导入(skills._install_discovered)持 Skill 锁期间会调用
+    archive_replaced_skill 去拿回收站锁；回收站这边只要反序(先回收站锁、再进
+    Skill 同步)就会与它互等死锁。需要两把锁的路径一律从这里取，不要自己嵌套。
+    """
+    with _skill_lock(project_id), _project_lock(project_id):
+        yield
 
 
 def recycle_bin_url(project_id: str) -> str:
@@ -523,7 +538,9 @@ def _restore_snapshot(store: Store, project: Project, manifest: dict) -> str:
 
 def restore_recycle_item(store: Store, project: Project, item_id: str,
                          *, actor: str) -> dict:
-    with _project_lock(project.id):
+    # 恢复 Skill 会在回收站锁内做 Skill 库同步，因此整段按统一顺序先取 Skill 锁；
+    # 其他类型一并走同一入口，避免以后新增资源类型时又写出一条反序路径。
+    with _skill_then_recycle_lock(project.id):
         manifest = _load_manifest(project.id, item_id)
         payload = _item_dir(project.id, item_id) / "payload"
         resource_type = str(manifest["resource_type"])

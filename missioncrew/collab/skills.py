@@ -46,6 +46,9 @@ def _project_lock(project_id: str) -> threading.RLock:
     recycle_bin.archive_replaced_skill 归档旧包(拿回收站锁)，所以任何需要
     两把锁的路径都必须「先 Skill 锁、后回收站锁」，统一经
     recycle_bin._skill_then_recycle_lock 获取。
+
+    本函数虽以下划线开头，但已是给同包模块的契约：recycle_bin 与
+    project_imports 直接按项目取这把 RLock，改名或改签名要同步改它们。
     """
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(project_id, threading.RLock())

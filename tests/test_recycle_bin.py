@@ -283,8 +283,11 @@ def test_skill_restore_and_overwrite_import_do_not_deadlock(seeded, tmp_path, mo
     """回收站锁与 Skill 锁必须同序获取。
 
     恢复走「回收站锁 → Skill 锁」、覆盖导入走「Skill 锁 → 回收站锁」时两者互等。
-    这里用事件把两条路径卡在各自已持一把锁、正要去拿另一把的位置，交错是确定
-    的：事件成对握手，wait 的超时只是上限，修好后靠锁顺序保证不会互等，不靠它。
+    这里把两条路径各卡在「已持一把锁、正要去拿另一把」的位置：锁顺序写反时两个
+    钩子会同时就位、事件成对置位，立刻凑出死锁；锁顺序正确时必有一方先拿到
+    Skill 锁、另一方被挡在取锁处根本到不了钩子，先到的那方等满 handshake 超时
+    再继续——所以「等满超时」正是修好之后的正常路径，wait 只是给对方一个抢锁的
+    机会，不是同步手段。
     """
     client = _client()
     project_id = "lock-probe"          # 用独立项目，避免把共享项目的锁留在死锁态
@@ -306,7 +309,7 @@ def test_skill_restore_and_overwrite_import_do_not_deadlock(seeded, tmp_path, mo
 
     restore_holds_recycle = threading.Event()
     import_holds_skill = threading.Event()
-    handshake = 5.0
+    handshake = 0.5        # 坏代码上两个钩子微秒级就位，0.5s 足够凑出死锁
     original_sync = recycle_bin.sync_project_skill_library
     original_archive = recycle_bin.archive_replaced_skill
 

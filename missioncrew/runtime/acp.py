@@ -280,6 +280,12 @@ class _AcpClient:
                 return
             update = params.get("update") or {}
             kind = update.get("sessionUpdate")
+            if (kind == "agent_message_chunk" and isinstance(meta, dict)
+                    and meta.get("parentToolCallId")):
+                # 子代理(task 工具)与主代理共用 sessionId,只靠 parentToolCallId
+                # 区分(traecli 实测)。子代理正文已作为工具结果交回主代理;并入
+                # 回复会与主代理及并行子代理的流式分片逐字交错,只当过程事件展示
+                kind = "agent_thought_chunk"
             # 消息/思考块的 content 是 {type,text};tool_call 类更新的 content 按
             # ACP 约定是内容块列表,不能当 dict 用
             content = update.get("content")

@@ -356,6 +356,38 @@ def test_acp_drops_provider_marked_replay_notifications():
     assert client.chunks == [] and events == []
 
 
+def test_acp_subagent_messages_stay_out_of_reply(tmp_path):
+    """并行子代理的正文分片与主代理同一 sessionId、交错到达,只能凭
+    parentToolCallId 分开;并入回复会把几段 Markdown 逐字搅在一起。"""
+    client = acp._AcpClient(["cat"], str(tmp_path), {}, timeout=5)
+    client._write = lambda obj: None
+    events = []
+
+    def chunk(text, parent=""):
+        meta = {"parentToolCallId": parent} if parent else {}
+        client._handle({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "s1", "_meta": meta, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}}})
+    try:
+        client.begin_turn(5, lambda kind, text: events.append((kind, text)))
+        chunk("## 1. 主报告")
+        chunk("# 子代理 A", "call-a")
+        chunk("# 子代理 B", "call-b")
+        chunk("\n## 2. 结论")
+        assert "".join(client.chunks) == "## 1. 主报告\n## 2. 结论"
+        assert [t for k, t in events if k == "text"] == ["## 1. 主报告", "\n## 2. 结论"]
+        assert [t for k, t in events if k == "thinking"] == ["# 子代理 A", "# 子代理 B"]
+        # 后台子代理在 turn 之外的正文同样不进唤醒汇报
+        client.end_turn()
+        chunk("# 后台子代理", "call-c")
+        with client._wake_lock:
+            assert client._wake_chunks == []
+            assert client._wake_events == [("thinking", "# 后台子代理")]
+    finally:
+        client.close()
+
+
 def test_runtime_manager_stops_acp_live_session(tmp_path, monkeypatch):
     saved = {}
     backend = Backend(id="kimi-stop", name="k", adapter="kimi")

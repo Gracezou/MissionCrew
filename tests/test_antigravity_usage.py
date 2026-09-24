@@ -174,8 +174,9 @@ def test_probe_failure_messages_do_not_expose_upstream_data(tmp_path, stdout, st
 
 def test_probe_timeout_reaps_process_and_missing_binary_is_unavailable(tmp_path):
     runtime = fake_cli(tmp_path, "", sleep=30)
-    # 超时要大于「新写出的脚本首次 exec」的开销:macOS 上首次执行要 ~0.7s
-    # (Linux 上几乎为 0),给 0.2s 会在假 CLI 写 launches 之前就把它杀掉。
+    # fork-divergence: 保留较长超时，避免 macOS 首次 exec 与探测超时赛跑。
+    # 新写出的脚本首次 exec 在 macOS 上要 ~0.7s，Linux 上几乎为 0；
+    # 给 0.2s 会在假 CLI 写 launches 之前就把它杀掉。
     assert probe_antigravity_usage(runtime, timeout=2).status == "unavailable"
     pids = launches(tmp_path)
     assert len(pids) == 2  # 超时算瞬时失败,重试一次后放弃;两次进程都被回收

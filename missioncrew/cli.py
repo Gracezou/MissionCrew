@@ -165,6 +165,9 @@ def project_add(file: Path = typer.Option(..., help="项目定义 YAML 文件"))
             raise typer.BadParameter(f"主控角色不属于当前项目: @{p.orchestrator_role_id}")
         if not orchestrator_role.enabled:
             raise typer.BadParameter(f"主控角色已停用，请先启用: @{p.orchestrator_role_id}")
+        if orchestrator_role.manual_only:
+            raise typer.BadParameter(
+                f"仅人工点名的角色不能作为主控: @{p.orchestrator_role_id}")
     if is_new and p.orchestrator_role_id:
         orchestrator_role = next(
             (role for role in new_roles if role.id == p.orchestrator_role_id), None)

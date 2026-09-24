@@ -1,6 +1,7 @@
 """项目间复制准则、Skill 与自动化。"""
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from collections.abc import Collection
@@ -37,7 +38,11 @@ def _failure_reason(exc: Exception) -> str:
     """逐条失败原因会返回前端：系统异常只保留错误类别，不带命令行与绝对路径。"""
     if isinstance(exc, subprocess.CalledProcessError):
         return "版本库写入失败"
-    if isinstance(exc, OSError) and (exc.strerror or exc.filename):
+    if isinstance(exc, shutil.Error):
+        # copytree 的 Error 把每个失败文件的源/目标绝对路径塞进 args，
+        # 它是 OSError 子类但 strerror/filename 为空，不能落到下面回显 str()
+        return "文件复制失败"
+    if isinstance(exc, OSError):
         return f"文件操作失败：{exc.strerror or type(exc).__name__}"
     return str(exc)
 
@@ -134,9 +139,11 @@ def _copy_automation(store: Store, source: Project, target: Project,
     copied = Automation.from_dict(copied.to_dict())
     if exists:
         # 与删除自动化同口径：回收旧脚本令牌并清掉旧运行记录，旧脚本不进回收站。
+        # 删旧与写新在 store 的同一事务里，中途失败不会只剩「旧的已删、新的没写」。
         agent_tools.revoke_automation_tokens(target_id)
-        store.delete_automation(target_id)
-    store.put_automation(copied)
+        store.replace_automation(target_id, copied)
+    else:
+        store.put_automation(copied)
     store.audit(
         actor, "automation_imported",
         detail=(f"source_project={source.id} target_project={target.id} "

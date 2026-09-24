@@ -9,7 +9,7 @@ import json
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Optional
@@ -90,6 +90,8 @@ class RuntimeManager:
         self._providers: dict[str, RuntimeProvider] = {}
         self._usage_store = None
         self._account_usage_cache: dict[str, tuple[float, RuntimeUsageSnapshot]] = {}
+        # 进行中的探测:backend.id -> (adapter, Future);并发请求共用同一次结果
+        self._account_usage_inflight: dict[str, tuple[str, Future]] = {}
         self._account_usage_guard = threading.Lock()
         self._usage_refresh_handler = None
         self._reaper_guard = threading.Lock()
@@ -100,10 +102,12 @@ class RuntimeManager:
         from .claude import ClaudeRuntimeProvider
         from .codex import CodexRuntimeProvider
         from .pi import PiRuntimeProvider
+        from .antigravity import AntigravityRuntimeProvider
         self._providers.update({
             "claude_code": ClaudeRuntimeProvider(self._builtin),
             "codex": CodexRuntimeProvider(self._builtin),
             "pi": PiRuntimeProvider(self._builtin),
+            "antigravity": AntigravityRuntimeProvider(),
         })
 
     def bind_usage_store(self, store) -> None:
@@ -134,15 +138,16 @@ class RuntimeManager:
         claude.set_wake_handler(handler, begin=begin)
 
     def set_usage_refresh_handler(self, handler) -> None:
-        """注册一次性用量刷新通知；每次 Runtime 执行结束后触发。"""
+        """注册一次性用量刷新通知；每次 Runtime 执行结束后以刚结束的 Backend id
+        调用,联动层据此只重探这一个 Runtime,不必拉起全部 CLI。"""
         self._usage_refresh_handler = handler
 
-    def _notify_usage_refresh(self) -> None:
+    def _notify_usage_refresh(self, backend_id: str) -> None:
         handler = self._usage_refresh_handler
         if handler is None:
             return
         try:
-            handler()
+            handler(backend_id)
         except Exception:
             pass
 
@@ -220,7 +225,7 @@ class RuntimeManager:
                         interrupted=prepared.cancellation_requested())
                 except Exception:
                     pass
-            self._notify_usage_refresh()
+            self._notify_usage_refresh(prepared.backend.id)
             raise
         if usage_id:
             try:
@@ -229,7 +234,7 @@ class RuntimeManager:
                     interrupted=prepared.cancellation_requested())
             except Exception:
                 pass
-        self._notify_usage_refresh()
+        self._notify_usage_refresh(prepared.backend.id)
         return result
 
     def stop(self, backend: Backend, session_key: str = "") -> int:
@@ -373,6 +378,23 @@ class RuntimeManager:
             "instances": [instance.to_dict() for instance in all_instances],
         }
 
+    @staticmethod
+    def _usage_snapshot(backend: Backend, status: str, source: str,
+                        message: str) -> RuntimeUsageSnapshot:
+        return RuntimeUsageSnapshot(
+            backend_id=backend.id, backend_name=backend.name,
+            adapter=backend.adapter, status=status, source=source, message=message)
+
+    def _probe_account_usage(self, backend: Backend,
+                             timeout: int) -> RuntimeUsageSnapshot:
+        if not backend.enabled:
+            return self._usage_snapshot(backend, "disabled", "disabled", "该 Runtime 已停用")
+        try:
+            return self.provider_for(backend).account_usage(backend, timeout)
+        except Exception:
+            return self._usage_snapshot(
+                backend, "unavailable", "runtime_provider", "账户限额探测暂时不可用")
+
     def _read_account_usage(
             self, backend: Backend, refresh: bool,
             timeout: int) -> RuntimeUsageSnapshot:
@@ -383,25 +405,30 @@ class RuntimeManager:
                     and cached[1].adapter == backend.adapter
                     and now - cached[0] < self.ACCOUNT_USAGE_CACHE_TTL):
                 return cached[1]
-        if not backend.enabled:
-            snapshot = RuntimeUsageSnapshot(
-                backend_id=backend.id, backend_name=backend.name,
-                adapter=backend.adapter, status="disabled", source="disabled",
-                message="该 Runtime 已停用",
-            )
-        else:
-            provider = self.provider_for(backend)
+            pending = self._account_usage_inflight.get(backend.id)
+            shared = pending[1] if pending and pending[0] == backend.adapter else None
+            if shared is None:
+                pending = (backend.adapter, Future())
+                self._account_usage_inflight[backend.id] = pending
+        if shared is not None:
+            # 同一 Runtime 的探测已在进行(重复进入页面、多端同时打开、任务结束联动):
+            # 共用这次结果。CLI 类探测各是一个要启动语言服务器的进程,并行只会互相
+            # 拖慢,还会按完成先后用失败快照覆盖成功快照。等待上限覆盖 provider 的重试。
             try:
-                snapshot = provider.account_usage(backend, timeout)
+                return shared.result(timeout=timeout * 2 + 5)
             except Exception:
-                snapshot = RuntimeUsageSnapshot(
-                    backend_id=backend.id, backend_name=backend.name,
-                    adapter=backend.adapter, status="unavailable",
-                    source="runtime_provider",
-                    message="账户限额探测暂时不可用",
-                )
-        with self._account_usage_guard:
-            self._account_usage_cache[backend.id] = (time.time(), snapshot)
+                return self._usage_snapshot(
+                    backend, "unavailable", "runtime_provider", "账户限额探测暂时不可用")
+        snapshot = self._usage_snapshot(
+            backend, "unavailable", "runtime_provider", "账户限额探测暂时不可用")
+        try:
+            snapshot = self._probe_account_usage(backend, timeout)
+        finally:
+            with self._account_usage_guard:
+                self._account_usage_cache[backend.id] = (time.time(), snapshot)
+                if self._account_usage_inflight.get(backend.id) is pending:
+                    del self._account_usage_inflight[backend.id]
+            pending[1].set_result(snapshot)
         return snapshot
 
     def account_usage(
@@ -413,7 +440,9 @@ class RuntimeManager:
             if self.capabilities(backend).account_usage
         ]
         if supported:
-            with ThreadPoolExecutor(max_workers=min(4, len(supported))) as executor:
+            # 每个后端一个线程:CLI 类探测各要拉起一个进程、耗时数秒,总耗时等于
+            # 最慢的一个;限制并发只会让排在后面的慢探测再等一轮。
+            with ThreadPoolExecutor(max_workers=len(supported)) as executor:
                 snapshots = list(executor.map(
                     lambda backend: self._read_account_usage(
                         backend, refresh, timeout),

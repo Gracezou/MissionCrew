@@ -54,7 +54,7 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 - **聊天协作**：顶部的项目切换器是所有页面的第一入口。在频道聊天框里直接提需求，默认交给项目主控。键入 `@` 会弹出角色选择器：只选一个角色时该角色直接执行，结果留在频道；选多个角色时平台只启动主控，由它拿着完整名单决定并行、顺序或改选。手动打出来的 `@xxx` 只是普通文字，永远不会触发角色。
 - **频道**：侧栏可创建、归档、删除频道；频道记录自己的用途和主工作目录，可以绑定真实代码仓协作。频道里有 Agent 排队或运行时，输入区提供「停止 Agent / 停止全部」。
 - **Task 看板**：Task 类似 Issue，保存标题、正文、标签（状态即 `status: 文本` 标签，另支持 `属性: 值` 高级标签）、可选的 Channel 绑定和追加式状态简报。看板列是标签表达式，也可按属性取值分组；外部列表（如 GitCode Issue）经数据源同步成同一种 Task。点击「交给 Lead 处理」就是在绑定频道里向主控发一条消息，后续完全复用聊天协作，没有独立的任务执行循环。
-- **项目设置**：维护角色（固定 runtime/model + 定位 + 能力 + 偏好）、多篇准则 Markdown、完整 Skill 包、版本化文档库和自定义面板。文档、准则和完整 Skill 包由平台用独立 Git 管理版本，可查看历史、比较和恢复；删除的内容统一进入项目回收站。
+- **项目设置**：维护角色（固定 runtime/model + 定位 + 能力 + 偏好；可开启「仅人工点名」，让该角色只有人类能 @，其他 Agent 的名册里看不到它、不能派发给它，频道历史里对其他 Agent 匿名，它自己也不参与角色间派发；主控不能开启）、多篇准则 Markdown、完整 Skill 包、版本化文档库和自定义面板。文档、准则和完整 Skill 包由平台用独立 Git 管理版本，可查看历史、比较和恢复；删除的内容统一进入项目回收站。
 - **全局设置**：维护新项目角色模板及其默认启停状态、Runtime 列表（安装状态、版本、启停开关、模型清单）和自定义模型接入。
 - **运行状态**：查看全局 Runtime 实例、调用历史，以及本机已登录 Codex、Claude、Kimi、Grok 账户的限额窗口和重置时间。角色配置可逐个开启用量联动，在额度耗尽时只自动停用已开启的角色，并在重置到点后恢复。
 
@@ -96,7 +96,7 @@ scripts/serve.sh stop       # 停止
 
 「重新检测」按下表逐个探测本机 PATH（pi 例外，见下文），一个工具一条注册记录；角色固定绑定某个 runtime 与模型。接入方式分三类：
 
-- **原生协议**：claude、codex、pi 各有专用 provider，直接对接工具自身的结构化协议，会话恢复、权限应答、推理力度都在协议内完成；
+- **原生协议**：claude、codex、pi、Antigravity 各有专用 provider，对接结构化事件、会话恢复与推理力度；工具提供双向协议时支持交互审批；
 - **ACP stdio**：CLI 作为长驻 JSON-RPC 服务挂在 stdio 上，平台自动应答其权限请求；
 - **打印模式**：通过内置命令模板传递 prompt，用各工具的 session/resume 参数恢复会话。
 
@@ -104,6 +104,7 @@ scripts/serve.sh stop       # 停止
 |---|---|---|
 | `claude` (Claude Code) | `claude_code` | 原生双向 stream-json；自带 haiku / sonnet / opus / fable 别名清单 |
 | `codex` (OpenAI Codex) | `codex` | 原生 app-server；模型清单从当前账号动态读取 |
+| `agy` (Google Antigravity CLI) | `antigravity` | 原生 headless stream-json；会话续接、模型发现与 low / medium / high 推理力度 |
 | `pi` | `pi` | 原生 RPC（vendored 安装优先，回退系统级 pi）；承接自定义 API 模型 |
 | `grok` (Grok Build) | `grok_build` | ACP stdio |
 | `copilot` (GitHub Copilot CLI) | `copilot` | ACP stdio |
@@ -114,6 +115,8 @@ scripts/serve.sh stop       # 停止
 | `opencode` | `opencode` | 打印模式 |
 | `cursor-agent` (Cursor) | `cursor` | 打印模式 |
 | `codebuddy` | `codebuddy` | 打印模式 |
+
+Antigravity 需先安装[官方 CLI](https://antigravity.google/docs/cli/getting-started/)，运行一次 `agy` 完成登录，再点「重新检测」并为角色选择 `antigravity`。无头执行支持自动批准，不支持交互审批、强制只读或禁止网络；这些策略会在启动前明确报错。
 
 协议流程、检测与升级机制、模型清单来源、新工具接入步骤见 [docs/runtimes.md](docs/runtimes.md)。
 

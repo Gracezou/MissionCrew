@@ -757,6 +757,9 @@
   .form textarea { resize: vertical; }
   .form .row { display: flex; gap: 12px; }
   .form .row > div { flex: 1; }
+  /* 标签旁带一个小动作按钮(如模型清单的重探):按基线对齐,不改标签自身的上下边距 */
+  .form .label-with-action { display: flex; align-items: baseline; gap: 4px; }
+  .form .label-with-action .icon-btn { font-size: 14px; padding: 0 5px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   /* 角色标识色:取色器与预设色板同排,高度对齐同行的文本输入框 */
   .color-field { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
@@ -822,7 +825,8 @@
   .runtime-section-head p { margin: 0; max-width: 820px; }
   .runtime-section-head > span { flex: none; padding-top: 2px; }
   .runtime-usage-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr));
-                        gap: 14px; }
+                        gap: 14px; transition: opacity .2s; }
+  .runtime-usage-grid.is-refreshing { opacity: .55; }
   .runtime-usage-loading { grid-column: 1 / -1; padding: 34px 18px; text-align: center;
                            color: var(--muted); border: 1px dashed var(--line-strong);
                            border-radius: 12px; background: var(--bg-soft); }
@@ -1080,12 +1084,13 @@
                    box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: left .18s; }
   .switch.on { background: var(--ok); }
   .switch.on::after { left: 19px; }
-  .role-usage-linkage-field { display: flex; align-items: center; justify-content: space-between;
-                              gap: 16px; padding: 10px 12px; border: 1px solid var(--line);
-                              border-radius: 8px; background: var(--bg-soft); cursor: pointer; }
-  .role-usage-linkage-field > span:first-child { display: grid; gap: 2px; }
-  .role-usage-linkage-field small { color: var(--muted); font-weight: 400; }
-  .role-usage-linkage-field .switch { flex: none; }
+  .role-toggle-field { display: flex; align-items: center; justify-content: space-between;
+                       gap: 16px; padding: 10px 12px; border: 1px solid var(--line);
+                       border-radius: 8px; background: var(--bg-soft); cursor: pointer; }
+  .role-toggle-field + .role-toggle-field { margin-top: 8px; }
+  .role-toggle-field > span:first-child { display: grid; gap: 2px; }
+  .role-toggle-field small { color: var(--muted); font-weight: 400; }
+  .role-toggle-field .switch { flex: none; }
   .role-transfer-toolbar { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
   .role-transfer-toolbar > span { flex: 1; color: var(--muted); font-size: 12.5px; }
   .role-transfer-toolbar > span.has-overwrite { color: var(--bad); }

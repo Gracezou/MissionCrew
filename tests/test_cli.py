@@ -22,7 +22,7 @@ def test_chat_send_human_bracket_mention_dispatches(seeded):
             json.loads(stored["mention_spans"])] == ["dev"]
 
 
-def test_project_add_uses_first_enabled_role_template(seeded, tmp_path):
+def test_project_add_uses_first_orchestrator_role_template(seeded, tmp_path):
     lead = seeded.get_role_template("lead")
     lead.enabled = False
     seeded.put_role_template(lead)
@@ -73,6 +73,24 @@ def test_project_add_rejects_disabled_orchestrator_on_existing_project(seeded, t
     assert "主控角色已停用" in result.output
 
 
+def test_project_add_rejects_manual_only_orchestrator_on_existing_project(
+        seeded, tmp_path):
+    original_name = seeded.get_project("webshop").name
+    dev = seeded.get_role("webshop", "dev")
+    dev.manual_only = True
+    seeded.put_role(dev)
+    project_file = tmp_path / "project.yaml"
+    project_file.write_text(yaml.safe_dump({
+        "id": "webshop", "name": "WebShop 改名", "orchestrator_role_id": "dev"}))
+
+    result = CliRunner().invoke(
+        cli.app, ["project", "add", "--file", str(project_file)])
+
+    assert result.exit_code != 0
+    assert "仅人工点名的角色不能作为主控: @dev" in result.output
+    assert seeded.get_project("webshop").name == original_name
+
+
 def test_project_add_rejects_when_all_role_templates_are_disabled(seeded, tmp_path):
     for template in seeded.list_role_templates():
         template.enabled = False
@@ -84,7 +102,7 @@ def test_project_add_rejects_when_all_role_templates_are_disabled(seeded, tmp_pa
         cli.app, ["project", "add", "--file", str(project_file)])
 
     assert result.exit_code != 0
-    assert "全部为默认停用" in result.output
+    assert "没有可作新项目主控的角色" in result.output
     assert seeded.get_project("cli-none") is None
     assert seeded.list_roles("cli-none") == []
 

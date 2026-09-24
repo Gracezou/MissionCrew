@@ -74,6 +74,21 @@ def test_table_pipe_inside_inline_code_does_not_split_cell():
     assert f"<td>git tree / Bazel <code>Directory{INLINE_COPY}</code></td>" in html
 
 
+def test_table_cell_br_tag_renders_line_break_and_other_html_stays_text():
+    html = render_markdown(
+        "| 步骤 | 说明 |\n"
+        "|---|---|\n"
+        "| 1 | 先安装<br>再启动<br/>最后验证<BR />完成 |\n"
+        "| 2 | 代码里的 `<br>` 与转义 \\<br> 保持字面，<b>加粗</b> 不放行 |\n",
+    )
+
+    assert "<td>先安装<br>再启动<br>最后验证<br>完成</td>" in html
+    assert f"<code>&lt;br&gt;{INLINE_COPY}</code>" in html
+    assert "转义 &lt;br&gt; 保持字面" in html
+    assert "&lt;b&gt;加粗&lt;/b&gt; 不放行" in html
+    assert html.count("<br>") == 3
+
+
 def test_nested_list_does_not_restart_ordered_numbering():
     html = render_markdown(
         "1. 第一步\n"
@@ -150,6 +165,36 @@ def test_code_blocks_and_inline_code_carry_copy_buttons():
     assert ".markdown-body code > .markdown-copy { visibility: hidden" in css
     assert ".markdown-body code:hover > .markdown-copy" in css
     assert ".markdown-code { position: relative" in css
+
+
+def test_backslash_escapes_render_literal_punctuation_without_breaking_links():
+    """CommonMark 反斜杠转义:标点按字面输出且不再参与标记匹配。Agent 常把 Issue 标题
+    里的 [Bug] 写成 \\[Bug\\] 放进链接文字,整条链接不能因此退化成纯文本。"""
+    html = render_markdown(
+        "已提 Issue:[#85 \\[Bug\\]: 卡片对用户没有价值](https://example.com/issues/85)(已打标签)\n\n"
+        "\\*不是强调\\* 与 \\_也不是\\_,反斜杠本身 \\\\,尖括号 \\<b\\>,"
+        "代码里的 `\\[` 原样保留,\\`不是代码\\`,非标点 C:\\Users 不变\n",
+    )
+
+    assert ('<a href="https://example.com/issues/85" target="_blank" rel="noopener noreferrer">'
+            "#85 [Bug]: 卡片对用户没有价值</a>(已打标签)") in html
+    assert "*不是强调* 与 _也不是_,反斜杠本身 \\,尖括号 &lt;b&gt;," in html
+    assert f"<code>\\[{INLINE_COPY}</code>" in html
+    assert "`不是代码`" in html and html.count("<code>") == 1
+    assert "C:\\Users 不变" in html
+    assert "<em>" not in html and "<strong>" not in html
+
+
+def test_backslash_escapes_inside_link_target_and_image_alt_are_restored():
+    """链接目标里的 \\( \\) 与图片 alt 里的转义都还原成原字符,不能把占位符写进属性。"""
+    html = render_markdown(
+        "[维基](https://example.com/wiki/Foo_\\(bar\\)) 与 "
+        "![图 \\[1\\]](https://example.com/a.png)\n",
+    )
+
+    assert '<a href="https://example.com/wiki/Foo_(bar)" target="_blank"' in html
+    assert 'alt="图 [1]"' in html
+    assert "\uE002" not in html and "\uE003" not in html
 
 
 def test_diagram_renderer_and_vendored_mermaid_are_served():

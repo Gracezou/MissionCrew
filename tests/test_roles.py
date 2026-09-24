@@ -364,9 +364,66 @@ def test_new_project_rejects_when_all_role_templates_are_disabled(client, seeded
         "id": "all-disabled", "name": "All disabled",
     })
     assert response.status_code == 400
-    assert "全部为默认停用" in response.json()["detail"]
+    assert "没有可作新项目主控的角色" in response.json()["detail"]
     assert seeded.get_project("all-disabled") is None
     assert seeded.list_roles("all-disabled") == []
+
+
+def test_new_project_orchestrator_skips_disabled_and_manual_only_templates(
+        client, seeded):
+    """默认主控要同时躲开两类模板:默认停用的、以及仅人工点名的。"""
+    lead = seeded.get_role_template("lead")
+    lead.enabled = False                  # 第一顺位:默认停用
+    seeded.put_role_template(lead)
+    dev = seeded.get_role_template("dev")
+    dev.manual_only = True                # 第二顺位:只有人类能 @,当主控没人能派活
+    seeded.put_role_template(dev)
+
+    created = client.post("/api/projects", json={
+        "id": "mixed-templates", "name": "Mixed"})
+
+    assert created.status_code == 200
+    assert created.json()["orchestrator_role_id"] == "reviewer"
+    copied = seeded.get_role("mixed-templates", "dev")
+    assert copied.manual_only is True and copied.enabled is True
+    assert seeded.get_role("mixed-templates", "lead").enabled is False
+
+    # 显式点名这两类角色都要有各自明确的拒绝理由
+    for role_id, detail in (("lead", "主控角色默认停用"),
+                            ("dev", "仅人工点名的角色不能作为主控")):
+        rejected = client.post("/api/projects", json={
+            "id": f"rejected-{role_id}", "name": "Rejected",
+            "orchestrator_role_id": role_id})
+        assert rejected.status_code == 400
+        assert detail in rejected.json()["detail"]
+        assert seeded.get_project(f"rejected-{role_id}") is None
+
+
+def test_role_template_keeps_both_enabled_and_manual_only_across_save_and_import(
+        client, seeded):
+    """两个新字段挂在同一个模板上,保存与导入都不能互相覆盖。"""
+    saved = client.post("/api/role-templates", json={
+        "id": "both-flags", "name": "两个开关", "runtime_id": "std-1",
+        "model": "pro", "enabled": False, "manual_only": True,
+    })
+    assert saved.status_code == 200
+    assert (saved.json()["enabled"], saved.json()["manual_only"]) == (False, True)
+
+    # 旧客户端只带其中一个字段时,另一个保持原值
+    partial = client.post("/api/role-templates", json={
+        "id": "both-flags", "name": "改名", "runtime_id": "std-1", "model": "pro",
+        "manual_only": True,
+    })
+    assert partial.status_code == 200
+    assert (partial.json()["enabled"], partial.json()["manual_only"]) == (False, True)
+
+    imported = client.post("/api/role-templates/import", json={
+        "roles": [{"id": "both-import", "runtime_id": "std-1", "model": "pro",
+                   "enabled": False, "manual_only": True}],
+    })
+    assert imported.status_code == 200
+    template = seeded.get_role_template("both-import")
+    assert template.enabled is False and template.manual_only is True
 
 
 def test_platform_bootstrap_skips_instead_of_failing_when_all_templates_disabled(store):
@@ -766,13 +823,19 @@ def test_global_settings_exposes_new_project_role_templates(client):
     assert "editGlobalRoleTemplate" in js
     assert "新项目中默认启用" in js
     assert "默认停用" in js
-    assert 'id="rf-enabled"' in js
+    # 开关行复用 ui.js 的 roleToggleField，与「用量联动」「仅人工点名」同一套控件
+    assert 'roleToggleField("rf-enabled"' in js
+    assert 'document.getElementById("rf-enabled")' in js
     # 全部模板默认停用是允许的中间态,但页面必须显式警示并挡住必定失败的创建
     projects_js = client.get("/assets/js/projects.js").text
     css = client.get("/assets/css/app.css").text
     assert 'id="global-role-warning"' in html and 'id="np-create"' in html
     assert ".section-warn {" in css and ".section-warn[hidden] { display: none; }" in css
-    assert "当前没有默认启用的模板，新项目无法创建" in js
+    assert "当前没有可作新项目主控的模板，新项目无法创建" in js
+    # 前端与后端 seed.first_orchestrator_role 共用同一口径:默认启用且非仅人工点名
+    ui = client.get("/assets/js/ui.js").text
+    assert "role.enabled !== false && !role.manual_only" in ui
+    assert "defaultOrchestratorTemplate()" in js and "defaultOrchestratorTemplate()" in projects_js
     assert 'document.getElementById("np-create").disabled = !defaultOrchestrator' in projects_js
 
 
@@ -815,7 +878,11 @@ def test_system_runtime_status_page_and_api_cover_all_instance_modes(
     assert 'class="channel-background-marker"' in channels
     assert 'class="channel-background-marker channel-head-marker"' in channels
     assert "function pollRuntimeStatus() {\n  renderRuntimeStatus();" in js
-    assert "if (force) refreshes.push(renderRuntimeUsage(true));" in js
+    # 进入页面复用服务端缓存;只有"立即刷新"按钮才强制重探各 Runtime,并给出反馈。
+    assert "if (force) refreshes.push(renderRuntimeUsage(refreshUsage));" in js
+    assert 'if (tab === "runtime-status") renderRuntimeStatus(true);' in router
+    assert 'onclick="renderRuntimeStatus(true, true)">立即刷新' in html
+    assert "正在重新读取账户限额…" in js
     assert "renderRuntimeUsage(force)" not in js
     assert 'data-runtime-role="${esc(r.id)}"' in router
     assert "Claude stream-json" in js and "Codex app-server" in js
@@ -918,7 +985,7 @@ def test_project_role_form_can_import_global_template(client):
     assert "activeProjRoles().filter" in sidebar
     assert "const activeProjRoles" in ui
     assert "roleUsageLinkageField" in ui
-    assert 'id="rf-usage-linkage"' in ui
+    assert "rf-usage-linkage" in ui
     assert "usage_linkage_enabled" in js
     settings_runtime = client.get("/assets/js/settings-runtime.js").text
     assert "roleUsageLinkageField(role)" in settings_runtime
@@ -962,6 +1029,53 @@ def test_backend_models_endpoint_merges_own_list_and_runtime(client, seeded, mon
     assert d["discovered"] == ["dyn/alpha", "dyn/beta"]       # runtime 动态目录
     assert d["efforts"] == {}                                 # 该工具不自报按模型档位
     assert client.get("/api/backends/ghost/models").status_code == 404
+
+
+def test_backend_models_cache_refresh_and_update_invalidation(client, seeded, monkeypatch):
+    """目录缓存 10 分钟;?refresh=true 立即重探,工具更新后缓存作废。
+
+    工具的模型目录会在 CLI 没升级时变化(grok 联网续期时从 xAI 刷新自己的
+    models_cache.json),所以角色编辑器需要一条不等缓存过期的重探入口。"""
+    from missioncrew.runtime import adapters
+    seeded.put_backend(Backend(id="kimi", name="kimi", adapter="kimi",
+                               binary_path="/usr/bin/kimi", version="0.43.1"))
+    live = {"models": ["k2"]}
+    probes = []
+
+    def fake_catalog(b, timeout=25):
+        probes.append(b.id)
+        return list(live["models"]), {}
+
+    monkeypatch.setattr(adapters, "list_runtime_model_catalog", fake_catalog)
+    assert client.get("/api/backends/kimi/models").json()["discovered"] == ["k2"]
+    live["models"] = ["k3", "k2"]                              # 厂商放出新模型
+    assert client.get("/api/backends/kimi/models").json()["discovered"] == ["k2"]   # 缓存内复用
+    refreshed = client.get("/api/backends/kimi/models?refresh=true").json()
+    assert refreshed["discovered"] == ["k3", "k2"]
+    assert probes == ["kimi", "kimi"]
+
+    # 工具更新后作废缓存:下一次普通查询就重探,不必等 10 分钟
+    live["models"] = ["k4", "k3", "k2"]
+    monkeypatch.setattr(adapters, "run_update", lambda b, timeout=600: (True, "done"))
+    monkeypatch.setattr("missioncrew.runtime.manager.shutil.which",
+                        lambda name: "/usr/bin/kimi")
+    monkeypatch.setattr(adapters, "_cli_version", lambda binary: "0.43.2")
+    assert client.post("/api/backends/kimi/update").json()["version"] == "0.43.2"
+    assert client.get("/api/backends/kimi/models").json()["discovered"] == ["k4", "k3", "k2"]
+    assert probes == ["kimi"] * 3
+
+
+def test_role_editors_offer_model_catalog_refresh(client):
+    """模型清单在页面内只复用 10 分钟,项目角色与全局模板两个编辑器都有强制重探入口。"""
+    roles = client.get("/assets/js/roles.js").text
+    settings_runtime = client.get("/assets/js/settings-runtime.js").text
+    css = client.get("/assets/css/app.css").text
+    assert "const MODEL_CATALOG_TTL_MS = 10 * 60 * 1000" in roles
+    assert 'onclick="refreshModelOptions(true)"' in roles
+    assert '"?refresh=true"' in roles
+    assert "${modelCatalogLabel()}" in roles
+    assert "${modelCatalogLabel()}" in settings_runtime
+    assert ".form .label-with-action { display: flex; align-items: baseline" in css
 
 
 def test_claude_splits_aliases_and_versioned_ids():
@@ -1217,3 +1331,46 @@ process.stdout.write(vm.runInContext(`roleCardHtml(${roleJson})`, context));
     assert "后端 &amp; Python" in html
     assert ">定位</h2>" in html and "<strong>实现</strong>" in html
     assert "<li>" in html and "<code>AGENTS.md<button" in html
+
+
+def test_manual_only_role_round_trips_and_cannot_be_orchestrator(client, seeded):
+    """仅人工点名是角色自身的开关:项目角色与全局模板都能保存;主控不能开启。"""
+    body = seeded.get_role("webshop", "expert").to_dict()
+    body["manual_only"] = True
+    assert client.post("/api/roles", json=body).status_code == 200
+    assert seeded.get_role("webshop", "expert").manual_only is True
+    overview_role = next(
+        role for role in client.get("/api/projects/webshop/overview")
+        .json()["roles"] if role["id"] == "expert")
+    assert overview_role["manual_only"] is True
+
+    lead = seeded.get_role("webshop", "lead").to_dict()
+    lead["manual_only"] = True
+    rejected = client.post("/api/roles", json=lead)
+    assert rejected.status_code == 409
+    assert "不能设为仅人工点名" in rejected.json()["detail"]
+    assert seeded.get_role("webshop", "lead").manual_only is False
+    imported = client.post("/api/roles/import", json={
+        "project_id": "webshop", "roles": [lead], "overwrite_ids": ["lead"],
+    })
+    assert imported.status_code == 409
+    assert seeded.get_role("webshop", "lead").manual_only is False
+
+    project = seeded.get_project("webshop").to_dict()
+    project["orchestrator_role_id"] = "expert"
+    selected = client.post("/api/projects", json=project)
+    assert selected.status_code == 400
+    assert "仅人工点名的角色不能作为主控" in selected.json()["detail"]
+    assert seeded.get_project("webshop").orchestrator_role_id == "lead"
+
+    template = client.get("/api/role-templates").json()[1]
+    template["manual_only"] = True
+    assert client.post("/api/role-templates", json=template).status_code == 200
+    assert seeded.get_role_template(template["id"]).manual_only is True
+
+    ui = client.get("/assets/js/ui.js").text
+    assert "roleManualOnlyField" in ui and "rf-manual-only" in ui
+    for name in ("roles.js", "settings-runtime.js", "role-card.js", "router.js"):
+        assert "manual_only" in client.get(f"/assets/js/{name}").text, name
+    assert ("!role.manual_only || role.id === selectedId"
+            in client.get("/assets/js/settings-project.js").text)

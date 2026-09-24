@@ -175,15 +175,23 @@ def project_roles_from_templates(store: Store, project_id: str) -> list[Role]:
         roles.append(Role.from_dict(data))
     # 结构性问题(runtime 缺失/停用)先报完,再校验「至少有一个默认启用的模板」;
     # 这里只做前置校验,返回值由调用方各自取,避免写完项目才发现没有可用主控。
-    first_enabled_role(roles)
+    first_orchestrator_role(roles)
     return roles
 
 
-def first_enabled_role(roles: list[Role]) -> Role:
-    """返回排序最前的已启用角色；新项目不能以停用角色作为主控。"""
-    role = next((item for item in roles if item.enabled), None)
+def first_orchestrator_role(roles: list[Role]) -> Role:
+    """返回排序最前的、能当主控的角色。
+
+    两类模板都要跳过:默认停用的(复制过去也不接任务),以及仅人工点名的
+    (只有人类能 @ 它,当主控就没人能派活)。两处都由 API/CLI 在显式指定主控时
+    各自再校验一次,这里只负责挑默认值。
+    """
+    role = next(
+        (item for item in roles if item.enabled and not item.manual_only), None)
     if role is None:
-        raise RuntimeError("全局角色模板全部为默认停用,请先启用至少一个模板作为新项目主控")
+        raise RuntimeError(
+            "全局角色模板里没有可作新项目主控的角色,"
+            "请至少让一个模板「新项目中默认启用」且不是「仅人工点名」")
     return role
 
 
@@ -212,7 +220,7 @@ def seed(store: Store) -> None:
         store.put_resource(r)
     ensure_role_templates(store)
     demo_roles = project_roles_from_templates(store, DEMO_PROJECT.id)
-    DEMO_PROJECT.orchestrator_role_id = first_enabled_role(demo_roles).id
+    DEMO_PROJECT.orchestrator_role_id = first_orchestrator_role(demo_roles).id
     store.put_project(DEMO_PROJECT)
     for role in demo_roles:
         store.put_role(role)
@@ -228,7 +236,7 @@ def ensure_default_project(store: Store) -> None:
     ensure_role_templates(store)
     try:
         roles = project_roles_from_templates(store, "default")
-        orchestrator = first_enabled_role(roles).id
+        orchestrator = first_orchestrator_role(roles).id
     except RuntimeError:
         # 模板全部默认停用、或模板绑定的 runtime 不可用时跳过自举:平台自愈不该
         # 因为用户的模板配置中间态而报错,用户显式建项目时仍会拿到明确错误。

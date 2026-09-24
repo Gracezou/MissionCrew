@@ -16,6 +16,12 @@ _LOCKS_GUARD = threading.Lock()
 
 
 def _project_lock(project_id: str) -> threading.RLock:
+    """准则库的项目锁。
+
+    虽以下划线开头，但已是给同包模块的契约：project_imports 直接按项目取这把
+    RLock 做跨项目复制，改名或改签名要同步改它。本模块不获取回收站锁，
+    因此与 recycle_bin 之间没有锁顺序约束。
+    """
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(project_id, threading.RLock())
 

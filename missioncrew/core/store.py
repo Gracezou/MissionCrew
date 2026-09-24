@@ -1097,6 +1097,24 @@ class Store:
         self._execute("DELETE FROM automation_runs WHERE automation_id=?", (id,))
         self._delete("automations", id)
 
+    def replace_automation(self, old_id: str, automation: Automation) -> None:
+        """覆盖式替换:删旧定义与旧运行记录、写新定义在同一事务里完成。
+
+        跨项目复制覆盖同名自动化时用它;分成 delete + put 两次提交的话,中途
+        失败会只留下"旧的已删、新的没写"的空档。
+        """
+        automation.updated_at = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM automation_runs WHERE automation_id=?", (old_id,))
+            self._conn.execute("DELETE FROM automations WHERE id=?", (old_id,))
+            self._conn.execute(
+                "INSERT INTO automations(id, data) VALUES(?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                (automation.id,
+                 json.dumps(automation.to_dict(), ensure_ascii=False)),
+            )
+
     def touch_automation_run_state(self, id: str, status: str) -> None:
         """只更新最近运行状态字段，不覆盖脚本内容的并发编辑。"""
         with self._lock, self._conn:

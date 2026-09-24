@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -453,6 +455,57 @@ def test_cross_project_import_item_failure_keeps_other_results_without_paths(
     assert failed.json()["results"][0]["reason"] == \
         "文件操作失败：No such file or directory"
     assert home not in failed.text
+
+
+def test_cross_project_import_copy_error_reason_hides_absolute_paths(
+        seeded, monkeypatch):
+    """shutil.Error 是 OSError 子类但 strerror/filename 为空，逐条原因不能回显
+    它的 args——里面是每个失败文件的源/目标绝对路径。"""
+    client = TestClient(create_app())
+    _create_target(client)
+    _save_source_skill(client)
+    home = os.environ["MISSIONCREW_HOME"]
+
+    def copy_error(store, project, source, **kwargs):
+        raise shutil.Error([
+            (f"{home}/projects/webshop/skills/release-tools/SKILL.md",
+             f"{home}/projects/target/skills/release-tools/SKILL.md",
+             "[Errno 13] Permission denied"),
+        ])
+
+    monkeypatch.setattr(project_imports, "import_skill_folder", copy_error)
+    response = _import(client, "skill", ["release-tools"])
+
+    assert response.status_code == 200
+    assert response.json()["results"][0] == {
+        "id": "release-tools", "status": "failed", "reason": "文件复制失败"}
+    assert home not in response.text
+
+
+def test_automation_overwrite_replaces_definition_in_one_transaction(seeded):
+    """删旧 + 写新必须同一事务：写入失败时不能留下「旧的已删、新的没写」。"""
+    old, _ = save_automation(
+        seeded, "webshop", id="nightly", script="echo old", enabled=True)
+    run_id = seeded.start_automation_run(old.id, "webshop", "manual")
+    seeded.finish_automation_run(run_id, "succeeded", exit_code=0, stdout="old")
+
+    class _Unserializable:
+        id = old.id
+        updated_at = 0.0
+
+        def to_dict(self):
+            return {"id": self.id, "script": {"不可序列化"}}
+
+    with pytest.raises(TypeError):
+        seeded.replace_automation(old.id, _Unserializable())
+    survivor = seeded.get_automation(old.id)
+    assert survivor is not None and survivor.script == "echo old"
+    assert len(seeded.list_automation_runs(old.id)) == 1
+
+    replacement = replace(old, script="echo new", enabled=False)
+    seeded.replace_automation(old.id, replacement)
+    assert seeded.get_automation(old.id).script == "echo new"
+    assert seeded.list_automation_runs(old.id) == []
 
 
 def test_cross_project_import_skill_failure_reason_only_mentions_item(seeded):

@@ -155,7 +155,7 @@ def project_add(file: Path = typer.Option(..., help="项目定义 YAML 文件"))
             raise typer.BadParameter(str(exc))
         p.orchestrator_role_id = (str(data.get("orchestrator_role_id") or "")
                                   if specified
-                                  else seed_mod.first_enabled_role(new_roles).id)
+                                  else seed_mod.first_orchestrator_role(new_roles).id)
     else:
         p.orchestrator_role_id = (str(data.get("orchestrator_role_id") or "")
                                   if specified else existing.orchestrator_role_id)
@@ -174,6 +174,9 @@ def project_add(file: Path = typer.Option(..., help="项目定义 YAML 文件"))
         if not orchestrator_role.enabled:
             raise typer.BadParameter(
                 f"主控角色默认停用，请先启用模板: @{p.orchestrator_role_id}")
+        if orchestrator_role.manual_only:
+            raise typer.BadParameter(
+                f"仅人工点名的角色不能作为主控: @{p.orchestrator_role_id}")
     store.put_project(p)
     materialize_project_skills(p, overwrite=True)
     sync_project_skill_library(store, p)
@@ -332,6 +335,8 @@ def role_list(project: Optional[str] = typer.Option(None, "-p", "--project")):
         if r.effort:
             fixed += f"/effort={r.effort}"
         state = " 状态=启用" if r.enabled else " 状态=停用"
+        if r.manual_only:
+            state += " 仅人工点名"
         traits = f" 偏好={r.preference}" if r.preference else ""
         caps = f" 能力=[{','.join(r.capabilities)}]" if r.capabilities else ""
         typer.echo(
@@ -356,6 +361,9 @@ def role_add(file: Path = typer.Option(..., help="角色定义 YAML(单个或列
             raise typer.BadParameter(f"@{r.id} 缺少有效的 project_id(角色按项目隔离)")
         if not r.enabled and project_config.orchestrator_role_id == r.id:
             raise typer.BadParameter("不能停用项目主控角色；请先为项目选择其他已启用主控")
+        if r.manual_only and project_config.orchestrator_role_id == r.id:
+            raise typer.BadParameter(
+                f"主控角色 @{r.id} 不能设为仅人工点名；请先为项目选择其他主控")
         backend = store.get_backend(r.runtime_id)
         if backend is None:
             raise typer.BadParameter(f"@{r.id} 缺少有效的 runtime_id")

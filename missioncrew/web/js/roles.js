@@ -9,7 +9,7 @@ const ROLE_FILE_FORMAT = "missioncrew.roles";
 const ROLE_FILE_VERSION = 1;
 const ROLE_FILE_FIELDS = [
   "id", "name", "description", "runtime_id", "model", "effort",
-  "usage_linkage_enabled", "capabilities", "preference", "color",
+  "usage_linkage_enabled", "manual_only", "capabilities", "preference", "color",
 ];
 let roleTransferState = null;
 
@@ -23,7 +23,7 @@ function roleTransferSource(scope) {
 function roleFileItem(role, withTemplateEnabled = false) {
   const item = Object.fromEntries(ROLE_FILE_FIELDS.map(field => {
     const fallback = field === "capabilities" ? []
-      : field === "usage_linkage_enabled" ? false : "";
+      : (field === "usage_linkage_enabled" || field === "manual_only") ? false : "";
     return [field, role[field] ?? fallback];
   }));
   if (withTemplateEnabled && typeof role.enabled === "boolean") item.enabled = role.enabled;
@@ -235,6 +235,7 @@ function renderRoleTable() {
           <b>@${esc(r.id)}</b> ${esc(r.name)}
           ${isOrchestrator ? `<span class="pill">主控</span>` : ""}
           ${r.usage_linkage_enabled ? `<span class="pill">用量联动</span>` : ""}
+          ${r.manual_only ? `<span class="pill" title="只有人类能 @ 它,其他 Agent 看不到">仅人工</span>` : ""}
           ${enabled ? "" : `<span class="pill" title="${esc(disabledReason)}">${r.usage_auto_disabled ? "用量停用" : "停用"}</span>`}</td>
       <td class="muted">${esc(r.preference || "—")}</td>
       <td>${abilityPills(r) || "—"}</td>
@@ -328,7 +329,7 @@ function editRole(id, templateId = "") {
   const r = projRoles().find(x => x.id === id) || template || {
     id: "", name: "", description: "", capabilities: [], preference: "",
     runtime_id: "", model: "", effort: "", color: "#3564d7", enabled: true,
-    usage_linkage_enabled: false };
+    usage_linkage_enabled: false, manual_only: false };
   const abilityChips = Object.entries(traitMeta.abilities).map(([k, label]) =>
     `<span class="chip ${(r.capabilities || []).includes(k) ? "on" : ""}" data-cap="${k}"
        onclick="this.classList.toggle('on')">${esc(label)}</span>`).join("");
@@ -364,12 +365,13 @@ function editRole(id, templateId = "") {
     <div class="row">
       <div><label>Runtime(定义角色时固定,必选)</label>
         <select id="rf-backend" onchange="window._editingRoleModel=null;window._editingRoleEffort=null;refreshModelOptions();refreshEffortOptions()">${backendOpts}</select></div>
-      <div><label>模型(清单来自 runtime)</label>
+      <div>${modelCatalogLabel()}
         <select id="rf-model" onchange="refreshEffortOptions()"></select></div>
       <div><label>Effort(推理力度,仅部分 runtime 支持)</label>
         <select id="rf-effort"></select></div>
     </div>
     ${roleUsageLinkageField(r)}
+    ${roleManualOnlyField(r)}
     <label>角色定位/人格(给角色本人与主控看:写清"是谁、怎么工作"的专长画像;平台原样装配、不改写,任务由 @ 消息提供)</label>
     <textarea id="rf-desc" rows="3">${esc(r.description)}</textarea>
     <label>角色偏好(给主控选人看:何时该选它的领域/风格短标签,顿号分隔,如"前端"、"只审不改";名册中与能力并列展示)</label>
@@ -390,31 +392,61 @@ function importGlobalRoleTemplate(templateId) {
 }
 
 // 每个角色必须先选 runtime;模型下拉先列工具自带清单((CLI 默认) + 稳定别名),
-// 再把 runtime 目录里剩下的带版本号型号归入「来自 runtime」,服务端缓存 10 分钟。
-const modelCatalogCache = {};   // backend id -> {configured, discovered}
+// 再把 runtime 目录里剩下的带版本号型号归入「来自 runtime」。目录由服务端向
+// 工具本体探测并缓存 10 分钟;页面内也只复用 10 分钟,单页长期不刷新时工具新上
+// 的模型仍会在下次打开编辑器时出现。等不及缓存过期(工具刚更新、厂商刚放出新
+// 模型)时,下拉旁的 ↻ 走 ?refresh=true 让服务端立即重探。
+const MODEL_CATALOG_TTL_MS = 10 * 60 * 1000;
+const modelCatalogCache = {};   // backend id -> {at, configured, discovered, efforts}
+const modelCatalogRefreshing = new Set();   // 正在强制重探的 backend id
 
-async function refreshModelOptions() {
+// 模型下拉的标签行:按钮放在 label 外面,否则点标签文字也会触发重探
+function modelCatalogLabel() {
+  return `<div class="label-with-action"><label>模型(清单来自 runtime)</label>` +
+    `<button type="button" class="icon-btn" onclick="refreshModelOptions(true)" ` +
+    `title="重新向 runtime 拉取模型清单(工具刚更新或新模型不在列表里时点这里)">↻</button></div>`;
+}
+
+function cachedModelCatalog(bid) {
+  const entry = modelCatalogCache[bid];
+  if (entry && Date.now() - entry.at <= MODEL_CATALOG_TTL_MS) return entry;
+  delete modelCatalogCache[bid];
+  return null;
+}
+
+async function refreshModelOptions(force = false) {
   const bid = document.getElementById("rf-backend").value;
   const sel = document.getElementById("rf-model");
-  const cur = window._editingRoleModel;
   if (!bid) {
     sel.innerHTML = `<option value="">先选择 runtime</option>`;
     sel.disabled = true;
     return;
   }
   sel.disabled = false;
-  let catalog = modelCatalogCache[bid];
+  let catalog = force ? null : cachedModelCatalog(bid);
   if (!catalog) {
-    sel.innerHTML = `<option value="">加载模型清单…</option>`;
+    if (force) {
+      if (modelCatalogRefreshing.has(bid)) return;   // 已在重探中,不重复起进程
+      modelCatalogRefreshing.add(bid);
+      // 下拉已经渲染过真实选项时,记住用户当前选的模型,重探后保持选中;
+      // 还停在占位项时不记(记了会把角色已存的模型冲成空值)
+      if (sel.dataset.loaded) window._editingRoleModel = sel.value;
+    }
+    delete sel.dataset.loaded;
+    sel.innerHTML = `<option value="">${force ? "重新向 runtime 拉取模型清单…" : "加载模型清单…"}</option>`;
     try {
-      catalog = await api("GET", `/api/backends/${encodeURIComponent(bid)}/models`);
-      modelCatalogCache[bid] = catalog;
+      catalog = await api("GET", `/api/backends/${encodeURIComponent(bid)}/models` +
+        (force ? "?refresh=true" : ""));
+      modelCatalogCache[bid] = { at: Date.now(), ...catalog };
     } catch (e) {   // 查询失败:退回工具自带清单
       const b = overview.backends.find(x => x.id === bid);
       catalog = { configured: b?.models || [], discovered: [] };
+    } finally {
+      modelCatalogRefreshing.delete(bid);
     }
     if (document.getElementById("rf-backend")?.value !== bid) return;  // 期间已切换
   }
+  const cur = window._editingRoleModel;
   // configured 是模型名数组;旧版接口返回过 {name,tier,cost},一并兼容
   const configured = (catalog.configured || []).map(
     m => String(typeof m === "string" ? m : (m?.name ?? "")));
@@ -432,6 +464,7 @@ async function refreshModelOptions() {
   if (cur && !configuredNames.has(cur) && !extra.includes(cur))
     opts += `<option value="${esc(cur)}" selected>${esc(cur)}(当前值)</option>`;
   sel.innerHTML = opts;
+  sel.dataset.loaded = "1";
   refreshEffortOptions();   // 档位可能按模型不同,模型清单到位后重算一次
 }
 
@@ -480,6 +513,7 @@ async function saveRole() {
     model: document.getElementById("rf-model").value,
     effort: document.getElementById("rf-effort").value,
     usage_linkage_enabled: document.getElementById("rf-usage-linkage").classList.contains("on"),
+    manual_only: document.getElementById("rf-manual-only").classList.contains("on"),
   };
   if (!body.id) { uiAlert("角色 id 不能为空"); return; }
   if (!runtime_id) { uiAlert("请为角色选择 runtime(定义时固定执行组合)"); return; }

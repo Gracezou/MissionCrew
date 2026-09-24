@@ -13,11 +13,12 @@ async function renderGlobalSettings() {
 function renderGlobalRoleTable() {
   const table = document.getElementById("global-role-table");
   if (!table) return;
-  const defaultOrchestratorId = globalRoleTemplates().find(role => role.enabled !== false)?.id;
+  const defaultOrchestratorId = defaultOrchestratorTemplate()?.id;
   const warning = document.getElementById("global-role-warning");
   if (warning) {   // 允许全部默认停用(批量重配的中间态),但必须让人看见后果
     warning.hidden = !globalRoleTemplates().length || Boolean(defaultOrchestratorId);
-    warning.textContent = "当前没有默认启用的模板，新项目无法创建；请至少把一个模板设为「新项目中默认启用」。";
+    warning.textContent = "当前没有可作新项目主控的模板，新项目无法创建；"
+      + "请至少让一个模板「新项目中默认启用」且不是「仅人工点名」。";
   }
   const rows = globalRoleTemplates().map(role => {
     const execution = role.runtime_id
@@ -31,7 +32,8 @@ function renderGlobalRoleTable() {
           <b>@${esc(role.id)}</b> ${esc(role.name)}
           ${role.id === defaultOrchestratorId ? `<span class="pill">新项目默认主控</span>` : ""}
           ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}
-          ${role.usage_linkage_enabled ? `<span class="pill">用量联动</span>` : ""}</td>
+          ${role.usage_linkage_enabled ? `<span class="pill">用量联动</span>` : ""}
+          ${role.manual_only ? `<span class="pill" title="只有人类能 @ 它,其他 Agent 看不到">仅人工</span>` : ""}</td>
       <td class="muted">${esc(role.preference || "—")}</td>
       <td>${abilityPills(role) || "—"}</td>
       <td class="muted">${execution}</td>
@@ -91,7 +93,7 @@ function editGlobalRoleTemplate(id) {
   const role = globalRoleTemplates().find(item => item.id === id) || {
     id: "", name: "", description: "", capabilities: [], preference: "",
     runtime_id: "", model: "", effort: "", color: "#3564d7",
-    usage_linkage_enabled: false, enabled: true,
+    usage_linkage_enabled: false, enabled: true, manual_only: false,
   };
   const abilityChips = Object.entries(traitMeta.abilities).map(([key, label]) =>
     `<span class="chip ${(role.capabilities || []).includes(key) ? "on" : ""}" data-cap="${key}"
@@ -113,16 +115,14 @@ function editGlobalRoleTemplate(id) {
     <div class="row">
       <div><label>Runtime(复制到新项目后固定)</label>
         <select id="rf-backend" onchange="window._editingRoleModel=null;window._editingRoleEffort=null;refreshModelOptions();refreshEffortOptions()">${backendOptions}</select></div>
-      <div><label>模型(清单来自 runtime)</label><select id="rf-model"></select></div>
+      <div>${modelCatalogLabel()}<select id="rf-model" onchange="refreshEffortOptions()"></select></div>
       <div><label>Effort(推理力度)</label><select id="rf-effort"></select></div>
     </div>
-    <label class="role-usage-linkage-field"
-      onclick="const control=this.querySelector('#rf-enabled');control.classList.toggle('on');control.setAttribute('aria-checked',String(control.classList.contains('on')))">
-      <span><b>新项目中默认启用</b><small>关闭后仍会复制到新项目，但不会接收任务，也不能作为项目主控。</small></span>
-      <span class="switch ${role.enabled !== false ? "on" : ""}" id="rf-enabled" role="switch"
-        aria-checked="${role.enabled !== false}"></span>
-    </label>
+    ${roleToggleField("rf-enabled", "新项目中默认启用",
+      "关闭后仍会复制到新项目，但不会接收任务，也不能作为项目主控。",
+      role.enabled !== false)}
     ${roleUsageLinkageField(role)}
+    ${roleManualOnlyField(role)}
     <label>角色定位/人格(给角色本人与主控看:写清"是谁、怎么工作"的专长画像;平台原样装配、不改写,任务由 @ 消息提供)</label>
     <textarea id="rf-desc" rows="3">${esc(role.description)}</textarea>
     <label>角色偏好(给主控选人看:何时该选它的领域/风格短标签,顿号分隔,如"前端"、"只审不改";名册中与能力并列展示)</label>
@@ -151,6 +151,7 @@ async function saveGlobalRoleTemplate() {
     effort: document.getElementById("rf-effort").value,
     usage_linkage_enabled: document.getElementById("rf-usage-linkage").classList.contains("on"),
     enabled: document.getElementById("rf-enabled").classList.contains("on"),
+    manual_only: document.getElementById("rf-manual-only").classList.contains("on"),
   };
   if (!body.id) { uiAlert("角色 id 不能为空"); return; }
   if (!runtimeId) { uiAlert("请为角色选择 runtime"); return; }
@@ -231,7 +232,7 @@ function updateCell(t) {
     return hint.installed
       ? `<span class="muted">已是最新 (${esc(hint.latest)})</span>`
       : `<span class="muted" title="已装版本未知,无法比对">最新版 ${esc(hint.latest)}</span>`;
-  if (t.updatable)   // 没有可靠的最新版来源(如 kimi/trae),仍提供手动更新
+  if (t.updatable)   // 没有可靠的最新版来源(如 trae),仍提供手动更新
     return btn("更新");
   return `<span class="muted" title="安装方式未知或由宿主程序托管">不支持自动更新</span>`;
 }

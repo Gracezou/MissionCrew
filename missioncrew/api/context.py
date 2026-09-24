@@ -98,8 +98,10 @@ class ApiContext:
         ctx.automation_scheduler = AutomationScheduler(store, ctx.automations)
         ctx.role_usage_linkage = RoleUsageLinkage(
             store,
-            lambda refresh=True: runtime_manager.account_usage(
-                store.list_backends(), refresh=refresh),
+            lambda refresh=True, backend_ids=None: runtime_manager.account_usage(
+                [backend for backend in store.list_backends()
+                 if backend_ids is None or backend.id in backend_ids],
+                refresh=refresh),
         )
         return ctx
 
@@ -114,6 +116,11 @@ class ApiContext:
         with self.model_catalog_guard:
             self.model_catalog_cache[backend.id] = (time.time(), models, efforts)
         return models, efforts
+
+    def forget_model_catalog(self, backend_id: str) -> None:
+        """工具更新或重新检测到二进制/版本变化后丢弃目录缓存,下次查询重探。"""
+        with self.model_catalog_guard:
+            self.model_catalog_cache.pop(backend_id, None)
 
     def discovered_models(self, backend, refresh: bool = False) -> list[str]:
         return self.discovered_catalog(backend, refresh=refresh)[0]

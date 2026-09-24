@@ -84,7 +84,7 @@ def test_project_add_rejects_when_all_role_templates_are_disabled(seeded, tmp_pa
         cli.app, ["project", "add", "--file", str(project_file)])
 
     assert result.exit_code != 0
-    assert "全部为默认停用" in result.output
+    assert "没有可作新项目主控的角色" in result.output
     assert seeded.get_project("cli-none") is None
     assert seeded.list_roles("cli-none") == []
 

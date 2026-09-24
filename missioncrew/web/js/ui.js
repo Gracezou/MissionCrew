@@ -73,14 +73,26 @@ function roleDisabledReason(role) {
   return `账户用量已耗尽，角色由用量联动自动停用${suffix}`;
 }
 
-function roleUsageLinkageField(role) {
-  const enabled = role?.usage_linkage_enabled === true;
-  return `<label class="role-usage-linkage-field"
-    onclick="const control=this.querySelector('#rf-usage-linkage');control.classList.toggle('on');control.setAttribute('aria-checked',String(control.classList.contains('on')))">
-    <span><b>账户用量联动</b><small>仅当该角色直接消耗所选 Runtime 的账户限额时开启；使用第三方 LLM API 时保持关闭。</small></span>
-    <span class="switch ${enabled ? "on" : ""}" id="rf-usage-linkage" role="switch"
+/* 角色表单里的开关行:整行可点,开关状态用 .on 表示,保存时读 classList */
+function roleToggleField(id, title, hint, enabled) {
+  return `<label class="role-toggle-field"
+    onclick="const control=this.querySelector('#${id}');control.classList.toggle('on');control.setAttribute('aria-checked',String(control.classList.contains('on')))">
+    <span><b>${title}</b><small>${hint}</small></span>
+    <span class="switch ${enabled ? "on" : ""}" id="${id}" role="switch"
       aria-checked="${enabled}"></span>
   </label>`;
+}
+
+function roleUsageLinkageField(role) {
+  return roleToggleField("rf-usage-linkage", "账户用量联动",
+    "仅当该角色直接消耗所选 Runtime 的账户限额时开启；使用第三方 LLM API 时保持关闭。",
+    role?.usage_linkage_enabled === true);
+}
+
+function roleManualOnlyField(role) {
+  return roleToggleField("rf-manual-only", "仅人工点名",
+    "开启后只有人类能 @ 它：其他 Agent 的角色名册里没有它、不能派发给它，频道历史里对其他 Agent 匿名；它自己也不参与角色间派发，结果只留在频道。主控不能开启。",
+    role?.manual_only === true);
 }
 
 /* ---- 角色标识色:原生取色器 + 预设色板(与内置角色模板同色系) ---- */
@@ -252,6 +264,10 @@ let tasksScopeKey = null;
 const projRoles = () => overview.roles.filter(r => r.project_id === currentProject);
 const activeProjRoles = () => projRoles().filter(role => role.enabled !== false);
 const globalRoleTemplates = () => overview.role_templates || [];
+// 新项目默认主控:排序最前、既在新项目中默认启用又不是仅人工点名的模板。
+// 与后端 seed.first_orchestrator_role 同口径,两处判断不要各写各的。
+const defaultOrchestratorTemplate = () =>
+  globalRoleTemplates().find(role => role.enabled !== false && !role.manual_only);
 const channelIsGeneral = channel => channel.id === "general" || channel.id.endsWith(":general");
 const channelIsContent = channel => Boolean(channel.content_kind && channel.content_key);
 const channelActivity = channel => Number(channel.last_message_at || channel.created_at || 0);

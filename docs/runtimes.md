@@ -6,7 +6,7 @@ Runtime 指本机安装的 Agent CLI(代码中的 `Backend`)。它是**全局资
 
 ## 支持的工具矩阵
 
-检测表 `KNOWN_CLIS` 定义了支持的 12 个本地 CLI(另有 `mock` 适配器用于测试/演示):
+检测表 `KNOWN_CLIS` 定义了支持的 13 个本地 CLI(另有 `mock` 适配器用于测试/演示):
 
 | 二进制 | adapter | 接入方式 | 升级方式 |
 |---|---|---|---|
@@ -17,6 +17,7 @@ Runtime 指本机安装的 Agent CLI(代码中的 `Backend`)。它是**全局资
 | `copilot` | `copilot` | ACP stdio | npm(`@github/copilot`) |
 | `cursor-agent` | `cursor` | 打印模式 CLI | `cursor-agent update` |
 | `codebuddy` | `codebuddy` | 打印模式 CLI | npm(`@tencent-ai/codebuddy-code`) |
+| `agy` | `antigravity` | 原生 headless stream-json | `agy update`(不做最新版比对) |
 | `pi` | `pi` | 原生 RPC(vendored 优先,回退系统 PATH) | vendored:npm(`@mariozechner/pi-coding-agent`,仅写平台 vendor 目录);brew:`brew upgrade pi-coding-agent`;其他系统级安装不代管 |
 | `kimi` | `kimi` | ACP stdio | `kimi upgrade`(不做最新版比对) |
 | `kiro-cli` | `kiro` | ACP stdio | 不支持自动更新 |
@@ -60,24 +61,25 @@ Runtime 指本机安装的 Agent CLI(代码中的 `Backend`)。它是**全局资
 
 ### 账户用量与限额
 
-运行状态页顶部的「账户用量」来自 `GET /api/runtime/usage`，目前支持 Codex、Claude、Kimi 和 Grok。这里的“用量”是本机 CLI 当前登录账户的订阅或信用额度窗口，不是 MissionCrew 自己估算的调用成本，也不是下方 SQLite 中的调用历史。所有 provider 都把原始结果转换为 `RuntimeUsageSnapshot`：每个窗口只包含名称、已用百分比、剩余百分比、窗口时长和重置时间，另可附带套餐名与余额、并发上限等非敏感指标。页面用进度条主体显示额度使用比例，用下方三角显示根据窗口时长和重置时间计算出的时间进度；补充指标紧跟 Runtime 标题显示，悬浮窗口可查看完整额度、周期进度与重置时间。
+运行状态页顶部的「账户用量」来自 `GET /api/runtime/usage`，目前支持 Codex、Claude、Kimi、Grok 和 Antigravity。这里的“用量”是本机 CLI 当前登录账户的订阅或信用额度窗口，不是 MissionCrew 自己估算的调用成本，也不是下方 SQLite 中的调用历史。所有 provider 都把原始结果转换为 `RuntimeUsageSnapshot`：每个窗口只包含名称、已用百分比、剩余百分比、窗口时长和重置时间，另可附带套餐名与余额、并发上限等非敏感指标。页面用进度条主体显示额度使用比例，用下方三角显示根据窗口时长和重置时间计算出的时间进度；补充指标紧跟 Runtime 标题显示，悬浮窗口可查看完整额度、周期进度与重置时间。
 
-`RuntimeManager.account_usage()` 并行探测支持该能力的 Runtime，并在服务内按 backend 缓存 60 秒。账户用量在进入运行状态页或点击“立即刷新”时读取；存在至少一个已开启用量联动的项目角色时，Runtime 任务结束也会触发一次读取。页面停留期间的 10 秒常规轮询只更新 Runtime 状态和调用历史，不请求账户用量，也没有周期性账户探测线程。任务结束事件只唤醒一次刷新，短时间内连续完成的事件会合并；没有联动角色时直接忽略该事件。探测失败只让对应卡片显示“需要登录”或“暂不可用”，不会影响运行状态、聊天执行或其他 Runtime 的限额。限额快照只保存在内存，不写入 SQLite；API 不返回 access token、refresh token、用户标识、凭据路径或上游错误正文。
+`RuntimeManager.account_usage()` 并行探测支持该能力的 Runtime（每个 backend 一个线程，总耗时等于最慢的一个），并在服务内按 backend 缓存 60 秒；同一 Runtime 的探测进行中时，并发到达的请求（重复进入页面、多端同时打开、任务结束联动）共用这一次结果，不会再拉起第二个进程互相拖慢、再按完成先后覆盖缓存。进入运行状态页只读取服务内缓存（过期才重探），点击“立即刷新”才强制重探全部 Runtime；Runtime 任务结束时，若有已开启用量联动的角色正在使用该 Runtime，只重探这一个 Runtime，不拉起其他 CLI。页面停留期间的 10 秒常规轮询只更新 Runtime 状态和调用历史，不请求账户用量，也没有周期性账户探测线程。任务结束事件只唤醒一次刷新，短时间内连续完成的事件会合并；没有联动角色时直接忽略该事件。探测失败只让对应卡片显示“需要登录”或“暂不可用”，不会影响运行状态、聊天执行或其他 Runtime 的限额。限额快照只保存在内存，不写入 SQLite；API 不返回 access token、refresh token、用户标识、凭据路径或上游错误正文。
 
 用量联动是 Role 自身默认关闭的 `usage_linkage_enabled` 开关，不是 Runtime 或系统级开关。只有显式开启的角色才会在适用窗口达到 100% 时自动停用；同一 Runtime 下使用第三方 LLM API 或不希望跟随当前账户额度的角色保持关闭，不受其他角色影响。全局角色模板也保存该字段，复制到新项目后成为各项目角色的初始值，之后仍可逐个修改。
 
 自动停用归因与重置时间单独保存在 SQLite，人工已经停用的角色不会被联动接管。已知 `resets_at` 到达时，后台只执行本地计时恢复，不探测账户；没有重置时间的窗口则在下次任务结束或页面刷新检测到额度可用时恢复。关闭某个角色的联动会立即恢复仍由该机制停用的该角色；改绑 Runtime 或模型同样清除旧执行组合的自动停用归因。人工启停会清除旧的自动归因，因此计时器不会误启用后来被人工停用的角色。
 
-四种 Runtime 的读取机制如下：
+五种 Runtime 的读取机制如下：
 
 | Runtime | 限额来源 | 本机登录态与刷新 | 统一字段映射 |
 |---|---|---|---|
 | Codex | 启动已安装的 `codex app-server`，以 `capabilities.experimentalApi=true` 完成 `initialize/initialized`，再调用官方 `account/rateLimits/read` | app-server 自己读取 Codex CLI 当前账户；MissionCrew 不直接读取 Codex 凭据 | `rateLimitsByLimitId` 下每个 limit id 的 `primary` / `secondary` 桶映射为独立窗口；读取 `usedPercent`、`windowDurationMins`、`resetsAt`，并显示 `planType` 与非敏感 credits 余额。协议字段见 [Codex App Server 文档](https://developers.openai.com/codex/app-server/) |
-| Claude | 执行 `claude -p "/usage" --output-format json`，只解析 JSON `result` 中形如 `Current week …: 53% used · resets …` 的 `/usage` 文本 | Claude Code 命令自己使用当前登录态；该命令不启动模型推理。MissionCrew 不读取 Claude 凭据 | `Current session` 映射为 5 小时窗口，`Current week (all models)` 与模型专项周限额映射为周窗口。角色联动中，会话窗口约束全部 Claude 角色；普通周窗口只约束非 Fable 角色，`Current week (Fable)` 只约束模型名含 Fable（兼容 Fabel 拼写）的角色。重置时间可能省略年份或分钟，解析时补当前年份并处理跨年 |
+| Claude | 执行 `claude -p "/usage" --output-format json --strict-mcp-config --mcp-config '{"mcpServers":{}}'`（空 MCP 配置避免按 `$HOME` 全局配置拉起 MCP 服务，探测时间减半；`--bare` 会让 `/usage` 失效，不能用），只解析 JSON `result` 中形如 `Current week …: 53% used · resets …` 的 `/usage` 文本 | Claude Code 命令自己使用当前登录态；该命令不启动模型推理。MissionCrew 不读取 Claude 凭据 | `Current session` 映射为 5 小时窗口，`Current week (all models)` 与模型专项周限额映射为周窗口。角色联动中，会话窗口约束全部 Claude 角色；普通周窗口只约束非 Fable 角色，`Current week (Fable)` 只约束模型名含 Fable（兼容 Fabel 拼写）的角色。重置时间可能省略年份或分钟，解析时补当前年份并处理跨年 |
+| Antigravity | 执行 `agy -p "/usage" --output-format json`，解析 `command.data.groups[].buckets[]`，不启动推理或创建 conversation。CLI 每次都先启动语言服务器、静默登录并拉取实验配置，正常也要 4～9 秒才执行到 `/usage`，因此超时或非登录类失败会换新进程自动重试一次 | CLI 自己读取和刷新当前登录态；MissionCrew 不读取凭据 | `remaining_fraction` 换算为已用百分比，`reset_time` 映射重置时间；`window=5h` 映射 5 小时窗口，`window=weekly` 映射 7 天窗口。Gemini 与 Claude/GPT 分池显示，每组内「5 小时」排在「本周」上方。角色联动仅对明确绑定 Gemini / Claude / GPT 型号的角色应用对应的 `gemini-5h` / `gemini-weekly` 或 `3p-5h` / `3p-weekly` 桶；默认或未知模型不猜所属池。仍有正余额时不会因舍入显示为 100% 而误停角色。协议入口见 [Antigravity /usage 文档](https://antigravity.google/docs/cli/commands/usage/) |
 | Kimi | 对 Kimi managed provider 的 `${base_url}/usages` 发起只读 GET；默认 `base_url=https://api.kimi.com/coding/v1`，支持 `KIMI_CODE_BASE_URL` 与 `~/.kimi-code/config.toml` 的 `providers."managed:kimi-code".base_url` | 默认从 `$KIMI_CODE_HOME/credentials/kimi-code.json`（未设置时 `$KIMI_CODE_HOME=~/.kimi-code`）读取 OAuth token；只接受无 group/other 权限的凭据文件。access token 过期时，按 Kimi CLI 相同的 `~/.kimi-code/oauth/kimi-code.lock` 跨进程锁约定，通过 `$KIMI_CODE_OAUTH_HOST/api/oauth/token` 刷新并以 `0600` 原子替换凭据，避免 refresh token 轮换竞争 | 顶层 `usage` 映射为周限额，`limits[].detail` 映射为短窗口；用 `limit`、`used` 或 `remaining` 计算百分比，用 `window.duration/timeUnit` 识别 5 小时等窗口，读取 `resetTime`。可显示 membership level、并发上限和 Booster 余额 |
 | Grok | 使用 Grok CLI 当前的 chat proxy base URL，请求 `${GROK_CLI_CHAT_PROXY_BASE_URL:-https://cli-chat-proxy.grok.com/v1}/billing?format=credits`，请求头带 `x-grok-client-mode: grok-build` | 从 `${GROK_AUTH_FILE:-~/.grok/auth.json}` 选择 `expires_at`/`create_time` 最新的 Bearer token（不在本地判断过期，过期由 401 刷新路径处理）；只接受无 group/other 权限的凭据文件。401 时执行不推理的 `grok models`，让 Grok CLI 按自身流程刷新登录态，再重新读取一次 | `config.creditUsagePercent` 和 `config.currentPeriod` 映射为当前额度窗口；Grok 的 protobuf JSON 在新周期用量为 0 时可能省略 `creditUsagePercent`，此时只有在周期起止时间均有效时才按 0% 处理。套餐兼容读取顶层或 `config` 中的 `subscriptionTier`；另显示 prepaid balance、on-demand used/cap 与 `productUsage` 分布 |
 
-Codex 使用公开的 app-server 账户接口，是四者中最稳定的结构化契约。Claude 官方提供 `/usage`，但当前 CLI 只通过人类可读文本返回，因此解析器对文案变化采用“无法识别即暂不可用”，不会猜测百分比。Kimi 的 `/usages` 与 OAuth 协议来自 CLI 自带 managed-provider 实现。Grok 的 billing 路径由 Grok CLI 内部使用，并不是 ACP v1 的公开方法；上游若变更路径或响应结构，对应卡片会安全降级，聊天 Runtime 仍可继续工作。
+Codex 使用公开的 app-server 账户接口；Antigravity 的 CLI /usage 提供结构化额度数据，不能把顶层 `usage` 的会话 token 统计当成账户限额。Claude 官方提供 `/usage`，但当前 CLI 只通过人类可读文本返回，因此解析器对文案变化采用“无法识别即暂不可用”，不会猜测百分比。Kimi 的 `/usages` 与 OAuth 协议来自 CLI 自带 managed-provider 实现。Grok 的 billing 路径由 Grok CLI 内部使用，并不是 ACP v1 的公开方法；上游若变更路径或响应结构，对应卡片会安全降级，聊天 Runtime 仍可继续工作。
 
 凭据读取遵循最小权限：只读当前服务用户的 CLI 登录文件，只把 token 放进目标域名的 `Authorization` 请求头；不会写日志、进入异常消息、返回前端或持久化到数据库。Kimi OAuth 刷新是唯一会直接更新凭据文件的路径，更新采用同目录临时文件、`fsync`、原子替换和 `0600` 权限；Grok 刷新完全委托给 `grok models`。若凭据不存在、JSON 损坏或权限比 `0600` 更宽，MissionCrew 不使用它，并提示需要登录。
 
@@ -102,6 +104,7 @@ Codex 使用公开的 app-server 账户接口，是四者中最稳定的结构�
 | GitHub Copilot / `copilot` | 启动 `copilot --acp` serve 进程并调用 `session/new` | 服务存活时长驻复用；重启后 `session/load` 恢复(会回放历史,协议层在 load 后才 begin_turn,回放不进本轮回复) | ACP 返回 ID；一个 `channel::role` 对应一个长驻进程，空闲 30 分钟回收 |
 | Cursor / `cursor` | 使用 `--output-format json` 启动，并从 JSON 结果捕获 session/chat id | 新进程使用 `--resume <id>` | Runtime 返回 ID；每轮一个 CLI 进程。未捕获 ID 时下一轮回退恢复输入 |
 | CodeBuddy / `codebuddy` | MissionCrew 生成 UUID，通过 `--session-id <id>` 启动 | 新进程使用 `--resume <id>` | 固定 ID；每轮一个 CLI 进程 |
+| Antigravity / `antigravity` | `agy -p` 输出 `init.conversation_id` 时保存原生 ID | 每轮新进程用 `--conversation <id>` 续接；恢复后沿用公共上下文增量注入 | 一轮一个进程；缺失会话或返回 ID 不匹配时本轮失败并清除旧 ID，下一次重试才新建 |
 | Pi / `pi` | 启动 `pi --mode rpc` 长驻进程，首轮回合后从 `get_state` 保存会话文件路径 | 服务存活时同一进程直接发下一条 `prompt`；进程或服务重启后以 `--session <file>` 恢复 | SQLite 保存会话 JSONL 绝对路径(位于 `MC_HOME/pi/sessions/`);一个 `channel::role` 对应一个长驻进程，空闲 30 分钟回收 |
 | Kimi / `kimi` | 启动 ACP serve 进程并调用 `session/new` | 服务存活时直接在同一进程、同一 `sessionId` 调用 `session/prompt`(模型与 effort 每轮经 `session/set_model`/`session/set_config_option` 在会话内对齐,改档位不重启进程)；MissionCrew 重启后仅在 Runtime 声明 `loadSession` 时调用 `session/load` | ACP 返回 ID；一个 `channel::role` 对应一个长驻进程，空闲 30 分钟回收 |
 | Kiro / `kiro` | 同 Kimi：ACP `session/new` | 同 Kimi：长驻复用；重启后能力门控 `session/load` | ACP 返回 ID；一个 `channel::role` 对应一个长驻进程，空闲 30 分钟回收 |
@@ -128,6 +131,16 @@ Claude 原生后台 Agent 不会被禁用。provider 直接消费 stream-json �
 默认 Codex provider 不再执行 `codex exec`，而是为每个 `channel::role` 启动官方 `codex app-server`，使用省略 `jsonrpc` 字段的 JSONL 双向协议。连接先完成 `initialize/initialized`，再调用 `thread/start|thread/resume` 和 `turn/start`；agent message delta、reasoning delta、command、file change、plan、usage 和 turn completion 通知分别映射到聊天过程事件。
 
 每轮结构化传入 `cwd`、`model`、`effort`、`runtimeWorkspaceRoots`、`approvalPolicy` 和 `sandboxPolicy`。`workspaceWrite` 的 `writableRoots` 来自统一 `RuntimePolicy.writable_paths`；网络默认放行（Agent Tool 的回环 API 与 git 操作都依赖网络，禁网只会把每次访问变成沙箱失败加审批升级重试），仅 `RuntimePermissions.network=deny` 时关闭。统一策略在 manager `_prepare` 阶段对 `workspace-write` 模式追加系统临时目录（`/tmp` 等，救隐式使用它们的工具链）和 Runtime 工具自有目录（`CliSpec.private_dirs` 声明的配置/Skill/记忆位置，如 `~/.codex`、`~/.claude`）进入可写根；`read-only` 与 `full-access` 不改写。工具自有目录同时经 `runtime_manager.private_dirs` 进入聊天上下文的授权目录清单。模型目录直接调用 app-server `model/list`，失败时才退回旧的 CLI 发现路径。
+
+### Antigravity headless stream-json
+
+使用官方 `agy` CLI，先交互登录一次。`runtime/antigravity.py` 负责每轮启动、解析 `init` / `step_update` / `result` 与进程组清理；声明模块只负责检测、`agy models` 与 `agy update`。模型、effort 与额外授权目录分别使用 `--model`、`--effort`、重复的 `--add-dir` 传入。工具事件与回复直接进入统一事件流；`result.usage` 是会话累计量，映射到 `usage/v1.total`，本轮 `turn` 从各完成步骤的 usage 汇总。`result.status` / `result.error` 同样取自会话存储状态而非本轮：续接的会话会原样带回上一轮失败留下的 `ERROR` 与错误文案，本轮成功也不清除（agy 1.2.4 实测，曾把一次限额报错重复贴到之后每一轮并吞掉正常回复）。因此本轮成败只看 CLI 的本轮信号——stderr 的 `error:` 行、非零退出码、缺少 `result` 或空 `response`，判定失败时才采用 `result.error` 作为原因。
+
+`approval=auto` 使用 `--dangerously-skip-permissions`，`workspace-write` 同时启用 CLI 原生 `--sandbox`，额外目录加入 workspace；`full-access` 显式关闭 sandbox。实际边界仍取决于 Antigravity 的本机权限配置。CLI 无逐工具审批响应协议，`--mode plan` 仅添加规划指令，不保证只读，因此 `prompt` / `deny` 审批、`read-only` 文件系统和 `network=deny` 在启动前报错，不降级执行；能力声明不提供交互审批或用户输入。
+
+成功必须同时满足进程退出码为 0、`result.status=SUCCESS`、回复非空且无拒绝操作。缺失终态、错误状态、`denied_actions` 或 stderr 的 print timeout 提示都会失败，即使 CLI 把部分输出标记为成功。`--print-timeout 0s` 会立即返回而非禁用超时；平台无截止时间时传接近 Go duration 上限的值，并由停止操作管理进程，显式超时则传本轮截止时长。停止会清理整个进程组，保留已在 init 保存的 conversation ID；不保留轮后后台进程。
+
+协议说明见 [Antigravity headless 文档](https://antigravity.google/docs/cli/headless/)；本地已验证 CLI 1.2.4。
 
 ### pi RPC 与裸 API 接入
 
@@ -187,6 +200,7 @@ initialize → session/new|session/load → [session/set_model] → session/prom
 ```
 
 - 回复文本来自 `session/update` 通知中的 `agent_message_chunk`,拼接为最终输出;
+- `session/load` 应答前的通知属于历史回放（Kimi 不一定带 `isReplay` 标记），只用于 Runtime 恢复上下文，不写进当前运行的正文、思考、工具或后台唤醒事件；收到 load 成功/失败应答后按协议消息顺序恢复实时通知，写入失败/超时也解除隔离。显式 `isReplay` 通知始终过滤；
 - Agent 反向发来的 `session/request_permission` 必须应答,否则 Agent 阻塞到内部超时、任务假死。平台无头运行,自动从 Agent 提供的选项里挑安全项:单次允许 > 会话允许 > 单次拒绝;都没有时返回协议错误(不能回 cancelled,那会取消整轮);
 - 其余未知的 agent→client 请求返回空结果,避免阻塞;
 - 整轮共享一个截止时间,进程 EOF 时让所有等待方立刻失败,不悬挂。
@@ -230,8 +244,9 @@ Agent Tool 公共区块列出当前角色的动作 scope，并注入 `MISSIONCRE
 角色编辑器的模型下拉合并两个来源:
 
 1. **工具自带清单**(`Backend.models`):只有模型名的有序列表,`""` 表示 CLI 默认、排在最前。检测时按 `KNOWN_MODELS` 刷新,pi 改从平台 `models.json` 读取并在 `PUT /api/model-providers` 后同步刷新;两者都**不可编辑**——`POST /api/backends` 不接受 `models` 字段。平台不跟踪单个模型的档位与成本,配额一律按工具级 `cost_per_run` 扣减。
-2. **runtime 动态发现**(`list_runtime_models`,服务端缓存 10 分钟):
+2. **runtime 动态发现**(`list_runtime_models`,服务端缓存 10 分钟,页面内同样只复用 10 分钟;角色编辑器模型下拉旁的 ↻ 经 `GET /api/backends/{id}/models?refresh=true` 强制重探,工具更新或重新检测到二进制/版本变化时服务端缓存作废——工具自己的模型目录也可能在 CLI 没升级时变化,例如 grok 会在联网续期时从 xAI 刷新 `~/.grok/models_cache.json`,新模型只有重探后才进下拉):
    - codex:默认通过 `codex app-server` 的 `model/list` 分页读取当前账号可用目录；协议启动失败时退回 `codex debug models --bundled`；
+   - antigravity:`agy models` 返回制表符分隔的模型 slug 与显示名，平台只保留 slug；执行使用 `--model`，空值沿用 CLI 默认；
    - opencode:`opencode models`(行式 `provider/model` 目录,过滤日志噪声行);
    - ACP 工具:一次性会话,从 `session/new` 响应解析模型目录——kimi 形态是 `configOptions` 中 `category=model` 的 select 选项;trae 形态是 `models.availableModels`(`{modelId,...}` 列表,含 `currentModelId`,与 Multica 的解析对齐),同时兼容 `available_models`/`available` 与裸数组。Grok 不读取本地凭据的过期时间；首次探测为空或只返回已知的单模型兜底 `grok-4.5` 时,独立重启 CLI 再探测一次,第二次结果无论是否仍为 4.5 都直接采用,不会无限重试;
    - claude:CLI 无枚举命令(`claude` 无 `models` 子命令,`--model` 传错值也不枚举),返回静态目录 `CLAUDE_MODEL_CATALOG`——只列 `--model` 接受的具体型号,按系列与新旧排列;稳定别名在工具自带清单里,不重复出现在这一组;
@@ -253,13 +268,14 @@ Agent Tool 公共区块列出当前角色的动作 scope，并注入 `MISSIONCRE
 
 ## Effort(推理力度)
 
-部分工具支持按次指定推理力度。档位有两个来源:工具自报的**按模型**档位优先,拿不到时回退到各 provider 声明的静态兜底档位。静态声明随 provider 走(`RuntimeProvider.effort_catalog()`):claude/codex/pi 在各自 provider 类里声明,内置 CLI/ACP 执行器负责的 adapter(grok、copilot、kimi、mock)集中在 `adapters.EFFORT_SUPPORT`;`RuntimeManager.effort_catalog()` 把所有声明合并成 `/api/traits` 用的全量目录,注册自定义 provider 即接管对应 adapter 的档位:
+部分工具支持按次指定推理力度。档位有两个来源:工具自报的**按模型**档位优先,拿不到时回退到各 provider 声明的静态兜底档位。静态声明随 provider 走(`RuntimeProvider.effort_catalog()`):claude/codex/pi/antigravity 在各自 provider 类里声明,内置 CLI/ACP 执行器负责的 adapter(grok、copilot、kimi、mock)集中在 `adapters.EFFORT_SUPPORT`;`RuntimeManager.effort_catalog()` 把所有声明合并成 `/api/traits` 用的全量目录,注册自定义 provider 即接管对应 adapter 的档位:
 
 - claude:原生 `--effort` 标志,档位 low/medium/high/xhigh/max;
 - codex:原生 `turn/start.effort`,档位 minimal/low/medium/high/xhigh/max/ultra(具体模型未必支持全部档位,越界时 app-server 自行报错并照常回流到频道);
 - grok:ACP serve 命令上的 `grok agent --reasoning-effort`,静态兜底档位 low/medium/high/xhigh,实际档位按模型动态发现(见下);
 - copilot:ACP serve 命令上的 `--effort`,档位 none/minimal/low/medium/high/xhigh/max(模型目录不自报按模型档位,不支持的模型由 copilot 自行忽略);
 - kimi:没有命令行档位,走 ACP 标准的会话配置项——`session/new`/`session/load` 应答的 `configOptions` 里 category=`thought_level` 的 `thinking` 选项,每轮 prompt 前经 `session/set_config_option` 在存活会话内切换,改档位不重启长驻进程;静态兜底档位 low/high/max(K3),实际档位按模型动态发现(K2.7 系列只有 on/high,见下);越界档位 kimi 报错(`-32602 Unknown thinking value`)并作为本轮失败回流到频道;
+- antigravity:原生 `--effort`，档位 low/medium/high；
 - pi:映射为 thinking level(`--thinking`/`set_thinking_level`),档位 off/minimal/low/medium/high/xhigh;
 - mock:low/medium/high,仅供测试/演示走通链路;
 - 其余工具不支持:角色编辑器的 effort 下拉禁用,API 对非空 effort 直接 400。
@@ -286,7 +302,8 @@ grok/copilot 的 effort 进的是 ACP serve 命令，改档位会改变 `acp.py`
 
 - **npm 托管优先**:二进制 realpath 落在 `node_modules/` 下才认定为 npm 托管,此时检查(查询 npm registry `latest`)与更新(`npm install -g <pkg>@latest`)走同一渠道,避免自更新器把新版本装到别处、npm 里的旧副本继续占着 PATH;
 - **非 npm 安装**用工具自带的更新子命令(`claude update`、`opencode upgrade` 等),自更新器了解自己的安装方式;
-- copilot 常由 VS Code 扩展托管,非 npm 安装时不提供更新;kimi 的 PyPI 同名包与独立安装版版本序列对不上,kimi/trae 只提供自更新按钮、不做最新版比对。
+- kimi 的当前 Kimi Code 原生版与 npm 版均从 `@moonshot-ai/kimi-code` 查询最新版,不使用旧 Python `kimi-cli` 的 PyPI 版本;原生安装执行 `kimi upgrade --yes`,跳过服务端无交互 stdin 时的确认提示,npm 安装仍按上面的 npm 托管规则更新。
+- copilot 常由 VS Code 扩展托管,非 npm 安装时不提供更新;trae 只提供自更新按钮、不做最新版比对。
 
 约束:更新命令是固定白名单,不拼接用户输入;同一 runtime 的更新持锁互斥(并发请求 409);更新期间该 runtime 不派发聊天执行,避免 Agent 跑在半更新的二进制上;版本比较只认语义版本数字段。
 

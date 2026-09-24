@@ -31,7 +31,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if is_new:
             try:
                 new_roles = seed_mod.project_roles_from_templates(store, body.id)
-                default_orchestrator = seed_mod.first_enabled_role(new_roles).id
+                default_orchestrator = seed_mod.first_orchestrator_role(new_roles).id
             except RuntimeError as exc:
                 raise HTTPException(400, str(exc))
         # None = 保留现值(新项目取首个已启用模板);空字符串 = 无主控模式
@@ -40,6 +40,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                             else default_orchestrator)
         else:
             orchestrator = body.orchestrator_role_id.strip()
+        orchestrator_role = None
         if orchestrator and existing:
             orchestrator_role = store.get_role(body.id, orchestrator)
             if orchestrator_role is None:
@@ -53,6 +54,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 raise HTTPException(400, f"主控角色不属于全局角色模板: @{orchestrator}")
             if not orchestrator_role.enabled:
                 raise HTTPException(400, f"主控角色默认停用，请先启用模板: @{orchestrator}")
+        if orchestrator_role is not None and orchestrator_role.manual_only:
+            raise HTTPException(
+                400, f"仅人工点名的角色不能作为主控: @{orchestrator}")
         data["orchestrator_role_id"] = orchestrator
         data["max_chain_runs"] = (body.max_chain_runs if body.max_chain_runs is not None
                                   else (existing.max_chain_runs if existing

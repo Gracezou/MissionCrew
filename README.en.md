@@ -23,7 +23,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
-Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md).
+Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md). [Changelog](CHANGELOG.md) is in Chinese too, but tracks every user-facing change per release.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ What each page does:
 - **Channels**: create, archive and delete channels from the sidebar. A channel records its purpose and working directory and can be bound to a real code repository. While agents are queued or running, the composer offers *Stop agent / Stop all*.
 - **Task board**: tasks are issue-like — title, body, status, labels, channel bindings and append-only status briefs. *Hand to Lead* simply posts a message to the orchestrator in the bound channel; everything after that is ordinary chat collaboration, there is no separate task execution loop.
 - **Project settings**: roles (fixed runtime/model + positioning + capabilities + preferences), multiple guideline Markdown files, complete skill packages, the versioned document library and custom dashboards. Documents, guidelines and skill packages are versioned in their own Git repositories with history, diff and restore; deleted items go to the project recycle bin.
-- **Global settings**: role templates for new projects, the runtime list (install state, version, on/off switch, model list) and custom model providers.
+- **Global settings**: role templates and their initial enabled state for new projects, the runtime list (install state, version, on/off switch, model list) and custom model providers.
 - **Runtime status**: global runtime instances, call history, and the quota windows / reset times of the Codex, Claude, Kimi and Grok accounts logged in on this machine. Roles can opt into usage linkage individually: when a quota is exhausted only opted-in roles are disabled automatically, and they come back once the window resets.
 
 **There is no authentication of any kind.** The web UI and API can browse local directories and dispatch agents that run commands, so `mc serve` listens on `127.0.0.1` only by default. To reach it from other devices on your LAN, pass `--host 0.0.0.0` explicitly (or set `MISSIONCREW_HOST`), do so only on a trusted network, and never expose it to the internet — see [SECURITY.md](SECURITY.md). The chat concurrency limit defaults to 16 and can be changed with `--chat-workers <N>` or `MISSIONCREW_CHAT_MAX_WORKERS`.
@@ -87,7 +87,7 @@ Conventions:
 | `claude` (Claude Code) | `claude_code` | Native bidirectional stream-json; built-in haiku / sonnet / opus / fable aliases |
 | `codex` (OpenAI Codex) | `codex` | Native app-server; model list read from the current account |
 | `agy` (Google Antigravity CLI) | `antigravity` | Native headless stream-json; conversation resume, model discovery and low / medium / high effort |
-| `pi` | `pi` | Native RPC (vendored install); executes custom API models |
+| `pi` | `pi` | Native RPC (vendored install first, falls back to a system pi); executes custom API models |
 | `grok` (Grok Build) | `grok_build` | ACP stdio |
 | `copilot` (GitHub Copilot CLI) | `copilot` | ACP stdio |
 | `kimi` (Kimi CLI) | `kimi` | ACP stdio |
@@ -106,13 +106,16 @@ Protocol flows, detection and upgrade mechanics, where model lists come from, an
 
 Besides local CLIs, MissionCrew can talk directly to **OpenAI / Anthropic compatible APIs** — self-hosted inference servers, gateways, third-party hosting — over the OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Google Generative AI protocols. These models are executed by [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent): the platform does not reimplement an agent loop; it reuses pi's tool execution and session management through pi's RPC mode. Setup:
 
-1. **Install pi.** pi is vendored inside the platform data directory; detection only recognises that copy and never a system-wide pi. Node.js/npm is required. Install it once by hand (adjust the prefix if you changed `MISSIONCREW_HOME`):
+1. **Install pi.** Pick either option; detection prefers the vendored copy and falls back to a `pi` on `PATH`:
+
+   - **Homebrew (system-wide)**: `brew install pi-coding-agent`; the *Update* button runs `brew upgrade pi-coding-agent`.
+   - **Vendored (inside the data directory)**: requires Node.js/npm; install it once by hand (adjust the prefix if you changed `MISSIONCREW_HOME`). The *Update* button only touches the vendor directory — never a global `-g` install:
 
    ```bash
    npm install --prefix .missioncrew/pi/vendor --no-fund --no-audit @mariozechner/pi-coding-agent@latest
    ```
 
-   Then click **Re-detect** in *Global settings* to register and enable `pi`. Later upgrades use the *Update* button on that page and only touch the vendor directory — never a global `-g` install.
+   Then click **Re-detect** in *Global settings* to register and enable `pi`. A system pi from another source (e.g. `npm -g`) is detected too, but the platform does not manage its upgrades. Either way pi's config and sessions are redirected into the data directory; `~/.pi` is never touched.
 2. **Add a provider.** Under *Global settings → Custom model providers* add an entry: name, protocol, base URL, API key (a literal or a `$ENV_VAR` reference; keys are never sent back to the browser) and the list of model ids.
 3. **Bind a role.** After saving, the models appear in the role editor's model list as `provider/model-id`; give the role runtime `pi` and that model.
 

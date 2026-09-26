@@ -1,7 +1,7 @@
 """API 请求体模型(pydantic)。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -99,6 +99,9 @@ class ContentChannelInput(BaseModel):
 
 class RoleTemplateInput(BaseModel):
     id: str
+    # 复制到新项目时的初始启用状态;仅全局模板生效,
+    # 项目角色的实时启停走 /api/roles/{id}/enabled,不由本字段改写
+    enabled: bool = True
     runtime_id: str            # 角色定义时固定的 runtime,必填
     model: str = ""            # 空 = CLI 默认模型
     effort: str = ""           # 推理力度,仅支持的 runtime 可设;空 = CLI 默认
@@ -189,6 +192,14 @@ class SkillFolderImport(BaseModel):
     path: str
     overwrite: bool = False
     actor_role_id: Optional[str] = None
+
+
+class ProjectResourceImport(BaseModel):
+    source_project_id: str = Field(
+        min_length=1, max_length=100, pattern=r"^[\w-]+$")
+    resource_type: Literal["guideline", "skill", "automation"]
+    item_ids: list[str] = Field(min_length=1, max_length=500)
+    conflict_strategy: Literal["skip", "overwrite"] = "skip"
 
 
 class ProjectInput(BaseModel):

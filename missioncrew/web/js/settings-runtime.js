@@ -13,7 +13,14 @@ async function renderGlobalSettings() {
 function renderGlobalRoleTable() {
   const table = document.getElementById("global-role-table");
   if (!table) return;
-  const rows = globalRoleTemplates().map((role, index) => {
+  const defaultOrchestratorId = defaultOrchestratorTemplate()?.id;
+  const warning = document.getElementById("global-role-warning");
+  if (warning) {   // 允许全部默认停用(批量重配的中间态),但必须让人看见后果
+    warning.hidden = !globalRoleTemplates().length || Boolean(defaultOrchestratorId);
+    warning.textContent = "当前没有可作新项目主控的模板，新项目无法创建；"
+      + "请至少让一个模板「新项目中默认启用」且不是「仅人工点名」。";
+  }
+  const rows = globalRoleTemplates().map(role => {
     const execution = role.runtime_id
       ? `${esc(role.runtime_id)} / ${esc(role.model || "(CLI 默认)")}` +
         (role.effort ? ` / effort ${esc(role.effort)}` : "")
@@ -23,7 +30,8 @@ function renderGlobalRoleTable() {
           ondragstart="globalRoleDragStart(event)" ondragend="globalRoleDragEnd()">⠿</td>
       <td><span class="role-dot" style="background:${esc(role.color || "#888")};display:inline-block"></span>
           <b>@${esc(role.id)}</b> ${esc(role.name)}
-          ${index === 0 ? `<span class="pill">新项目默认主控</span>` : ""}
+          ${role.id === defaultOrchestratorId ? `<span class="pill">新项目默认主控</span>` : ""}
+          ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}
           ${role.usage_linkage_enabled ? `<span class="pill">用量联动</span>` : ""}
           ${role.manual_only ? `<span class="pill" title="只有人类能 @ 它,其他 Agent 看不到">仅人工</span>` : ""}</td>
       <td class="muted">${esc(role.preference || "—")}</td>
@@ -85,7 +93,7 @@ function editGlobalRoleTemplate(id) {
   const role = globalRoleTemplates().find(item => item.id === id) || {
     id: "", name: "", description: "", capabilities: [], preference: "",
     runtime_id: "", model: "", effort: "", color: "#3564d7",
-    usage_linkage_enabled: false, manual_only: false,
+    usage_linkage_enabled: false, enabled: true, manual_only: false,
   };
   const abilityChips = Object.entries(traitMeta.abilities).map(([key, label]) =>
     `<span class="chip ${(role.capabilities || []).includes(key) ? "on" : ""}" data-cap="${key}"
@@ -110,6 +118,9 @@ function editGlobalRoleTemplate(id) {
       <div>${modelCatalogLabel()}<select id="rf-model" onchange="refreshEffortOptions()"></select></div>
       <div><label>Effort(推理力度)</label><select id="rf-effort"></select></div>
     </div>
+    ${roleToggleField("rf-enabled", "新项目中默认启用",
+      "关闭后仍会复制到新项目，但不会接收任务，也不能作为项目主控。",
+      role.enabled !== false)}
     ${roleUsageLinkageField(role)}
     ${roleManualOnlyField(role)}
     <label>角色定位/人格(给角色本人与主控看:写清"是谁、怎么工作"的专长画像;平台原样装配、不改写,任务由 @ 消息提供)</label>
@@ -139,6 +150,7 @@ async function saveGlobalRoleTemplate() {
     model: document.getElementById("rf-model").value,
     effort: document.getElementById("rf-effort").value,
     usage_linkage_enabled: document.getElementById("rf-usage-linkage").classList.contains("on"),
+    enabled: document.getElementById("rf-enabled").classList.contains("on"),
     manual_only: document.getElementById("rf-manual-only").classList.contains("on"),
   };
   if (!body.id) { uiAlert("角色 id 不能为空"); return; }

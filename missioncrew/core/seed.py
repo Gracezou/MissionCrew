@@ -173,7 +173,26 @@ def project_roles_from_templates(store: Store, project_id: str) -> list[Role]:
         data = template.to_dict()
         data["project_id"] = project_id
         roles.append(Role.from_dict(data))
+    # 结构性问题(runtime 缺失/停用)先报完,再校验「至少有一个默认启用的模板」;
+    # 这里只做前置校验,返回值由调用方各自取,避免写完项目才发现没有可用主控。
+    first_orchestrator_role(roles)
     return roles
+
+
+def first_orchestrator_role(roles: list[Role]) -> Role:
+    """返回排序最前的、能当主控的角色。
+
+    两类模板都要跳过:默认停用的(复制过去也不接任务),以及仅人工点名的
+    (只有人类能 @ 它,当主控就没人能派活)。两处都由 API/CLI 在显式指定主控时
+    各自再校验一次,这里只负责挑默认值。
+    """
+    role = next(
+        (item for item in roles if item.enabled and not item.manual_only), None)
+    if role is None:
+        raise RuntimeError(
+            "全局角色模板里没有可作新项目主控的角色,"
+            "请至少让一个模板「新项目中默认启用」且不是「仅人工点名」")
+    return role
 
 
 def default_roles(store: Store, project_id: str) -> list[Role]:
@@ -201,7 +220,7 @@ def seed(store: Store) -> None:
         store.put_resource(r)
     ensure_role_templates(store)
     demo_roles = project_roles_from_templates(store, DEMO_PROJECT.id)
-    DEMO_PROJECT.orchestrator_role_id = demo_roles[0].id
+    DEMO_PROJECT.orchestrator_role_id = first_orchestrator_role(demo_roles).id
     store.put_project(DEMO_PROJECT)
     for role in demo_roles:
         store.put_role(role)
@@ -215,10 +234,16 @@ def ensure_default_project(store: Store) -> None:
     if store.list_projects() or not has_enabled_runtime(store):
         return
     ensure_role_templates(store)
-    roles = project_roles_from_templates(store, "default")
+    try:
+        roles = project_roles_from_templates(store, "default")
+        orchestrator = first_orchestrator_role(roles).id
+    except RuntimeError:
+        # 模板全部默认停用、或模板绑定的 runtime 不可用时跳过自举:平台自愈不该
+        # 因为用户的模板配置中间态而报错,用户显式建项目时仍会拿到明确错误。
+        return
     store.put_project(Project(id="default", name="默认项目",
                               description="首次使用自动创建,可在项目页改名或新建其他项目",
-                              orchestrator_role_id=roles[0].id))
+                              orchestrator_role_id=orchestrator))
     init_project(store, "default", roles)
 
 

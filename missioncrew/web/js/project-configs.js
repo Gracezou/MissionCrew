@@ -1032,6 +1032,7 @@ const guidelineViewer = createTextViewer({
 });
 
 function renderGuidelinesPage(force = false) {
+  projectConfigLabel("guideline-proj-label");
   const guidelines = projObj()?.guidelines || [];
   if (selectedGuidelineName === undefined
       || (selectedGuidelineName !== null

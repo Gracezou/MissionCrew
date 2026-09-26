@@ -9,8 +9,9 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from ..core.config import projects_dir
 from ..core.models import Board, Channel, Project, ProjectResource, Role, Task
@@ -21,6 +22,7 @@ from .guidelines import delete_guideline, save_guideline
 from .resource_urls import (channel_resource_url, dashboard_resource_url,
                             guideline_resource_url, missioncrew_resource_url,
                             skill_resource_url, task_resource_url)
+from .skills import _project_lock as _skill_lock
 from .skills import (project_skill_library_dir, sync_project_skill_library,
                      write_skill_context)
 from .skill_versions import skill_version_library
@@ -41,8 +43,21 @@ class RecycleConflictError(Exception):
 
 
 def _project_lock(project_id: str) -> threading.RLock:
+    """回收站的项目锁。要同时持有 Skill 锁时必须经 _skill_then_recycle_lock。"""
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(project_id, threading.RLock())
+
+
+@contextmanager
+def _skill_then_recycle_lock(project_id: str) -> Iterator[None]:
+    """同时持有两把项目锁的唯一入口，顺序固定为「先 Skill 锁、后回收站锁」。
+
+    Skill 覆盖导入(skills._install_discovered)持 Skill 锁期间会调用
+    archive_replaced_skill 去拿回收站锁；回收站这边只要反序(先回收站锁、再进
+    Skill 同步)就会与它互等死锁。需要两把锁的路径一律从这里取，不要自己嵌套。
+    """
+    with _skill_lock(project_id), _project_lock(project_id):
+        yield
 
 
 def recycle_bin_url(project_id: str) -> str:
@@ -290,41 +305,46 @@ def recycle_guideline(store: Store, project: Project, name: str, *, actor: str) 
 
 
 def recycle_skill(store: Store, project: Project, skill_id: str, *, actor: str) -> dict:
-    project, _ = sync_project_skill_library(store, project)
-    skill = next((item for item in project.skills if item.id == skill_id), None)
-    directory = project_skill_library_dir(project.id) / skill_id
-    if skill is None or not directory.is_dir() or directory.is_symlink():
-        raise FileNotFoundError("Skill 不存在")
-    manifest = _archive_directory(
-        project.id, "skill", skill_id, skill.name or skill_id, actor, directory,
-        {"id": skill_id, "enabled": skill.enabled})
-    try:
-        shutil.rmtree(directory)
-        current = store.get_project(project.id) or project
-        current.skills = [item for item in current.skills if item.id != skill_id]
-        store.put_project(current)
-        sync_project_skill_library(
-            store, current, audit=False, history_actor=actor,
-            history_message=f"Delete Skill {skill_id}")
-    except Exception:
-        if not directory.exists():
-            shutil.copytree(_item_dir(project.id, manifest["id"]) / "payload", directory)
-        rollback = store.get_project(project.id) or project
-        rollback, _ = sync_project_skill_library(
-            store, rollback, audit=False, history_actor=actor,
-            history_message=f"Rollback deletion of Skill {skill_id}")
-        restored = next(
-            (item for item in rollback.skills if item.id == skill_id), None)
-        if restored is not None:
-            restored.enabled = skill.enabled
-            store.put_project(rollback)
-            write_skill_context(rollback)
-        _discard(project.id, manifest["id"])
-        raise
-    store.audit(actor, "skill_recycled",
-                detail=f"project={project.id} skill={skill_id} item={manifest['id']}")
-    return {**_public_item(manifest),
-            "revision": skill_version_library(project.id).head()}
+    # 检查、归档、删除必须在同一把 Skill 锁内：否则并发的覆盖导入会在检查之后把
+    # 新包 rename 上位，归档和删除都落到用户刚导入的新包上。这里只取 Skill 锁,
+    # 回收站锁仍由内层 _create_item 自取,顺序依旧「先 Skill 锁、后回收站锁」。
+    with _skill_lock(project.id):
+        project, _ = sync_project_skill_library(store, project)
+        skill = next((item for item in project.skills if item.id == skill_id), None)
+        directory = project_skill_library_dir(project.id) / skill_id
+        if skill is None or not directory.is_dir() or directory.is_symlink():
+            raise FileNotFoundError("Skill 不存在")
+        manifest = _archive_directory(
+            project.id, "skill", skill_id, skill.name or skill_id, actor, directory,
+            {"id": skill_id, "enabled": skill.enabled})
+        try:
+            shutil.rmtree(directory)
+            current = store.get_project(project.id) or project
+            current.skills = [item for item in current.skills if item.id != skill_id]
+            store.put_project(current)
+            sync_project_skill_library(
+                store, current, audit=False, history_actor=actor,
+                history_message=f"Delete Skill {skill_id}")
+        except Exception:
+            if not directory.exists():
+                shutil.copytree(
+                    _item_dir(project.id, manifest["id"]) / "payload", directory)
+            rollback = store.get_project(project.id) or project
+            rollback, _ = sync_project_skill_library(
+                store, rollback, audit=False, history_actor=actor,
+                history_message=f"Rollback deletion of Skill {skill_id}")
+            restored = next(
+                (item for item in rollback.skills if item.id == skill_id), None)
+            if restored is not None:
+                restored.enabled = skill.enabled
+                store.put_project(rollback)
+                write_skill_context(rollback)
+            _discard(project.id, manifest["id"])
+            raise
+        store.audit(actor, "skill_recycled",
+                    detail=f"project={project.id} skill={skill_id} item={manifest['id']}")
+        return {**_public_item(manifest),
+                "revision": skill_version_library(project.id).head()}
 
 
 def recycle_dashboard(store: Store, project: Project, board_id: str,
@@ -523,7 +543,9 @@ def _restore_snapshot(store: Store, project: Project, manifest: dict) -> str:
 
 def restore_recycle_item(store: Store, project: Project, item_id: str,
                          *, actor: str) -> dict:
-    with _project_lock(project.id):
+    # 恢复 Skill 会在回收站锁内做 Skill 库同步，因此整段按统一顺序先取 Skill 锁；
+    # 其他类型一并走同一入口，避免以后新增资源类型时又写出一条反序路径。
+    with _skill_then_recycle_lock(project.id):
         manifest = _load_manifest(project.id, item_id)
         payload = _item_dir(project.id, item_id) / "payload"
         resource_type = str(manifest["resource_type"])

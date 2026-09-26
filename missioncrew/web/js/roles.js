@@ -19,12 +19,15 @@ function roleTransferSource(scope) {
     : { roles: projRoles(), label: `项目「${currentProject}」角色`, projectId: currentProject };
 }
 
-function roleFileItem(role) {
-  return Object.fromEntries(ROLE_FILE_FIELDS.map(field => {
+// 全局模板额外携带「新项目中默认启用」；项目角色的启停是实时运行状态，不写入文件。
+function roleFileItem(role, withTemplateEnabled = false) {
+  const item = Object.fromEntries(ROLE_FILE_FIELDS.map(field => {
     const fallback = field === "capabilities" ? []
       : (field === "usage_linkage_enabled" || field === "manual_only") ? false : "";
     return [field, role[field] ?? fallback];
   }));
+  if (withTemplateEnabled && typeof role.enabled === "boolean") item.enabled = role.enabled;
+  return item;
 }
 
 function roleTransferRows(roles, conflicts = null) {
@@ -36,7 +39,8 @@ function roleTransferRows(roles, conflicts = null) {
         onchange="updateRoleTransferSummary()">
       <span class="role-transfer-main"><b>@${esc(role.id)}</b>
         ${role.name ? `<span class="role-transfer-name">· ${esc(role.name)}</span>` : ""}
-        <small>· ${execution}</small></span>
+        <small>· ${execution}</small>
+        ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}</span>
       ${conflicts ? (conflict ? `<span class="pill role-overwrite-pill">将覆盖现有角色</span>`
         : `<span class="pill">新增</span>`) : ""}
     </label>`;
@@ -80,7 +84,7 @@ function openRoleExportDialog(scope) {
     return;
   }
   roleTransferState = {
-    mode: "export", scope, roles: source.roles.map(roleFileItem),
+    mode: "export", scope, roles: source.roles.map(role => roleFileItem(role, scope === "global")),
     projectId: source.projectId, conflicts: new Set(),
   };
   openFormDialog(`导出${source.label}`, `
@@ -90,7 +94,9 @@ function openRoleExportDialog(scope) {
       <button type="button" class="ghost compact" onclick="setAllRoleTransferSelections(false)">全不选</button>
     </div>
     <div class="role-transfer-list">${roleTransferRows(roleTransferState.roles)}</div>
-    <p class="muted">导出文件只包含角色配置和当前顺序，不包含项目归属与实时启停状态。</p>`,
+    <p class="muted">${scope === "global"
+      ? "导出文件包含角色配置、当前顺序和新项目中的默认启停状态。"
+      : "导出文件只包含角色配置和当前顺序，不包含项目归属与实时启停状态。"}</p>`,
     `<button class="action" onclick="downloadSelectedRoles()">导出所选</button>
      <button class="ghost" onclick="fdlg.close()">取消</button>`);
   updateRoleTransferSummary();
@@ -161,7 +167,10 @@ async function previewRoleImportFile(scope, file) {
   const conflicts = new Set(target.roles.map(role => role.id).filter(id => ids.includes(id)));
   roleTransferState = {
     mode: "import", scope, projectId: target.projectId,
-    roles: payload.roles.map(roleFileItem), conflicts,
+    // 只有全局模板文件导入全局模板时才沿用默认启停；项目角色文件不含该语义。
+    roles: payload.roles.map(role =>
+      roleFileItem(role, scope === "global" && payload.scope === "global")),
+    conflicts,
   };
   const sourceLabel = payload.scope === "global"
     ? "全局角色模板" : `项目角色${payload.project_id ? `（${esc(payload.project_id)}）` : ""}`;
@@ -173,7 +182,9 @@ async function previewRoleImportFile(scope, file) {
       <button type="button" class="ghost compact" onclick="setAllRoleTransferSelections(false)">全不选</button>
     </div>
     <div class="role-transfer-list">${roleTransferRows(roleTransferState.roles, conflicts)}</div>
-    <p class="muted">已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。</p>`,
+    <p class="muted">${scope === "global"
+      ? "已有模板保留原排序；新增模板按文件顺序追加。新项目中的默认启停以文件为准，文件未包含时新增模板默认启用、已有模板保持不变。"
+      : "已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。"}</p>`,
     `<button class="action" onclick="importSelectedRoles()">导入所选</button>
      <button class="ghost" onclick="fdlg.close()">取消</button>`);
   updateRoleTransferSummary();

@@ -49,6 +49,7 @@ SUPPORTED_PROVIDER_APIS = {
 }
 
 _PROVIDER_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+_MODEL_ID_INVALID_RE = re.compile(r"[\s,，;；\x00-\x1f\x7f]")
 
 # agent_end 之后可能立刻跟 auto_retry_start 重开一轮(pi 的瞬态错误自动
 # 重试),因此 agent_end 不能直接判终;静默该时长且无重试事件才算回合结束。
@@ -103,8 +104,14 @@ def validate_pi_providers(data: dict) -> str:
         if not isinstance(models, list) or not models:
             return f"provider {name} 至少要声明一个模型"
         for model in models:
-            if not isinstance(model, dict) or not str(model.get("id") or ""):
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
                 return f"provider {name} 的模型必须带 id"
+            model_id = model["id"]
+            if not model_id:
+                return f"provider {name} 的模型必须带 id"
+            if _MODEL_ID_INVALID_RE.search(model_id):
+                return (f"provider {name} 的模型 id {model_id!r} 不能包含空白、"
+                        "逗号、分号或控制字符")
     return ""
 
 

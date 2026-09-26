@@ -220,13 +220,31 @@
 
     <div id="automations-view" class="page">
       <div class="section content-workspace automation-workspace">
+        <div class="skill-page-head project-resource-head">
+          <div class="skill-head-row">
+            <h2>项目自动化 <span class="muted" id="automation-proj-label"></span></h2>
+            <div class="content-topbar-actions">
+              <button class="ghost compact" onclick="openProjectImportDialog('automation')">复制到其他项目</button>
+            </div>
+          </div>
+        </div>
         <div id="automation-detail"></div>
       </div>
     </div>
 
     <div id="guidelines-view" class="page">
       <div class="section content-workspace">
-        <section class="config-editor-pane form single-pane-editor guideline-workspace" id="guideline-editor"></section>
+        <div class="guideline-workspace skill-workspace">
+          <div class="skill-page-head">
+            <div class="skill-head-row">
+              <h2>项目准则 <span class="muted" id="guideline-proj-label"></span></h2>
+              <div class="content-topbar-actions">
+                <button class="ghost compact" onclick="openProjectImportDialog('guideline')">复制到其他项目</button>
+              </div>
+            </div>
+          </div>
+          <section class="config-editor-pane form single-pane-editor guideline-workspace skill-editor-pane" id="guideline-editor"></section>
+        </div>
       </div>
     </div>
 
@@ -242,6 +260,7 @@
                 <button class="ghost compact" onclick="document.getElementById('skill-zip-input').click()">上传 ZIP</button>
                 <button class="ghost compact" onclick="openSkillFolderImport()">导入本地目录</button>
                 <button class="ghost compact" onclick="rescanSkillLibrary()">重新扫描</button>
+                <button class="ghost compact" onclick="openProjectImportDialog('skill')">复制到其他项目</button>
                 <button class="ghost compact" onclick="editSkill(null)">＋ 新建</button>
               </div>
             </div>
@@ -334,7 +353,8 @@
           <button class="ghost" style="margin-left:8px" onclick="editGlobalRoleTemplate(null)">＋ 新建角色</button>
           <button class="ghost" onclick="chooseRoleImportFile('global')">导入</button>
           <button class="ghost" onclick="openRoleExportDialog('global')">导出</button></h2>
-        <p class="muted">新项目创建时会复制这里的角色列表；拖动可调整顺序，第一项是新项目的默认主控。修改模板不会影响已有项目。</p>
+        <p class="muted">新项目创建时会复制这里的角色列表；拖动可调整顺序，排序最前的已启用模板是新项目默认主控。修改模板不会影响已有项目。</p>
+        <p class="section-warn" id="global-role-warning" hidden></p>
         <table class="mgr" id="global-role-table"></table>
       </div>
       <div class="section">
@@ -414,7 +434,7 @@
     <label>一句话描述</label><input type="text" id="np-desc">
     <p class="muted" id="np-role-summary">创建后复制全局角色模板并获得 general 频道；章程和准则到「项目设置」页补充。</p>
   </div>
-  <div class="actions"><button class="action" onclick="createProject()">创建项目</button></div>
+  <div class="actions"><button class="action" id="np-create" onclick="createProject()">创建项目</button></div>
 </dialog>
 
 <dialog id="tdlg">
@@ -483,6 +503,7 @@
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/projects.js"></script>
 <script src="/assets/js/settings-project.js"></script>
+<script src="/assets/js/project-imports.js"></script>
 <script src="/assets/js/project-configs.js"></script>
 <script src="/assets/js/documents.js"></script>
 <script src="/assets/js/recycle-bin.js"></script>

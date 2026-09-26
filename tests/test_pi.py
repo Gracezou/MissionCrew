@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +18,8 @@ from missioncrew.runtime.pi import (PiRuntimeProvider, read_pi_models,
                                     validate_pi_providers)
 
 FAKE_PI = str(Path(__file__).with_name("fake_pi_rpc.py"))
+SETTINGS_MODELS_JS = (Path(__file__).resolve().parents[1] / "missioncrew" /
+                      "web" / "js" / "settings-models.js")
 
 
 class _Fallback(RuntimeProvider):
@@ -292,9 +296,51 @@ def test_validate_pi_providers_rejects_bad_shapes():
                 "models": [{"id": "m"}]}}}) != ""
 
 
-def test_managed_pi_binary_relocates_with_data_dir():
+@pytest.mark.parametrize("model_id", [
+    "deepseek-flash;", "deepseek,flash", "deepseek；flash", "deepseek，flash",
+    "deepseek flash", "deepseek\tflash", "deepseek\x00flash", 123,
+])
+def test_validate_pi_providers_rejects_invalid_model_ids(model_id):
+    error = validate_pi_providers({"providers": {
+        "CPA": {"baseUrl": "https://x", "api": "openai-completions",
+                "models": [{"id": model_id}]}}})
+    assert error
+    if isinstance(model_id, str):
+        assert "不能包含空白、逗号、分号或控制字符" in error
+    else:
+        assert "模型必须带 id" in error
+
+
+def test_settings_model_ids_split_common_separators_and_validate_whitespace():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the model provider form parser")
+    script = r"""
+const fs = require("fs"), vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+vm.runInContext(source, context);
+const parsed = vm.runInContext(`parseModelIds(${JSON.stringify(process.argv[2])})`, context);
+const error = vm.runInContext(`modelIdValidationError(${JSON.stringify(process.argv[3])})`, context);
+process.stdout.write(JSON.stringify({ parsed, error }));
+"""
+    result = subprocess.run(
+        [node, "-e", script, str(SETTINGS_MODELS_JS),
+         " glm-5.2; deepseek-flash，glm-5.3-flash\n deepseek-v4-pro ",
+         "deepseek flash"],
+        text=True, capture_output=True, check=True)
+    actual = json.loads(result.stdout)
+    assert actual["parsed"] == [
+        "glm-5.2", "deepseek-flash", "glm-5.3-flash", "deepseek-v4-pro"]
+    assert "不能包含空白、逗号、分号或控制字符" in actual["error"]
+
+
+def test_managed_pi_binary_relocates_with_data_dir(monkeypatch):
     """vendored pi 的可执行路径由数据目录推导:库里记的旧位置按当前数据目录
     重新定位;非托管工具不动;安装缺失时清空路径。"""
+    from missioncrew.runtime.clis import pi as pi_spec
+    monkeypatch.setattr(pi_spec.shutil, "which", lambda name: None)
     from missioncrew.core.config import pi_vendor_bin
     from missioncrew.runtime import runtime_manager
     vendored = pi_vendor_bin()
@@ -326,3 +372,52 @@ def test_startup_relocates_stale_pi_binary_path(store):
         binary_path="/old-root/.missioncrew/pi/vendor/node_modules/.bin/pi"))
     create_app()
     assert store.get_backend("pi").binary_path == str(vendored)
+
+
+def test_pi_falls_back_to_system_binary_on_path(tmp_path, monkeypatch):
+    """没有 vendored 安装时回退到 PATH 上的系统级 pi;vendored 存在时优先。"""
+    from missioncrew.core.config import pi_vendor_bin
+    from missioncrew.runtime.clis import pi as pi_spec
+    system_pi = tmp_path / "bin" / "pi"
+    monkeypatch.setattr(pi_spec.shutil, "which",
+                        lambda name: str(system_pi) if name == "pi" else None)
+    assert pi_spec.locate_binary() == str(system_pi)
+    vendored = pi_vendor_bin()
+    vendored.parent.mkdir(parents=True, exist_ok=True)
+    vendored.write_text("#!/bin/sh\n")
+    assert pi_spec.locate_binary() == str(vendored)
+
+
+def test_pi_update_plan_follows_install_source(tmp_path, monkeypatch):
+    """升级渠道跟随安装来源:vendored/未安装走 --prefix npm,brew 走 brew upgrade,
+    其他系统级安装不代管;任何情况都不出现 npm -g。"""
+    from missioncrew.core.config import pi_vendor_bin, pi_vendor_prefix
+    from missioncrew.runtime.clis import pi as pi_spec
+
+    found = {"pi": None, "brew": "/opt/homebrew/bin/brew"}
+    monkeypatch.setattr(pi_spec.shutil, "which", lambda name: found.get(name))
+
+    kind, cmd = pi_spec.update_plan()  # 未安装:引导装进 vendor
+    assert kind == "npm" and str(pi_vendor_prefix()) in cmd and "-g" not in cmd
+
+    cellar = tmp_path / "Cellar" / "pi-coding-agent" / "1.0" / "bin" / "pi"
+    cellar.parent.mkdir(parents=True)
+    cellar.write_text("#!/bin/sh\n")
+    link = tmp_path / "homebrew-bin" / "pi"
+    link.parent.mkdir()
+    link.symlink_to(cellar)
+    found["pi"] = str(link)
+    assert pi_spec.update_plan() == (
+        "brew", ["/opt/homebrew/bin/brew", "upgrade", "pi-coding-agent"])
+
+    other = tmp_path / "npm-global" / "bin" / "pi"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n")
+    found["pi"] = str(other)
+    assert pi_spec.update_plan() is None
+
+    vendored = pi_vendor_bin()
+    vendored.parent.mkdir(parents=True, exist_ok=True)
+    vendored.write_text("#!/bin/sh\n")
+    kind, cmd = pi_spec.update_plan()
+    assert kind == "npm" and "-g" not in cmd

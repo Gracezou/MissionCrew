@@ -1,14 +1,17 @@
 """项目统一回收站：多资源删除、恢复、冲突与 Web 页面。"""
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from missioncrew.api import create_app
+from missioncrew.collab import recycle_bin, skills
 from missioncrew.collab.documents import library_for
 from missioncrew.collab.recycle_bin import (list_recycle_items,
                                              recycle_skill,
                                              restore_recycle_item)
-from missioncrew.collab.skills import (project_skill_library_dir,
+from missioncrew.collab.skills import (import_skill_folder,
+                                       project_skill_library_dir,
                                        skill_context_dir)
 
 
@@ -274,3 +277,182 @@ def test_recycle_bin_page_is_one_project_level_view(seeded):
     for function in ("renderRecycleBin", "restoreRecycleItem",
                      "purgeRecycleItem", "emptyRecycleBin"):
         assert f"function {function}" in page
+
+
+def test_skill_restore_and_overwrite_import_do_not_deadlock(seeded, tmp_path, monkeypatch):
+    """回收站锁与 Skill 锁必须同序获取。
+
+    恢复走「回收站锁 → Skill 锁」、覆盖导入走「Skill 锁 → 回收站锁」时两者互等。
+    这里把两条路径各卡在「已持一把锁、正要去拿另一把」的位置：锁顺序写反时两个
+    钩子会同时就位、事件成对置位，立刻凑出死锁；锁顺序正确时必有一方先拿到
+    Skill 锁、另一方被挡在取锁处根本到不了钩子，先到的那方等满 handshake 超时
+    再继续——所以「等满超时」正是修好之后的正常路径，wait 只是给对方一个抢锁的
+    机会，不是同步手段。
+    """
+    client = _client()
+    project_id = "lock-probe"          # 用独立项目，避免把共享项目的锁留在死锁态
+    assert client.post("/api/projects", json={
+        "id": project_id, "name": "锁顺序探针"}).status_code == 200
+    for skill_id in ("deadlock-restore", "deadlock-overwrite"):
+        assert client.post(f"/api/projects/{project_id}/skills", json={
+            "id": skill_id,
+            "markdown": f"---\nname: {skill_id}\ndescription: 锁顺序测试\n---\n\n正文\n",
+            "actor_role_id": "lead",
+        }).status_code == 200
+    item = recycle_skill(
+        seeded, seeded.get_project(project_id), "deadlock-restore", actor="test")
+    source = tmp_path / "import-source" / "deadlock-overwrite"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: deadlock-overwrite\ndescription: 覆盖导入\n---\n\n新正文\n",
+        encoding="utf-8")
+
+    restore_holds_recycle = threading.Event()
+    import_holds_skill = threading.Event()
+    handshake = 0.5        # 坏代码上两个钩子微秒级就位，0.5s 足够凑出死锁
+    original_sync = recycle_bin.sync_project_skill_library
+    original_archive = recycle_bin.archive_replaced_skill
+
+    def sync_after_handshake(*args, **kwargs):
+        # 恢复路径：此刻已持回收站锁，等导入方拿到 Skill 锁后再去抢 Skill 锁
+        restore_holds_recycle.set()
+        import_holds_skill.wait(handshake)
+        return original_sync(*args, **kwargs)
+
+    def archive_after_handshake(*args, **kwargs):
+        # 覆盖导入路径：此刻已持 Skill 锁，等恢复方拿到回收站锁后再去抢回收站锁
+        import_holds_skill.set()
+        restore_holds_recycle.wait(handshake)
+        return original_archive(*args, **kwargs)
+
+    monkeypatch.setattr(recycle_bin, "sync_project_skill_library", sync_after_handshake)
+    monkeypatch.setattr(recycle_bin, "archive_replaced_skill", archive_after_handshake)
+
+    failures: dict[str, BaseException] = {}
+
+    def restore():
+        try:
+            restore_recycle_item(
+                seeded, seeded.get_project(project_id), item["id"], actor="test")
+        except BaseException as exc:            # noqa: BLE001 - 线程内异常带回主线程
+            failures["restore"] = exc
+
+    def overwrite_import():
+        try:
+            import_skill_folder(
+                seeded, seeded.get_project(project_id), str(source),
+                overwrite=True, actor="test")
+        except BaseException as exc:            # noqa: BLE001
+            failures["import"] = exc
+
+    # 守护线程：万一仍然死锁，失败的是断言而不是整个 pytest 进程挂住
+    threads = [threading.Thread(target=restore, name="restore", daemon=True),
+               threading.Thread(target=overwrite_import, name="import", daemon=True)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    stuck = [thread.name for thread in threads if thread.is_alive()]
+    assert not stuck, f"回收站锁与 Skill 锁顺序相反导致死锁，线程未结束: {stuck}"
+    assert not failures, failures
+    library = project_skill_library_dir(project_id)
+    assert (library / "deadlock-restore" / "SKILL.md").is_file()
+    assert (library / "deadlock-overwrite" / "SKILL.md").read_text(
+        encoding="utf-8").endswith("新正文\n")
+    # 覆盖导入把旧包归档进同一回收站；被恢复的条目已从回收站移除
+    archived = [entry for entry in list_recycle_items(project_id)
+                if entry["resource_id"] == "deadlock-overwrite"]
+    assert len(archived) == 1
+    assert all(entry["id"] != item["id"] for entry in list_recycle_items(project_id))
+
+
+def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
+        seeded, tmp_path):
+    """删除 Skill 必须归档并删掉自己检查过的那个包。
+
+    recycle_skill 曾在「检查目录 → 归档 → 删除」之间不持 Skill 锁，并发的覆盖
+    导入可以在窗口里把新包 rename 上位，于是归档和删除都落到刚导入的新包上，
+    用户的新 Skill 被静默删除。这里让删除方停在归档前，导入方先探测 Skill 锁：
+    锁没被持有(旧行为)就完整导入后放行，拿不到锁(已修复)就立刻放行再排队，
+    两种情况都不空等。
+    """
+    client = _client()
+    project_id = "race-probe"
+    assert client.post("/api/projects", json={
+        "id": project_id, "name": "归档窗口探针"}).status_code == 200
+    assert client.post(f"/api/projects/{project_id}/skills", json={
+        "id": "race-skill",
+        "markdown": "---\nname: race-skill\ndescription: 归档窗口\n---\n\n旧正文\n",
+        "actor_role_id": "lead",
+    }).status_code == 200
+    source = tmp_path / "race-source" / "race-skill"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: race-skill\ndescription: 归档窗口\n---\n\n新正文\n",
+        encoding="utf-8")
+
+    reached_archive = threading.Event()
+    proceed = threading.Event()
+    handshake = 5.0
+    original_archive_directory = recycle_bin._archive_directory
+    failures: dict[str, BaseException] = {}
+
+    def archive_after_window(*args, **kwargs):
+        # 此刻已过「目录存在」检查、尚未归档：旧代码的窗口就在这一行之前
+        reached_archive.set()
+        proceed.wait(handshake)
+        return original_archive_directory(*args, **kwargs)
+
+    recycle_bin._archive_directory = archive_after_window
+
+    def recycle():
+        try:
+            recycle_skill(
+                seeded, seeded.get_project(project_id), "race-skill", actor="test")
+        except BaseException as exc:            # noqa: BLE001
+            failures["recycle"] = exc
+            proceed.set()
+
+    def overwrite_import():
+        try:
+            reached_archive.wait(handshake)
+            lock = skills._project_lock(project_id)
+            if lock.acquire(timeout=0.3):
+                # Skill 锁空着 = 删除方没护住窗口，抢先把新包换上去
+                lock.release()
+                import_skill_folder(
+                    seeded, seeded.get_project(project_id), str(source),
+                    overwrite=True, actor="test")
+                proceed.set()
+            else:
+                proceed.set()                   # 删除方正持锁，排队等它做完
+                import_skill_folder(
+                    seeded, seeded.get_project(project_id), str(source),
+                    overwrite=True, actor="test")
+        except BaseException as exc:            # noqa: BLE001
+            failures["import"] = exc
+            proceed.set()
+
+    threads = [threading.Thread(target=recycle, name="recycle", daemon=True),
+               threading.Thread(target=overwrite_import, name="import", daemon=True)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+    finally:
+        recycle_bin._archive_directory = original_archive_directory
+
+    stuck = [thread.name for thread in threads if thread.is_alive()]
+    assert not stuck, f"线程未结束: {stuck}"
+    assert not failures, failures
+    items = [entry for entry in list_recycle_items(project_id)
+             if entry["resource_id"] == "race-skill"]
+    archived = [
+        (recycle_bin._item_dir(project_id, entry["id"]) / "payload" / "SKILL.md")
+        .read_text(encoding="utf-8") for entry in items]
+    assert all("旧正文" in text for text in archived), "归档到了并发导入的新包"
+    library = project_skill_library_dir(project_id) / "race-skill" / "SKILL.md"
+    assert library.is_file(), "并发导入的新 Skill 被删除方连带删掉了"
+    assert "新正文" in library.read_text(encoding="utf-8")

@@ -40,6 +40,16 @@ _LOCKS_GUARD = threading.Lock()
 
 
 def _project_lock(project_id: str) -> threading.RLock:
+    """Skill 库的项目锁。
+
+    锁顺序约定：本锁在回收站锁之外。覆盖导入持本锁期间会调用
+    recycle_bin.archive_replaced_skill 归档旧包(拿回收站锁)，所以任何需要
+    两把锁的路径都必须「先 Skill 锁、后回收站锁」，统一经
+    recycle_bin._skill_then_recycle_lock 获取。
+
+    本函数虽以下划线开头，但已是给同包模块的契约：recycle_bin 与
+    project_imports 直接按项目取这把 RLock，改名或改签名要同步改它们。
+    """
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(project_id, threading.RLock())
 
@@ -277,13 +287,19 @@ def sync_project_skill_library(store: Store, project: Project,
                                *, audit: bool = True,
                                history_actor: str = "platform",
                                history_message: str = "Sync project Skill library",
-                               record_history: bool = True
+                               record_history: bool = True,
+                               enabled_by_id: dict[str, bool] | None = None
                                ) -> tuple[Project, list[str]]:
-    """扫描直接子目录并把合法 SKILL.md 元数据同步到 Project。"""
+    """扫描直接子目录并把合法 SKILL.md 元数据同步到 Project。
+
+    ``enabled_by_id`` 为指定条目预先确定启停状态，随本次扫描一起写入索引与
+    上下文视图，避免先按旧值/默认启用写出再改。
+    """
     with _project_lock(project.id):
         root = project_skill_library_dir(project.id)
         _initialize_legacy_skills(project, root)
         existing = {skill.id: skill for skill in project.skills}
+        enabled_by_id = enabled_by_id or {}
         discovered: list[ProjectSkill] = []
         valid_directories: dict[str, Path] = {}
         issues: list[str] = []
@@ -309,7 +325,8 @@ def sync_project_skill_library(store: Store, project: Project,
                 _validate_tree(directory)
                 skill = parse_skill_markdown(
                     skill_id, skill_file.read_text(encoding="utf-8"),
-                    enabled=existing.get(skill_id, ProjectSkill(skill_id)).enabled,
+                    enabled=enabled_by_id.get(
+                        skill_id, existing.get(skill_id, ProjectSkill(skill_id)).enabled),
                 )
             except (OSError, UnicodeError, ValueError) as exc:
                 issues.append(f"{skill_id}: {exc}")
@@ -565,15 +582,18 @@ def _copy_skill_directory(source: Path, destination: Path) -> None:
 
 
 def _install_discovered(store: Store, project: Project, source: Path,
-                        *, overwrite: bool, actor: str) -> dict:
+                        *, overwrite: bool, actor: str,
+                        enabled_by_id: dict[str, bool] | None = None) -> dict:
+    enabled_by_id = enabled_by_id or {}
     with _project_lock(project.id):
         project, scan_issues = sync_project_skill_library(store, project)
         root = project_skill_library_dir(project.id)
-        found, issues = _discover_skill_directories(source)
-        issues = [*scan_issues, *issues]
+        found, source_issues = _discover_skill_directories(source)
+        issues = [*scan_issues, *source_issues]
         if not found:
+            # 只报导入源自身的问题：目标库里其他 Skill 的扫描问题与本次导入无关。
             raise ValueError("没有检测到可导入的有效 SKILL.md" +
-                             ("；" + "；".join(issues) if issues else ""))
+                             ("；" + "；".join(source_issues) if source_issues else ""))
         conflicts = sorted(skill_id for skill_id, _ in found if (root / skill_id).exists())
         if conflicts and not overwrite:
             return {
@@ -593,6 +613,10 @@ def _install_discovered(store: Store, project: Project, source: Path,
             archives = []
             for skill_id, _ in found:
                 destination = root / skill_id
+                if enabled_by_id.get(skill_id) is False:
+                    # 上下文链接按目录名指向库内目录：替换前先撤下，停用条目的新内容
+                    # 不会经旧链接短暂暴露，同步时再按确定的启停状态重建视图。
+                    _remove_context_entry(skill_context_dir(project) / skill_id)
                 if destination.exists():
                     # 延迟导入避免 recycle_bin 的恢复逻辑与本模块形成导入环。
                     from .recycle_bin import archive_replaced_skill
@@ -605,7 +629,8 @@ def _install_discovered(store: Store, project: Project, source: Path,
         imported = sorted(skill_id for skill_id, _ in found)
         project, sync_issues = sync_project_skill_library(
             store, project, audit=False, history_actor=actor,
-            history_message=f"Import Skills {', '.join(imported)}")
+            history_message=f"Import Skills {', '.join(imported)}",
+            enabled_by_id=enabled_by_id)
         revision = skill_version_library(project.id).head()
         store.audit(
             actor, "skills_imported",
@@ -623,14 +648,16 @@ def _install_discovered(store: Store, project: Project, source: Path,
 
 
 def import_skill_folder(store: Store, project: Project, source: str,
-                        *, overwrite: bool = False, actor: str = "human") -> dict:
+                        *, overwrite: bool = False, actor: str = "human",
+                        enabled_by_id: dict[str, bool] | None = None) -> dict:
     path = Path(source).expanduser().resolve()
     root = project_skill_library_dir(project.id).resolve()
     if not path.is_dir():
         raise ValueError("本地 Skill 导入路径不是目录")
     if path == root or root.is_relative_to(path):
         raise ValueError("不能从项目 Skill 投放目录本身或其父目录导入")
-    return _install_discovered(store, project, path, overwrite=overwrite, actor=actor)
+    return _install_discovered(store, project, path, overwrite=overwrite, actor=actor,
+                               enabled_by_id=enabled_by_id)
 
 
 def _extract_zip(payload: bytes, destination: Path) -> None:

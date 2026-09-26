@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import __version__
 from .base import RuntimeInstance, host_isolated_environ
 
 
@@ -787,7 +788,7 @@ def _pick_permission_option(options: list[dict], approval: str = "auto") -> Opti
 def _initialize(client: _AcpClient) -> dict:
     return client.request("initialize", {
         "protocolVersion": 1,
-        "clientInfo": {"name": "missioncrew", "version": "0.4.0"},
+        "clientInfo": {"name": "missioncrew", "version": __version__},
         # terminal:命令交给客户端终端执行,进程归客户端持有,后台任务的
         # 退出对平台可见;Grok 等 Runtime 会据此在任务结束后自发汇报。
         "clientCapabilities": {
@@ -1113,7 +1114,7 @@ def list_model_catalog(
     try:
         client.request("initialize", {
             "protocolVersion": 1,
-            "clientInfo": {"name": "missioncrew-model-discovery", "version": "0.4.0"},
+            "clientInfo": {"name": "missioncrew-model-discovery", "version": __version__},
             "clientCapabilities": {},
         })
         sess = client.request("session/new", {"cwd": workdir, "mcpServers": []})

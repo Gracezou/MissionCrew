@@ -32,6 +32,7 @@ MissionCrew 为 Agent 提供一系列接口脚本，Agent 可以用执行命令�
 - [harness 工作区边界](docs/agent-harness-workspace.md)：Agent 工作区、任务快照与业务代码仓之间的读写边界
 - [项目 Skill 目录](docs/skills.md)：完整目录形态的项目 Skill 的投放、同步与版本管理
 - [命令行工具](docs/cli.md)：`mc` 子命令速查，与 Web/API 同一套业务校验的终端形态
+- [更新日志](CHANGELOG.md)：各版本对用户可感知的变化
 
 ## 快速开始
 
@@ -54,7 +55,7 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 - **频道**：侧栏可创建、归档、删除频道；频道记录自己的用途和主工作目录，可以绑定真实代码仓协作。频道里有 Agent 排队或运行时，输入区提供「停止 Agent / 停止全部」。
 - **Task 看板**：Task 类似 Issue，保存标题、正文、标签（状态即 `status: 文本` 标签，另支持 `属性: 值` 高级标签）、可选的 Channel 绑定和追加式状态简报。看板列是标签表达式，也可按属性取值分组；外部列表（如 GitCode Issue）经数据源同步成同一种 Task。点击「交给 Lead 处理」就是在绑定频道里向主控发一条消息，后续完全复用聊天协作，没有独立的任务执行循环。
 - **项目设置**：维护角色（固定 runtime/model + 定位 + 能力 + 偏好；可开启「仅人工点名」，让该角色只有人类能 @，其他 Agent 的名册里看不到它、不能派发给它，频道历史里对其他 Agent 匿名，它自己也不参与角色间派发；主控不能开启）、多篇准则 Markdown、完整 Skill 包、版本化文档库和自定义面板。文档、准则和完整 Skill 包由平台用独立 Git 管理版本，可查看历史、比较和恢复；删除的内容统一进入项目回收站。
-- **全局设置**：维护新项目角色模板、Runtime 列表（安装状态、版本、启停开关、模型清单）和自定义模型接入。
+- **全局设置**：维护新项目角色模板及其默认启停状态、Runtime 列表（安装状态、版本、启停开关、模型清单）和自定义模型接入。
 - **运行状态**：查看全局 Runtime 实例、调用历史，以及本机已登录 Codex、Claude、Kimi、Grok 账户的限额窗口和重置时间。角色配置可逐个开启用量联动，在额度耗尽时只自动停用已开启的角色，并在重置到点后恢复。
 
 **平台没有任何身份验证**，Web/API 能浏览本机目录、调度 Agent 执行命令，因此 `mc serve` 默认只监听本机 `127.0.0.1`。需要从局域网其他设备访问时显式传 `--host 0.0.0.0`（或设置环境变量 `MISSIONCREW_HOST`），并且只在可信网络中这样做，绝不要暴露到公网；详见 [SECURITY.md](SECURITY.md)。聊天执行并发上限默认 16，可用 `--chat-workers <N>` 或环境变量 `MISSIONCREW_CHAT_MAX_WORKERS` 调整。
@@ -104,7 +105,7 @@ scripts/serve.sh stop       # 停止
 | `claude` (Claude Code) | `claude_code` | 原生双向 stream-json；自带 haiku / sonnet / opus / fable 别名清单 |
 | `codex` (OpenAI Codex) | `codex` | 原生 app-server；模型清单从当前账号动态读取 |
 | `agy` (Google Antigravity CLI) | `antigravity` | 原生 headless stream-json；会话续接、模型发现与 low / medium / high 推理力度 |
-| `pi` | `pi` | 原生 RPC（平台 vendored 安装）；承接自定义 API 模型 |
+| `pi` | `pi` | 原生 RPC（vendored 安装优先，回退系统级 pi）；承接自定义 API 模型 |
 | `grok` (Grok Build) | `grok_build` | ACP stdio |
 | `copilot` (GitHub Copilot CLI) | `copilot` | ACP stdio |
 | `kimi` (Kimi CLI) | `kimi` | ACP stdio |
@@ -123,13 +124,16 @@ Antigravity 需先安装[官方 CLI](https://antigravity.google/docs/cli/getting
 
 除本机 CLI 外，MissionCrew 也支持直接接入 **OpenAI / Anthropic 兼容的 API**——自建推理服务、网关代理、第三方托管都可以，接口协议支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Google Generative AI。这类模型由 [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent) 执行：平台不重写 agent 循环，复用 pi 的工具执行与会话管理，通过它的 RPC 模式对接。接入步骤：
 
-1. **安装 pi**。pi 由平台以 vendored 方式装在数据目录内，检测只认这份安装、不探测系统级 pi。首次使用需要 Node.js/npm，手动装一次（数据目录不是默认值时替换路径前缀）：
+1. **安装 pi**。两种方式任选其一，检测时 vendored 安装优先，没有再回退到 `PATH` 上的系统级 pi：
+
+   - **Homebrew（系统级）**：`brew install pi-coding-agent`，页面「更新」按钮执行 `brew upgrade pi-coding-agent`；
+   - **vendored（装在数据目录内）**：需要 Node.js/npm，手动装一次（数据目录不是默认值时替换路径前缀），「更新」按钮只写 vendor 目录，不会 `-g` 污染全局：
 
    ```bash
    npm install --prefix ~/.missioncrew/pi/vendor --no-fund --no-audit @mariozechner/pi-coding-agent@latest
    ```
 
-   然后在「全局设置」点「重新检测」注册并启用 `pi`；之后的升级由该页的「更新」按钮完成，只写 vendor 目录，不会 `-g` 污染全局。
+   然后在「全局设置」点「重新检测」注册并启用 `pi`。其他来源的系统级 pi（如 `npm -g`）也能识别，但平台不代管升级。无论哪种安装，pi 的配置与会话都重定向到数据目录，不读写 `~/.pi`。
 2. **添加接入**。在「全局设置 → 自定义模型接入」新增一条：接入名、接口协议、Base URL、API Key（字面量或 `$ENV_VAR` 引用，密钥不会回传浏览器）和模型 id 列表。
 3. **绑定角色**。保存后模型以 `接入名/模型id` 的形态出现在角色编辑器的模型清单中，给角色选择 runtime `pi` 和该模型即可使用。
 

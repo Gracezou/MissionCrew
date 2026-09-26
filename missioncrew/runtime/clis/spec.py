@@ -52,12 +52,12 @@ class CliSpec:
     # ACP session/new models 块 -> {模型: 档位};解析厂商私有扩展
     # (如 grok 的 _meta.reasoningEfforts),协议层不认识这些字段
     parse_model_efforts: Optional[Callable[..., dict[str, list[str]]]] = None
-    # () -> 可执行路径;不经 PATH 检测的安装方式(pi vendored)
+    # () -> 可执行路径;平台托管的定位规则(pi vendored 优先,回退 PATH)
     locate_binary: Optional[Callable[[], str]] = None
     # () -> 工具自带模型清单;清单需动态读取时替代静态 models(pi models.json)
     configured_models: Optional[Callable[[], list[str]]] = None
-    # () -> ("npm"|"self", cmd);覆盖通用升级计划(pi 只写 vendor 目录)
-    update_plan: Optional[Callable[[], tuple]] = None
+    # () -> ("npm"|"brew"|"self", cmd) 或 None;覆盖通用升级计划(pi 按安装来源)
+    update_plan: Optional[Callable[[], Optional[tuple]]] = None
     # (command, filesystem) -> command;把统一文件系统权限翻译为原生参数
     apply_permissions: Optional[Callable[..., list[str]]] = None
     # (env, external_dirs) -> env;需要配置式多目录授权的工具注入自有配置

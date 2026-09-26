@@ -264,6 +264,10 @@ let tasksScopeKey = null;
 const projRoles = () => overview.roles.filter(r => r.project_id === currentProject);
 const activeProjRoles = () => projRoles().filter(role => role.enabled !== false);
 const globalRoleTemplates = () => overview.role_templates || [];
+// 新项目默认主控:排序最前、既在新项目中默认启用又不是仅人工点名的模板。
+// 与后端 seed.first_orchestrator_role 同口径,两处判断不要各写各的。
+const defaultOrchestratorTemplate = () =>
+  globalRoleTemplates().find(role => role.enabled !== false && !role.manual_only);
 const channelIsGeneral = channel => channel.id === "general" || channel.id.endsWith(":general");
 const channelIsContent = channel => Boolean(channel.content_kind && channel.content_key);
 const channelActivity = channel => Number(channel.last_message_at || channel.created_at || 0);

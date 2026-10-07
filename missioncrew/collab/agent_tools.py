@@ -163,7 +163,8 @@ ACTION_DEFINITIONS = {
     },
     "message.publish": {
         "description": (
-            "向本项目频道发布消息；mentions 参数是唯一的角色派发通道；"
+            "向本项目频道发布消息，用于派发或向其他频道发消息；最终回复已由平台"
+            "自动发布到触发频道，不要用它复制答复；mentions 参数是唯一的角色派发通道；"
             "返回的 dispatched(实际启动的角色)非空时结束当前 turn，"
             "chain_budget 给出本条协作链已用次数与上限"
         ),

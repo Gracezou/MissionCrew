@@ -163,12 +163,20 @@ DURABLE_CONTEXT_TEMPLATE = """\
 """
 
 TURN_PROMPT = """\
-{resource_notice}# 本轮触发:{trigger_kind}
+{resource_notice}{reply_hint}# 本轮触发:{trigger_kind}
 # 触发消息(JSON,你的任务简报由发起者撰写)
 {trigger}
 """
 
 # 准则/Skill 正文与主控清单条目的变化都不改公共上下文版本,只在本轮输入里列差异
+# 能调用 message.publish 的角色每轮都带:增量回合不重发公共上下文,长会话里
+# 「最终回复自动发布」这条规则离得太远,模型会养成先 publish 再回复的重复输出
+CONTROL_REPLY_HINT = (
+    "# 回复方式\n"
+    "本轮输出会自动作为结果发布到触发消息所在的频道;没有必要不要再用 "
+    "`message.publish` 单独发布答复,它只用于派发或向其他频道发消息。\n\n"
+)
+
 RESOURCE_NOTICE = (
     "# MissionCrew 资源更新\n"
     "自你上一轮之后发生了以下变化,公共上下文版本未变:\n{items}\n\n"
@@ -240,7 +248,7 @@ CONTROL_RULES_TEMPLATE = """\
 纪律:
 - 你发出的任何消息正文(包括最终回复)里的 @角色ID、@[角色ID] 都只是普通文字,永不触发执行;派发只认 `message.publish` 的 `mentions`。不需要协作就不要传 mentions;不要调度你自己,不要编造不存在的角色;角色的 runtime/模型在项目定义时已固定,你不能也不需要调整。
 - 派发后不要使用 `sleep`,不要周期性轮询频道历史、工作树或运行状态,不要代替执行角色继续其任务,也不要向仍在执行的角色再次 `message.publish` 追问中间状态:同一频道同一角色的持久会话无法中途插入新 turn,这类请求只会排在原任务后面,不能提供实时进度。只有 `dispatched` 为空,或仍有不依赖已派发角色的即时工作时,才继续当前 turn。
-- 回答人类、汇总结论或说明状态时直接写最终回复:你在当前 turn 的最终回复会由平台自动发布到触发消息所在的 Channel,不要再调用空 `mentions` 的 `message.publish` 复制同一份答复。
+- 你本轮的输出(最终回复)会由平台自动作为本轮结果,完整发布到触发消息所在的 Channel:回答人类、汇总结论、说明状态以及其他要附带的内容都直接写在这一份输出里。`message.publish` 只在确有必要时使用,即派发(传 `mentions`)或向另一个 Channel 发消息;不要再调用空 `mentions` 的 `message.publish` 把答复单独发一遍,否则同一结果会在频道里出现两次。
 - 配置页协作消息会给出当前页面、当前条目、未保存草稿和用户选中的内容:只提问或讨论时直接回答,不要改配置;明确要求创建或修改时,必须用对应动作实际落库。
 按需查询:
 - 活动 Run 状态不会自动写入你的上下文;只有人类询问运行情况或要求停止角色时,才调用 `channel.runs.list` 取一次性快照,并用返回的 `run_id` 调用 `channel.run.stop`。
@@ -1632,6 +1640,7 @@ class ChatEngine:
             resource_notice = _change_notice(snapshot, seen)
         turn_prompt = TURN_PROMPT.format(
             resource_notice=resource_notice,
+            reply_hint=CONTROL_REPLY_HINT if is_orchestrator else "",
             trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
                                        is_orchestrator, role.id),
             trigger=json.dumps(trigger_record, ensure_ascii=False))

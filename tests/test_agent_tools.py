@@ -44,7 +44,7 @@ def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     assert lead_run_again != lead_run and next_lead_token != lead_token
     assert "# MissionCrew Agent Tool" in lead.common_prompt
     assert "message.publish" in lead.common_prompt
-    assert "最终回复会由平台自动发布" in lead.common_prompt
+    assert "会由平台自动作为本轮结果" in lead.common_prompt
     assert "不要再调用空 `mentions` 的 `message.publish`" in lead.common_prompt
     assert "派工仍必须使用 `message.publish`" in lead.common_prompt
     assert "返回非空 `dispatched` 时" in lead.common_prompt
@@ -65,6 +65,9 @@ def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     assert "missioncrew-action>" not in lead.common_prompt
     assert "不要传 `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
     assert "本轮上下文" not in lead.turn_prompt
+    # 能 publish 的角色每轮都带回复方式提醒,防止长会话里先 publish 再回复的重复输出
+    assert "# 回复方式" in lead.turn_prompt
+    assert "# 回复方式" not in dev.turn_prompt
     assert "MISSIONCREW_AGENT_RUN_ID" not in lead.env
     assert lead_token not in lead.prompt and dev_token not in dev.prompt
     assert Path(lead.env["MISSIONCREW_AGENT_TOKEN_FILE"]).stat().st_mode & 0o777 == 0o600

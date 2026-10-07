@@ -44,30 +44,30 @@ def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     assert lead_run_again != lead_run and next_lead_token != lead_token
     assert "# MissionCrew Agent Tool" in lead.common_prompt
     assert "message.publish" in lead.common_prompt
-    assert "会由平台自动作为本轮结果" in lead.common_prompt
-    assert "不要再调用空 `mentions` 的 `message.publish`" in lead.common_prompt
-    assert "派工仍必须使用 `message.publish`" in lead.common_prompt
-    assert "返回非空 `dispatched` 时" in lead.common_prompt
-    assert "不要使用 `sleep`" in lead.common_prompt
-    assert "不要向仍在执行的角色再次 `message.publish` 追问" in lead.common_prompt
-    assert "不能提供实时进度" in lead.common_prompt
+    assert "automatically published in full as this turn's result" in lead.common_prompt
+    assert "do not call `message.publish` with empty `mentions`" in lead.common_prompt
+    assert "Dispatching always goes through `message.publish`" in lead.common_prompt
+    assert "returns a non-empty `dispatched`" in lead.common_prompt
+    assert "do not use `sleep`" in lead.common_prompt
+    assert "do not send `message.publish` to a role that is still running" in lead.common_prompt
+    assert "cannot give live progress" in lead.common_prompt
     assert "channel.runs.list" in lead.common_prompt
     assert "channel.run.stop" in lead.common_prompt
-    assert "活动 Run 状态不会自动写入你的上下文" in lead.common_prompt
-    assert "不要为这条说明再调用一次 `message.publish`" in lead.common_prompt
+    assert "Active run status is not written into your context automatically" in lead.common_prompt
+    assert "do not call `message.publish` again for that note" in lead.common_prompt
     assert "document.publish" in dev.common_prompt
     assert "document.rename" in dev.common_prompt
     assert "message.publish" not in dev.common_prompt
     assert "channel.runs.list" not in dev.common_prompt
     assert "channel.run.stop" not in dev.common_prompt
-    assert "返回非空 `dispatched` 时" not in dev.common_prompt
+    assert "returns a non-empty `dispatched`" not in dev.common_prompt
     assert "is_current_run" not in lead.common_prompt
     assert "missioncrew-action>" not in lead.common_prompt
-    assert "不要传 `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
+    assert "do not pass `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
     assert "本轮上下文" not in lead.turn_prompt
     # 能 publish 的角色每轮都带回复方式提醒,防止长会话里先 publish 再回复的重复输出
-    assert "# 回复方式" in lead.turn_prompt
-    assert "# 回复方式" not in dev.turn_prompt
+    assert "# How Your Reply Is Delivered" in lead.turn_prompt
+    assert "# How Your Reply Is Delivered" not in dev.turn_prompt
     assert "MISSIONCREW_AGENT_RUN_ID" not in lead.env
     assert lead_token not in lead.prompt and dev_token not in dev.prompt
     assert Path(lead.env["MISSIONCREW_AGENT_TOKEN_FILE"]).stat().st_mode & 0o777 == 0o600
@@ -442,8 +442,8 @@ def test_orchestrator_message_tool_uses_explicit_mentions_and_chain_context(seed
     assert "dev" in roles and "reviewer" not in roles
     assert result["dispatched"] == ["dev"]
     assert result["handoff"] == "end_turn"
-    assert "不要向仍在执行的角色追问中间状态" in result["resume"]
-    assert "自动启动你的新 turn" in result["resume"]
+    assert "Do not ask still-running roles for interim status" in result["resume"]
+    assert "starts a new turn for you" in result["resume"]
     assert "not_dispatched" not in result
 
 

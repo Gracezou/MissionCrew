@@ -263,12 +263,12 @@ def test_project_has_one_configurable_orchestrator_and_protects_it(seeded):
     cfg = chat._assemble(seeded.get_channel("general"),
                          seeded.get_role("webshop", "expert"),
                          seeded.get_backend("exp-1"), msg_id)
-    assert "项目主控职责" in cfg.prompt
-    assert "单条协作链最多 1000 次 Agent 执行" in cfg.prompt
+    assert "Orchestrator Duties" in cfg.prompt
+    assert "allows at most 1000 agent runs" in cfg.prompt
     dev_cfg = chat._assemble(seeded.get_channel("general"),
                              seeded.get_role("webshop", "dev"),
                              seeded.get_backend("std-1"), msg_id)
-    assert "项目主控职责" not in dev_cfg.prompt
+    assert "Orchestrator Duties" not in dev_cfg.prompt
 
     project["max_chain_runs"] = 0
     assert client.post("/api/projects", json=project).status_code == 422
@@ -292,7 +292,7 @@ def test_orchestrator_can_create_task_channel_and_dynamic_board(seeded):
         seeded.get_backend("std-1"),
         seeded.add_message("webshop:api-design", "human", "human", "@lead 开始", ["lead"]),
     ).prompt
-    assert "频道用途/讨论边界:只讨论结算 API" in prompt
+    assert "Channel purpose/scope: 只讨论结算 API" in prompt
 
     layout = [{
         "id": "requirements", "type": "table", "title": "需求",
@@ -423,17 +423,17 @@ def test_document_library_versions_and_context_use_links_on_demand(seeded):
     assert str(checkout_skill) not in chat_cfg.prompt
     assert f"{checkout_skill.parent.parent}/<id>/SKILL.md" in chat_cfg.prompt
     assert "# Checkout v2" not in chat_cfg.prompt  # 链接文件不再预注入
-    assert "仅在任务需要时读取链接文件" in chat_cfg.prompt
+    assert "read linked files only when the task needs them" in chat_cfg.prompt
     assert chat_cfg.env["MISSIONCREW_DOCUMENTS_DIR"] in chat_cfg.prompt
     assert chat_cfg.env["MISSIONCREW_DOCUMENTS_URL"] == \
         "/resources/webshop/documents"
     assert chat_cfg.env["MISSIONCREW_PROJECT_URL"] == "/resources/webshop"
-    assert "/resources/webshop/dashboards/<面板 id>" in chat_cfg.prompt
-    assert "最终回复引用项目文档时必须写成" in chat_cfg.prompt
-    assert "不得输出内部读写目录" in chat_cfg.prompt
-    assert "路径访问失败处理" in chat_cfg.prompt
-    assert "不要改为搜索共同父目录" in chat_cfg.prompt
-    assert "$MISSIONCREW_DOCUMENTS_DIR/<相对路径>" in chat_cfg.prompt
+    assert "/resources/webshop/dashboards/<dashboard id>" in chat_cfg.prompt
+    assert "a final reply that references project documents must write them as" in chat_cfg.prompt
+    assert "never output internal read/write directories" in chat_cfg.prompt
+    assert "Path access failures" in chat_cfg.prompt
+    assert "do not switch to searching common parent directories" in chat_cfg.prompt
+    assert "$MISSIONCREW_DOCUMENTS_DIR/<relative path>" in chat_cfg.prompt
     guideline_dir = Path(chat_cfg.env["MISSIONCREW_GUIDELINES_DIR"])
     dev_guideline = guideline_dir / "dev-guide.md"
     tester_guideline = guideline_dir / "tester-guide.md"
@@ -465,14 +465,14 @@ def test_document_library_versions_and_context_use_links_on_demand(seeded):
         seeded.get_backend("std-1"), msg_id)
     assert updated_cfg.context_version == first_context_version
     assert not updated_cfg.context_changed
-    assert "# MissionCrew 资源更新" in updated_cfg.turn_prompt
-    assert "准则 `dev-guide`" in updated_cfg.turn_prompt
-    assert "tester-guide" not in updated_cfg.turn_prompt.split("资源更新")[1].split("触发消息")[0]
+    assert "# MissionCrew Resource Updates" in updated_cfg.turn_prompt
+    assert "Guideline `dev-guide`" in updated_cfg.turn_prompt
+    assert "tester-guide" not in updated_cfg.turn_prompt.split("Resource Updates")[1].split("Trigger Message")[0]
     adapters.get_adapter("mock").run(updated_cfg)   # 本轮已告知,下一轮不再提示
     settled_cfg = chat._assemble(
         seeded.get_channel("general"), seeded.get_role("webshop", "dev"),
         seeded.get_backend("std-1"), msg_id)
-    assert "# MissionCrew 资源更新" not in settled_cfg.turn_prompt
+    assert "# MissionCrew Resource Updates" not in settled_cfg.turn_prompt
     # description 属于索引信息,改动仍改变版本
     next(row for row in project.guidelines if row.name == "dev-guide").description = "新描述"
     seeded.put_project(project)
@@ -1257,19 +1257,19 @@ def test_orchestrator_prompt_lists_channels_boards_and_budget(seeded):
     cfg = chat._assemble(seeded.get_channel("general"),
                          seeded.get_role("webshop", "lead"),
                          seeded.get_backend("std-1"), msg)
-    assert "## 现有频道" in cfg.prompt and "general" in cfg.prompt
+    assert "## Existing Channels" in cfg.prompt and "general" in cfg.prompt
     assert "active-topic" in cfg.prompt and "archived-topic" not in cfg.prompt
-    assert "## 现有面板" in cfg.prompt and "quality" in cfg.prompt
-    assert "协作链预算" in cfg.prompt and "message.publish" in cfg.prompt
+    assert "## Existing Dashboards" in cfg.prompt and "quality" in cfg.prompt
+    assert "Collaboration chain budget" in cfg.prompt and "message.publish" in cfg.prompt
     assert "missioncrew-action>" not in cfg.prompt
     # 派发契约:mentions 是唯一通道,正文里的 @ 永不触发
-    assert "`mentions`" in cfg.prompt and "永不触发执行" in cfg.prompt
+    assert "`mentions`" in cfg.prompt and "never triggers execution" in cfg.prompt
     # 生命周期契约:实际派发后结束本轮,等待平台用新主控 turn 交回结果
-    assert "返回非空 `dispatched` 时" in cfg.prompt
-    assert "不要使用 `sleep`" in cfg.prompt
-    assert "不要向仍在执行的角色再次 `message.publish` 追问" in cfg.prompt
-    assert "不能提供实时进度" in cfg.prompt
-    assert "自动启动新的主控 turn" in cfg.prompt
+    assert "returns a non-empty `dispatched`" in cfg.prompt
+    assert "do not use `sleep`" in cfg.prompt
+    assert "do not send `message.publish` to a role that is still running" in cfg.prompt
+    assert "cannot give live progress" in cfg.prompt
+    assert "automatically starts a new orchestrator turn" in cfg.prompt
 
 
 def test_orchestrator_can_generate_project_config_and_documents(seeded):
@@ -1325,7 +1325,7 @@ def test_orchestrator_can_generate_project_config_and_documents(seeded):
     ).prompt
     assert all(action in prompt for action in (
         "guideline.save", "skill.save", "document.publish"))
-    assert "save_rule" not in prompt and "只提问或讨论时直接回答" in prompt
+    assert "save_rule" not in prompt and "if the user only asks or discusses, just answer" in prompt
     assert "`api-style` · 修改 API 时使用" in prompt     # 准则索引对主控同样可见
     assert "`local-ci` · 本地 CI" in prompt
     assert "## 现有 Runtime" not in prompt              # Runtime 清单对调度无价值,已移除
@@ -1450,7 +1450,7 @@ def test_project_config_managers_are_full_pages_with_orchestrator_requests(seede
     assert "resolveConfigChatChannel" in js
     assert '"POST", `/api/projects/${encodeURIComponent(currentProject)}/content-channel`' in js
     assert "fetch(" in js and "response.status === 404" in js
-    assert "只需回答，不要写入" in js
+    assert "just answer and do not write anything" in js
     assert "setInterval(pollConfigChat, 2000)" in main
     assert "openMarkdownDocumentLink" in documents
     assert "revealMissionCrewDocument" in documents
@@ -1493,7 +1493,7 @@ def test_binary_document_chat_context_keeps_file_identity_without_text_selection
     assert "if (snapshot.content === null) return snapshot.metadata" in configs
     assert "effectiveSelection = currentPage?.text_snapshot_available === false" in configs
     assert "? null : selection" in configs
-    assert "没有 current_page.content_path、selection 或行号" in configs
+    assert "so there is no current_page.content_path, " in configs
     assert "将收到文件名与文档路径" in configs
     assert 'docPaneContentType = "binary"' in documents
     binary_branch = documents.index('docPaneContentType = "binary"')
@@ -1718,30 +1718,30 @@ def test_harness_workspace_contains_documents_without_polluting_source_workdir(s
     assert not os.path.isabs(os.readlink(link))
     assert Path(cfg.env["MISSIONCREW_DOCUMENTS_DIR"]) == workspace / "documents"
     assert not (workspace / "docs").exists()
-    assert "MissionCrew 是本地多 Agent harness" in cfg.prompt
-    assert "不会进入业务源码或业务代码提交" in cfg.prompt
-    assert "协作草稿、报告和普通聊天产生的验证记录写入 `documents/`" in cfg.prompt
-    assert "Task 包含标题、简介、正文、状态" in cfg.prompt
-    assert "快照对当前执行只读" in cfg.prompt
-    assert "包括 `/tmp`、`/var/tmp`" in cfg.prompt
+    assert "MissionCrew is a local multi-agent harness" in cfg.prompt
+    assert "never enter business source code or" in cfg.prompt
+    assert "verification records from ordinary chats " in cfg.prompt
+    assert "A Task has a title, summary, body, status" in cfg.prompt
+    assert "Snapshots are read-only for the current run" in cfg.prompt
+    assert "including `/tmp`, `/var/tmp`" in cfg.prompt
     assert str(workspace / "temp") in cfg.prompt
-    assert "路径访问失败处理" in cfg.prompt
-    assert "不要猜测或搜索 `.missioncrew` 的物理位置" in cfg.prompt
+    assert "Path access failures" in cfg.prompt
+    assert "do not guess or search for the physical " in cfg.prompt
     # 沙箱把授权根下的 .git/.codex/.agents 挂成只读,须引导申请升级而不是当作环境只读
-    assert "沙箱只读路径处理" in cfg.prompt
-    assert "不要据此判定环境只读而放弃" in cfg.prompt
-    assert "MissionCrew 注入的项目 Skill 是额外能力" in cfg.prompt
-    assert "不要把 `MISSIONCREW_SKILLS_DIR` 当作唯一 Skill 来源" in cfg.prompt
-    assert "`.agent/skills`、`.agents/skills`、`.claude/skills`" in cfg.prompt
-    assert "MissionCrew 是一个本地 Agent harness" in (
+    assert "Sandbox read-only paths" in cfg.prompt
+    assert "Do not conclude that the environment is read-only and give up" in cfg.prompt
+    assert "project skills injected by MissionCrew are extra capabilities" in cfg.prompt
+    assert "do not treat `MISSIONCREW_SKILLS_DIR` as the only skill source" in cfg.prompt
+    assert "`.agent/skills`, `.agents/skills`, `.claude/skills`" in cfg.prompt
+    assert "MissionCrew is a local agent harness" in (
         workspace / "README.md").read_text(encoding="utf-8")
     # 规则细节走渐进式披露:README 只留地图,边界与动作用法在手册里
     readme = (workspace / "README.md").read_text(encoding="utf-8")
-    assert "manual.md" in readme and "Shell 重定向" not in readme
+    assert "manual.md" in readme and "shell redirections" not in readme
     manual = (workspace / "manual.md").read_text(encoding="utf-8")
-    assert "Shell 重定向、后台日志和工具自动生成" in manual
-    assert "清单内路径报 `Read-only file system` 时先看位置" in manual
-    assert "记录 permission_request 事件" in manual
+    assert "shell redirections, background logs and files generated by tools" in manual
+    assert "When a listed path reports `Read-only file system`, check where it is" in manual
+    assert "permission_request event" in manual
     assert "dashboard.save" in manual and "guideline.save" in manual
     assert Path(cfg.env["MISSIONCREW_MANUAL"]) == workspace / "manual.md"
     assert str(workspace / "manual.md") in cfg.prompt
@@ -2321,12 +2321,12 @@ def test_orchestrator_roster_changes_notify_without_bumping_context_version(seed
     backend = seeded.get_backend("std-1")
     msg = seeded.add_message("general", "human", "human", "@lead 看看", ["lead"])
     first = chat._assemble(seeded.get_channel("general"), lead, backend, msg)
-    assert "# 项目清单" in first.common_prompt
-    assert "## 现有频道" in first.common_prompt and "## 角色名册" in first.common_prompt
+    assert "# Project Inventory" in first.common_prompt
+    assert "## Existing Channels" in first.common_prompt and "## Role Roster" in first.common_prompt
     # 频道只留 id 列表,详情走 channel.list;当前频道行直接给出可用于 message.publish 的 id
-    assert "用 `channel.list` 按需查看(含归档)" in first.common_prompt
-    assert "当前频道:#大厅(id `general`)" in first.common_prompt
-    assert "channel.list" in first.common_prompt.split("# 项目主控职责")[1]
+    assert "View them on demand with `channel.list` (archived included)" in first.common_prompt
+    assert "Current channel: #大厅 (id `general`)" in first.common_prompt
+    assert "channel.list" in first.common_prompt.split("# Orchestrator Duties")[1]
     adapters.get_adapter("mock").run(first)
 
     seeded.put_channel(Channel(id="webshop:hotfix", name="hotfix", project_id="webshop",
@@ -2337,21 +2337,21 @@ def test_orchestrator_roster_changes_notify_without_bumping_context_version(seed
     second = chat._assemble(seeded.get_channel("general"), lead, backend, msg)
     assert second.context_version == first.context_version
     assert not second.context_changed
-    notice = second.turn_prompt.split("# MissionCrew 资源更新")[1].split("# 触发消息")[0]
-    assert "新增频道:hotfix(#hotfix):修复结算页崩溃" in notice
-    assert "角色 `dev` 已停用或删除" in notice
+    notice = second.turn_prompt.split("# MissionCrew Resource Updates")[1].split("# Trigger Message")[0]
+    assert "New channel: hotfix (#hotfix): 修复结算页崩溃" in notice
+    assert "Role `dev` was disabled or deleted" in notice
     assert "hotfix" in second.common_prompt and "- @dev " not in second.common_prompt
     adapters.get_adapter("mock").run(second)
 
     third = chat._assemble(seeded.get_channel("general"), lead, backend, msg)
-    assert "# MissionCrew 资源更新" not in third.turn_prompt
+    assert "# MissionCrew Resource Updates" not in third.turn_prompt
     channel = seeded.get_channel("webshop:hotfix")
     channel.archived = True
     seeded.put_channel(channel)
     fourth = chat._assemble(seeded.get_channel("general"), lead, backend, msg)
     assert fourth.context_version == first.context_version
-    assert "频道 `hotfix` 已归档或删除" in fourth.turn_prompt
-    assert "hotfix" not in fourth.common_prompt.split("## 现有频道")[1].split("## 现有面板")[0]
+    assert "Channel `hotfix` was archived or deleted" in fourth.turn_prompt
+    assert "hotfix" not in fourth.common_prompt.split("## Existing Channels")[1].split("## Existing Dashboards")[0]
 
 
 def test_trigger_and_history_json_are_compact(seeded):
@@ -2362,11 +2362,11 @@ def test_trigger_and_history_json_are_compact(seeded):
     seeded.add_message("general", "human", "human", "早前的消息", [])
     msg = seeded.add_message("general", "human", "human", "@lead 看看", ["lead"])
     cfg = chat._assemble(seeded.get_channel("general"), lead, backend, msg)
-    trigger_raw = cfg.turn_prompt.split("# 触发消息(JSON,你的任务简报由发起者撰写)\n", 1)[1].strip()
+    trigger_raw = cfg.turn_prompt.split("# Trigger Message (JSON; your task brief is written by the sender)\n", 1)[1].strip()
     assert "\n" not in trigger_raw
     trigger = json.loads(trigger_raw)
     assert trigger["content"] == "@lead 看看" and "mention_spans" not in trigger
-    history_raw = cfg.recovery_prompt.split("# 最近对话(JSON,按消息边界格式化)\n", 1)[1].split("\n# ", 1)[0]
+    history_raw = cfg.recovery_prompt.split("# Recent Conversation (JSON, one message per line)\n", 1)[1].split("\n# ", 1)[0]
     history = json.loads(history_raw)
     assert [m["content"] for m in history] == ["早前的消息"]
 
@@ -2381,21 +2381,21 @@ def test_prompt_leads_with_workflow_and_marks_trigger_kind(seeded):
     human_msg = seeded.add_message("general", "human", "human", "@dev 干活", ["dev"])
     dev_cfg = chat._assemble(seeded.get_channel("general"), dev, backend, human_msg)
     body = dev_cfg.common_prompt
-    assert body.index("# 怎么干活") < body.index("# MissionCrew Agent Tool") < body.index("# 必须遵守")
-    assert "项目:WebShop 电商站 · " in body and "工作目录:`" in body
-    assert "1. 读任务:" in body and "5. 回复:" in body
-    assert "# 项目主控职责" not in body and "1. 读需求:" not in body
-    assert "# 本轮触发:人类消息" in dev_cfg.turn_prompt
+    assert body.index("# How to Work") < body.index("# MissionCrew Agent Tool") < body.index("# Must Follow")
+    assert "Project: WebShop 电商站 · " in body and "Working directory: `" in body
+    assert "1. Read the task:" in body and "5. Reply:" in body
+    assert "# Orchestrator Duties" not in body and "1. Read the request:" not in body
+    assert "# This Turn's Trigger: human message" in dev_cfg.turn_prompt
 
     report = seeded.add_message("general", "dev", "agent", "已完成,测试通过", ["lead"])
     lead_cfg = chat._assemble(seeded.get_channel("general"), lead, backend, report)
-    assert "# 本轮触发:执行角色 @dev 的回报,请验收" in lead_cfg.turn_prompt
-    assert "1. 读需求:" in lead_cfg.common_prompt and "阶段结论用 `task.brief` 记进 Task 简报" in lead_cfg.common_prompt
-    assert "当前频道就传 `general`" in lead_cfg.common_prompt
-    roster = lead_cfg.common_prompt.split("# 项目清单")[1]
-    assert "- @dev 开发 · 能力 代码执行 · 偏好 全栈 · 定位 " in roster
-    assert "面板、看板数据源、自动化、停用的准则与 Skill:无" in roster   # 空段折叠成一行
-    assert "## 现有面板" not in roster
+    assert "# This Turn's Trigger: report from executor @dev; review it" in lead_cfg.turn_prompt
+    assert "1. Read the request:" in lead_cfg.common_prompt and "Record milestone conclusions in the Task with `task.brief`" in lead_cfg.common_prompt
+    assert "`general` for the current channel" in lead_cfg.common_prompt
+    roster = lead_cfg.common_prompt.split("# Project Inventory")[1]
+    assert "- @dev 开发 · capabilities coding · preferences 全栈 · profile " in roster
+    assert "Dashboards, board data sources, automations, disabled guidelines and skills: none" in roster   # 空段折叠成一行
+    assert "## Existing Dashboards" not in roster
 
 
 def test_document_viewer_reloads_body_when_file_version_changes(seeded):

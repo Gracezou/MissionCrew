@@ -83,30 +83,34 @@ class _PendingInteraction:
     stopped: bool = False
 
 # 提示词结构约定:人格(role_desc)是"选人用的专长画像",不是任务;
-# 任务只来自触发消息(由发起者——人类或调度角色——撰写的简报)
-WORKDIR_SECTION = "工作目录:`{workdir}`(就是当前目录,直接在其中读写文件、运行命令完成工作)"
+# 任务只来自触发消息(由发起者——人类或调度角色——撰写的简报)。
+# 给角色的提示词一律用英文;人类可见内容的语言由公共区块里的 Language 一行约定。
+WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read/write files "
+                   "and run commands here to do the work)")
 # 频道绑定目录缺失时的回退提示:让 Agent 知道当前目录不是代码仓,避免误操作
 MISSING_WORKDIR_NOTICE = (
-    "注意:本频道绑定的工作目录 `{bound}` 已不存在(例如任务 worktree 已清理),"
-    "本轮回退到平台默认目录 `{workdir}`。这里没有业务代码,不要在此执行 git 操作,"
-    "也不要把它当作代码仓;要继续原目录的工作,先重建该目录(如 git worktree add),"
-    "或新建频道绑定正确的目录。")
+    "Note: the working directory `{bound}` bound to this channel no longer exists (for "
+    "example, the task worktree was cleaned up), so this turn falls back to the platform "
+    "default directory `{workdir}`. It holds no business code: do not run git here or treat "
+    "it as a repository. To continue work in the original directory, recreate it first "
+    "(e.g. `git worktree add`), or create a new channel bound to the correct directory.")
 
 CHAT_COMMON_BODY = """\
-# 聊天协作请求
-你是角色 @{role_id}({role_name})。
-角色定位(这是你的专长画像,供协作方选人参考;它不是任务,不要据此自行发挥):
+# Chat Collaboration Request
+You are role @{role_id} ({role_name}).
+Role profile (your expertise, shown to collaborators for choosing assignees; it is not a task, do not act on it on your own):
 {role_desc}
-角色能力:{role_capabilities}
-角色偏好:{role_traits}
-固定执行组合:{role_runtime}/{role_model}{role_effort}
-当前频道:#{channel_name}(id `{channel_id}`)
-频道用途/讨论边界:{channel_purpose}
-项目:{project_line}
+Role capabilities: {role_capabilities}
+Role preferences: {role_traits}
+Fixed runtime: {role_runtime}/{role_model}{role_effort}
+Current channel: #{channel_name} (id `{channel_id}`)
+Channel purpose/scope: {channel_purpose}
+Project: {project_line}
 {workdir_section}
 {repos_line}
+Language: write everything MissionCrew shows to humans (final replies, messages, documents, Task status briefs) in Simplified Chinese; code, commits and other repository content follow the repository's own conventions.
 
-# 怎么干活
+# How to Work
 {workflow_section}
 
 {tool_section}
@@ -119,77 +123,80 @@ CHAT_COMMON_BODY = """\
 
 # 执行角色与主控各自的一轮流程:先读的先给,规则都挂在步骤上
 _EXECUTOR_STEPS = """\
-1. 读任务:任务只来自最下方「触发消息」里的任务简报,角色定位不是任务;简报信息不足就在回复中提出,不要臆测扩大范围。
-2. 补背景:需要时再看,不要预加载。频道历史在「工作区一览」的 `channel-history.json`;准则和 Skill 先看「项目资料」里的 description,相关再读全文;项目文档在 `{documents_dir}`。
-3. 干活:在工作目录读写代码、运行命令;只能碰「必须遵守」里列出的可读写目录;临时文件优先放当前业务仓已有的任务目录(如项目约定的 `.tmp/`、`.e2e/`),没有项目约定时使用 `{temp_dir}`,并在任务完成后清理。
-4. 写回平台:发布文档、创建或更新 Task、追加状态简报,一律用下方 Agent Tool;不要直接改 `documents/`、`tasks/` 里的文件。
-5. 回复:你的最终回复会被完整、原样发布到聊天频道,人类可以看到;用中文,先说结论,再简述做了什么;不要贴大段日志;引用平台资源用 `/resources/...` 链接,不要输出内部路径。"""
+1. Read the task: the task comes only from the brief in the "Trigger Message" at the bottom; your role profile is not a task. If the brief is missing information, raise it in your reply instead of guessing or widening the scope.
+2. Gather context only when needed; do not preload. Channel history is `channel-history.json` under "Workspace Overview"; for guidelines and skills, check their descriptions under "Project Materials" first and read the full text only if relevant; project documents are in `{documents_dir}`.
+3. Do the work: read/write code and run commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses (such as the project's `.tmp/` or `.e2e/`); without such a convention use `{temp_dir}`, and clean up when the task is done.
+4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
+5. Reply: your final reply is published to the chat channel in full and verbatim, where humans see it. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths."""
 
 EXECUTOR_WORKFLOW = _EXECUTOR_STEPS + """
-- 你不是项目主控,看不到其他执行角色名册,也不能调度其他角色;消息正文里写任何 @ 都只是普通文字。
-- 只提交本次任务的完整结果。若本轮由项目主控派发,平台会把结果自动交回主控;若由人类直接点名,结果只发布到频道,不会自动触发主控,主控在后续被人类唤起时仍可读取完整记录。"""
+- You are not the project orchestrator: you cannot see the roster of other executor roles and cannot dispatch to other roles; any @ in your message text is plain text.
+- Submit only the complete result of this task. If the orchestrator dispatched this turn, the platform hands your result back to it automatically; if a human mentioned you directly, the result is only published to the channel and does not trigger the orchestrator, which can still read the full record when a human calls on it later."""
 
 # 仅人工点名的角色:不进 Agent 协作图,有无主控都按执行角色干活,结果只留给人类
 MANUAL_ONLY_WORKFLOW = _EXECUTOR_STEPS + """
-- 你是仅人工点名的角色:只有人类会点名你,其他角色看不到你;你也看不到角色名册、不能调度其他角色,消息正文里写任何 @ 都只是普通文字。
-- 只提交本次任务的完整结果:结果只发布到频道供人类查看,不会自动触发其他角色。"""
+- You are a human-mention-only role: only humans can mention you and other roles cannot see you; you cannot see the role roster or dispatch to other roles, and any @ in your message text is plain text.
+- Submit only the complete result of this task: it is published to the channel for humans and does not trigger any other role."""
 
 ORCHESTRATOR_WORKFLOW = """\
-1. 读需求:人类的请求或执行角色的回报就是本轮输入,类型见「本轮触发」一行;人类同时点了多个角色时平台只启动你,完整名单在触发消息 JSON 的 `mentions` 和 `mention_spans` 里,由你决定并行、顺序或调整人选后分别派发。
-2. 定人和定地方:在下方「角色名册」按定位、能力与偏好选人;是否新建频道按项目准则,没有约定就在当前频道派发;要引用、派发到其他频道或新建频道前,先用 `channel.list`(scope=active/archived/all)查一遍,避免重复建同名频道。
-3. 派发:`message.publish` 传 `channel`(当前频道就传 `{channel_id}`)、`mentions` 角色数组,content 写清背景、要求和验收标准;派工仍必须使用 `message.publish`,并在 `mentions` 中显式写入目标角色,这是唯一的派发方式。
-4. 收尾等回报:`message.publish` 返回非空 `dispatched` 时,当前 turn 的派发职责已经完成,立即在最终回复中简短说明已派发,然后结束当前 turn;不要为这条说明再调用一次 `message.publish`。执行角色完成或失败后,平台会自动启动新的主控 turn 并交回完整结果,届时再验收、继续调度或汇总。
-5. 验收汇总:收到回报后对照验收标准核对,再继续派发或写结论;阶段结论用 `task.brief` 记进 Task 简报,跨轮状态靠它而不是会话记忆;验收要跑命令时到「项目代码仓」目录里做,当前工作目录不一定是代码仓。"""
+1. Read the request: a human request or an executor's report is this turn's input; its type is on the "This Turn's Trigger" line. When a human mentions several roles at once, the platform starts only you; the full list is in the trigger message JSON's `mentions` and `mention_spans`, and you decide whether to dispatch them in parallel, in sequence, or to different assignees.
+2. Choose who and where: pick roles from the "Role Roster" below by profile, capabilities and preferences. Whether to open a new channel follows the project guidelines; without a convention, dispatch in the current channel. Before referencing, dispatching to, or creating another channel, check with `channel.list` (scope=active/archived/all) to avoid duplicate channels.
+3. Dispatch: call `message.publish` with `channel` (`{channel_id}` for the current channel) and a `mentions` array of roles; the content states the background, requirements and acceptance criteria. Dispatching always goes through `message.publish` with the target roles listed explicitly in `mentions`; there is no other way.
+4. Wrap up and wait for reports: once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is done; say briefly in your final reply that the work was dispatched, then end the turn, and do not call `message.publish` again for that note. When the executor finishes or fails, the platform automatically starts a new orchestrator turn with its full result; review, dispatch further, or summarize then.
+5. Review and summarize: check reports against the acceptance criteria, then dispatch further or write the conclusion. Record milestone conclusions in the Task with `task.brief`; state across turns lives there, not in session memory. Run verification commands inside the "Project repositories" directories; the current working directory is not necessarily a repository."""
 
 # 无主控项目:每个角色既执行也可派发,流程是执行与主控两条线的合并
 PEER_WORKFLOW = """\
-1. 读任务:本轮输入是最下方「触发消息」里的人类请求、其他角色派发的任务简报或回报,类型见「本轮触发」一行;角色定位不是任务;简报信息不足就在回复中提出,不要臆测扩大范围。
-2. 补背景:需要时再看,不要预加载。频道历史在「工作区一览」的 `channel-history.json`;准则和 Skill 先看「项目资料」里的 description,相关再读全文;项目文档在 `{documents_dir}`。
-3. 干活或派发:能自己完成的就在工作目录读写代码、运行命令;只能碰「必须遵守」里列出的可读写目录;临时文件优先放当前业务仓已有的任务目录,没有项目约定时使用 `{temp_dir}`,并在任务完成后清理。需要其他角色时在下方「角色名册」按定位、能力与偏好选人,用 `message.publish` 传 `channel`(当前频道就传 `{channel_id}`)和 `mentions` 角色数组派发,content 写清背景、要求和验收标准;这是唯一的派发方式。
-4. 写回平台:发布文档、创建或更新 Task、追加状态简报,一律用下方 Agent Tool;不要直接改 `documents/`、`tasks/` 里的文件。
-5. 回复:你的最终回复会被完整、原样发布到聊天频道;用中文,先说结论,再简述做了什么;不要贴大段日志;引用平台资源用 `/resources/...` 链接,不要输出内部路径。`message.publish` 返回非空 `dispatched` 时,当前 turn 的派发职责已经完成,简短说明已派发后立即结束 turn;被派发角色完成或失败后,平台会自动启动你的新 turn 并交回完整结果,届时再验收、继续派发或汇总。
-- 本项目没有主控:所有角色权限相同。由你派发的任务,结果自动交回你;由人类直接点名的任务,结果只发布到频道,不会自动触发其他角色;人类同时点名多个角色时各自启动、互不等待。"""
+1. Read the task: this turn's input is the human request, the task brief dispatched by another role, or the report in the "Trigger Message" at the bottom; its type is on the "This Turn's Trigger" line. Your role profile is not a task. If the brief is missing information, raise it in your reply instead of guessing or widening the scope.
+2. Gather context only when needed; do not preload. Channel history is `channel-history.json` under "Workspace Overview"; for guidelines and skills, check their descriptions under "Project Materials" first and read the full text only if relevant; project documents are in `{documents_dir}`.
+3. Do the work or dispatch: do what you can yourself by reading/writing code and running commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. When you need other roles, pick them from the "Role Roster" below by profile, capabilities and preferences, and dispatch with `message.publish`, passing `channel` (`{channel_id}` for the current channel) and a `mentions` array; the content states the background, requirements and acceptance criteria. This is the only way to dispatch.
+4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
+5. Reply: your final reply is published to the chat channel in full and verbatim. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths. Once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is done: say briefly that the work was dispatched and end the turn; when the dispatched role finishes or fails, the platform automatically starts a new turn for you with its full result; review, dispatch further, or summarize then.
+- This project has no orchestrator: all roles have equal permissions. Results of tasks you dispatch come back to you automatically; results of tasks a human assigned directly are only published to the channel and trigger no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others."""
 
 DURABLE_CONTEXT_TEMPLATE = """\
-# MissionCrew 持久公共上下文
-上下文版本:{context_version}
+# MissionCrew Durable Shared Context
+Context version: {context_version}
 
-# 会话压缩规则
-- 本区块是 MissionCrew 提供的权威公共输入，包含角色、项目、权限、工作目录和协作规则。
-- Runtime 执行 compact/上下文压缩时，只压缩普通对话、工具过程和任务细节；必须完整保留本区块，不得摘要、删减或改写。
-- 同一会话后续收到版本不同的本区块时，后收到的版本完整取代旧版本；不得继续沿用或合并旧项目设置。
+# Session Compaction Rules
+- This block is the authoritative shared input from MissionCrew: role, project, permissions, working directories and collaboration rules.
+- When the runtime compacts the context, compact only ordinary conversation, tool activity and task details; keep this block complete and never summarize, trim or rewrite it.
+- If this session later receives this block with a different version, the newer version fully replaces the old one; do not keep using or merge old project settings.
 
 {common_body}
 """
 
 TURN_PROMPT = """\
-{resource_notice}{reply_hint}# 本轮触发:{trigger_kind}
-# 触发消息(JSON,你的任务简报由发起者撰写)
+{resource_notice}{reply_hint}# This Turn's Trigger: {trigger_kind}
+# Trigger Message (JSON; your task brief is written by the sender)
 {trigger}
 """
 
-# 准则/Skill 正文与主控清单条目的变化都不改公共上下文版本,只在本轮输入里列差异
 # 能调用 message.publish 的角色每轮都带:增量回合不重发公共上下文,长会话里
 # 「最终回复自动发布」这条规则离得太远,模型会养成先 publish 再回复的重复输出
 CONTROL_REPLY_HINT = (
-    "# 回复方式\n"
-    "本轮输出会自动作为结果发布到触发消息所在的频道;没有必要不要再用 "
-    "`message.publish` 单独发布答复,它只用于派发或向其他频道发消息。\n\n"
+    "# How Your Reply Is Delivered\n"
+    "Your output this turn is automatically published as the result to the trigger "
+    "message's channel; unless necessary, do not publish the answer again with "
+    "`message.publish`, which is only for dispatching or posting to other channels.\n\n"
 )
 
+# 准则/Skill 正文与主控清单条目的变化都不改公共上下文版本,只在本轮输入里列差异
 RESOURCE_NOTICE = (
-    "# MissionCrew 资源更新\n"
-    "自你上一轮之后发生了以下变化,公共上下文版本未变:\n{items}\n\n"
+    "# MissionCrew Resource Updates\n"
+    "Since your last turn the following changed; the shared context version is unchanged:\n"
+    "{items}\n\n"
 )
 _CHANGE_LABELS = {
-    "guideline": "准则", "skill": "Skill", "role": "角色", "repo": "代码仓",
-    "channel": "频道", "board": "面板", "source": "数据源", "automation": "自动化",
-    "disabled": "停用清单",
+    "guideline": "Guideline", "skill": "Skill", "role": "Role", "repo": "Repository",
+    "channel": "Channel", "board": "Dashboard", "source": "Data source",
+    "automation": "Automation", "disabled": "Disabled list",
 }
 _ROSTER_KINDS = frozenset({"role", "repo", "channel", "board", "source", "automation", "disabled"})
 _REMOVED_HINT = {
-    "role": "已停用或删除,不可再派发", "channel": "已归档或删除", "board": "已删除",
-    "source": "已删除", "automation": "已删除", "repo": "已移除",
+    "role": "was disabled or deleted; do not dispatch to it", "channel": "was archived or deleted",
+    "board": "was deleted", "source": "was deleted", "automation": "was deleted",
+    "repo": "was removed",
 }
 
 
@@ -210,10 +217,10 @@ def _change_notice(snapshot: dict[str, tuple[str, str]], seen: dict[str, str]) -
         text = line.strip().removeprefix("- ")   # 清单行自带列表符号,提示里去掉
         if key not in seen:
             if line and not baseline and kind != "disabled":
-                lines.append(f"- 新增{label}:{text}")
+                lines.append(f"- New {label.lower()}: {text}")
         elif seen[key] != version:
-            lines.append(f"- {label}更新:{text}" if line
-                         else f"- {label} `{name}` 正文已修改,需要用到时重新读取")
+            lines.append(f"- Updated {label.lower()}: {text}" if line
+                         else f"- {label} `{name}` content changed; re-read it when needed")
     for key in seen:
         kind, _, name = key.partition(":")
         if key not in snapshot and kind in _REMOVED_HINT:
@@ -228,47 +235,48 @@ def _compact_records(records: list[dict]) -> str:
     return "[\n" + ",\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n]"
 
 RECOVERY_PROMPT = """\
-# 最近对话(JSON,按消息边界格式化)
+# Recent Conversation (JSON, one message per line)
 {history}
 
 {turn_prompt}
 """
 
 ORCHESTRATOR_HEADER = """\
-# 项目主控职责
-你是本项目唯一主控,负责理解项目目标、拆解工作并调度其他角色;所有 MissionCrew 写操作必须使用上方 Agent Tool。"""
+# Orchestrator Duties
+You are the only orchestrator of this project: you understand the project goals, break down the work and dispatch other roles; every MissionCrew write operation must go through the Agent Tool above."""
 
 PEER_HEADER = """\
-# 协作职责(无主控项目)
-本项目没有主控,所有角色权限相同:你既执行任务,也可以按需把工作派发给其他角色;所有 MissionCrew 写操作必须使用上方 Agent Tool。"""
+# Collaboration Duties (No-Orchestrator Project)
+This project has no orchestrator and all roles have equal permissions: you execute tasks and may also dispatch work to other roles as needed; every MissionCrew write operation must go through the Agent Tool above."""
 
 # 主控级规则(派发纪律、按需查询、预算):有主控时给主控,无主控时给每个角色
 CONTROL_RULES_TEMPLATE = """\
 {header}
-纪律:
-- 你发出的任何消息正文(包括最终回复)里的 @角色ID、@[角色ID] 都只是普通文字,永不触发执行;派发只认 `message.publish` 的 `mentions`。不需要协作就不要传 mentions;不要调度你自己,不要编造不存在的角色;角色的 runtime/模型在项目定义时已固定,你不能也不需要调整。
-- 派发后不要使用 `sleep`,不要周期性轮询频道历史、工作树或运行状态,不要代替执行角色继续其任务,也不要向仍在执行的角色再次 `message.publish` 追问中间状态:同一频道同一角色的持久会话无法中途插入新 turn,这类请求只会排在原任务后面,不能提供实时进度。只有 `dispatched` 为空,或仍有不依赖已派发角色的即时工作时,才继续当前 turn。
-- 你本轮的输出(最终回复)会由平台自动作为本轮结果,完整发布到触发消息所在的 Channel:回答人类、汇总结论、说明状态以及其他要附带的内容都直接写在这一份输出里。`message.publish` 只在确有必要时使用,即派发(传 `mentions`)或向另一个 Channel 发消息;不要再调用空 `mentions` 的 `message.publish` 把答复单独发一遍,否则同一结果会在频道里出现两次。
-- 配置页协作消息会给出当前页面、当前条目、未保存草稿和用户选中的内容:只提问或讨论时直接回答,不要改配置;明确要求创建或修改时,必须用对应动作实际落库。
-按需查询:
-- 活动 Run 状态不会自动写入你的上下文;只有人类询问运行情况或要求停止角色时,才调用 `channel.runs.list` 取一次性快照,并用返回的 `run_id` 调用 `channel.run.stop`。
-- 其他频道的情况不在上下文里:核对某频道是否已派发、进展如何,用 `channel.runs.list` / `channel.history` 传 `channel` 一次性查看,不要据此轮询等待。
-- 频道清单不在上下文里,用 `channel.list` 查;`channel.create` 的 workdir 只能是项目代码仓路径或其子目录,新频道创建后是空的,用 `message.publish` 把任务简报发进去并在 `mentions` 里点名执行者。
-- 面板、看板数据源、准则与 Skill 的保存格式、文档发布与重命名、自动化脚本、回收站的规则见手册对应章节,操作前先读。
-协作链预算:本项目单条协作链最多 {max_runs} 次 Agent 执行,`message.publish` 返回值的 `chain_budget` 里有已用次数;这只是防止失控循环的总次数兜底,不限制调度层级,请在预算内自主拆解、分派、验收并推进任务。
+Discipline:
+- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution; dispatching works only through the `mentions` of `message.publish`. Do not pass mentions unless you need collaboration; do not dispatch to yourself or invent roles; each role's runtime/model is fixed in the project definition, and you cannot and need not change it.
+- After dispatching, do not use `sleep`, do not poll channel history, worktrees or run status, do not take over an executor's task, and do not send `message.publish` to a role that is still running to ask for interim status: a role's persistent session in a channel cannot accept a new turn mid-run, so such requests just queue behind the original task and cannot give live progress. Continue the current turn only if `dispatched` is empty or you still have immediate work that does not depend on the dispatched roles.
+- Your output this turn (the final reply) is automatically published in full as this turn's result to the channel of the trigger message: put answers to humans, conclusions, status and anything else you need to include into that one output. Use `message.publish` only when necessary, i.e. to dispatch (with `mentions`) or to post to another channel; do not call `message.publish` with empty `mentions` to post the answer again, or the same result appears twice in the channel.
+- Messages from config-page collaboration include the current page, the current item, unsaved drafts and the user's selection: if the user only asks or discusses, just answer and do not change the configuration; when explicitly asked to create or modify, persist it with the corresponding action.
+On-demand queries:
+- Active run status is not written into your context automatically; only when a human asks about runs or asks to stop a role, call `channel.runs.list` for a one-off snapshot and pass the returned `run_id` to `channel.run.stop`.
+- Other channels are not in your context: to check whether a channel was dispatched or how it is progressing, call `channel.runs.list` / `channel.history` with `channel` once; do not poll on them.
+- The channel list is not in your context; query it with `channel.list`. The workdir of `channel.create` must be a project repository path or a subdirectory of one; a new channel starts empty, so post the task brief into it with `message.publish` and name the executor in `mentions`.
+- The rules for dashboards, board data sources, guideline and skill formats, document publishing and renaming, automation scripts and the recycle bin are in the corresponding manual sections; read them before acting.
+Collaboration chain budget: a single collaboration chain in this project allows at most {max_runs} agent runs, and the `chain_budget` in the `message.publish` result shows how many are used. This is only a total cap against runaway loops and does not limit dispatch depth; break down, assign, review and drive the work autonomously within the budget.
 """
 
 # 主控的项目清单:附在公共区块末尾但不参与版本哈希,差异经本轮输入提示
 ROSTER_HEADER = (
-    "# 项目清单\n"
-    "以下为实时数据,不参与公共上下文版本;条目新增、更新、归档或停用时,本轮输入会列出差异。\n")
+    "# Project Inventory\n"
+    "Live data, not part of the shared context version; when entries are added, updated, "
+    "archived or disabled, this turn's input lists the differences.\n")
 
 
 def _role_line(r: Role) -> str:
-    """角色名册一行:能力、偏好、定位分段标注,供主控选人。"""
-    desc = " ".join((r.description or "").split()) or "未填写"
-    return (f"- @{r.id} {r.name} · 能力 {'/'.join(r.ability_labels()) or '未标注'}"
-            f" · 偏好 {r.preference or '未标注'} · 定位 {desc}")
+    """角色名册一行:能力、偏好、定位分段标注,供主控选人。能力用英文 id,与身份段一致。"""
+    desc = " ".join((r.description or "").split()) or "not provided"
+    return (f"- @{r.id} {r.name} · capabilities {'/'.join(r.capabilities) or 'unspecified'}"
+            f" · preferences {r.preference or 'unspecified'} · profile {desc}")
 
 
 def _trigger_kind(record: dict, orchestrator_id: str, is_orchestrator: bool,
@@ -280,25 +288,25 @@ def _trigger_kind(record: dict, orchestrator_id: str, is_orchestrator: bool,
     author = record.get("author") or {}
     kind, author_id = str(author.get("type") or ""), str(author.get("id") or "")
     if kind == "human":
-        text = "人类消息"
+        text = "human message"
     elif kind == "agent":
         if not orchestrator_id:
             dispatched = any(span.get("role_id") == role_id
                              for span in record.get("mention_spans") or [])
-            text = (f"角色 @{author_id} 派发的任务" if dispatched
-                    else f"角色 @{author_id} 的回报,请验收")
+            text = (f"task dispatched by role @{author_id}" if dispatched
+                    else f"report from role @{author_id}; review it")
         elif is_orchestrator:
-            text = f"执行角色 @{author_id} 的回报,请验收"
+            text = f"report from executor @{author_id}; review it"
         elif author_id == orchestrator_id:
-            text = f"主控 @{author_id} 派发的任务"
+            text = f"task dispatched by orchestrator @{author_id}"
         else:
-            text = f"角色 @{author_id} 的消息"
+            text = f"message from role @{author_id}"
     elif kind == "automation":
-        text = f"自动化脚本 {author_id} 发布的消息"
+        text = f"message posted by automation script {author_id}"
     else:
-        text = f"{kind or '平台'}消息"
+        text = f"{kind or 'platform'} message"
     depth = int((record.get("thread") or {}).get("depth") or 0)
-    return text + (f"(协作链第 {depth} 层)" if depth else "")
+    return text + (f" (collaboration chain depth {depth})" if depth else "")
 
 
 class ChatEngine:
@@ -1440,11 +1448,11 @@ class ChatEngine:
         env = {}
         allowed_dirs = []
         agent_action = None
-        manual_path = "(本次执行未提供工作区)"
-        project_line = "(无所属项目)"
+        manual_path = "(no workspace for this run)"
+        project_line = "(no project)"
         repos_line = ""
-        documents_dir = "(本次执行未提供工作区)"
-        temp_dir = "当前工作目录内符合项目约定的位置"
+        documents_dir = "(no workspace for this run)"
+        temp_dir = "a location in the current working directory that follows project conventions"
         if channel.project_id:
             project = self.store.get_project(channel.project_id)
             if project:
@@ -1467,8 +1475,8 @@ class ChatEngine:
                 manual_path = str(workspace.manual)
                 project_line = project.name + (
                     f" · {' '.join(project.description.split())}" if project.description else "")
-                repos_line = ("项目代码仓:" + ";".join(
-                    f"{r.name or r.id} `{r.path or r.remote or '未配置本地路径'}`"
+                repos_line = ("Project repositories: " + "; ".join(
+                    f"{r.name or r.id} `{r.path or r.remote or 'no local path configured'}`"
                     for r in project.repos)) if project.repos else ""
                 documents_dir = str(workspace.documents)
                 temp_dir = str(workspace.root / "temp")
@@ -1494,22 +1502,24 @@ class ChatEngine:
                     if run_id else None)
                 tool_section = (
                     "# MissionCrew Agent Tool\n"
-                    "平台写操作(文档、Task、消息、频道、面板、准则、Skill 等)必须显式调用此工具;"
-                    "命令返回 JSON,失败时退出码非零,读取 error.code/error.message 并在当前回合"
-                    "修正后重试;不要直接写 documents/tasks 绕过接口。\n"
-                    f"Python:`{sys.executable}`\n"
-                    f"API:`{tool_url}`\n"
-                    f"Token 文件:`{token_file}`(不要读取、打印或发送其内容;"
-                    "令牌已绑定当前 Run,调用时不要传 `--run-id`)\n"
-                    "查看能力:`\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
+                    "Platform write operations (documents, Tasks, messages, channels, dashboards, "
+                    "guidelines, skills, etc.) must explicitly call this tool. Commands return JSON "
+                    "and exit non-zero on failure; read error.code/error.message, fix the call and "
+                    "retry within the current turn; do not bypass the API by writing to "
+                    "documents/ or tasks/ directly.\n"
+                    f"Python: `{sys.executable}`\n"
+                    f"API: `{tool_url}`\n"
+                    f"Token file: `{token_file}` (do not read, print or send its contents; "
+                    "the token is bound to the current run, so do not pass `--run-id`)\n"
+                    "List actions: `\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
                     "missioncrew.agent_tool actions`\n"
-                    "调用格式:`\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
+                    "Call: `\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
                     "missioncrew.agent_tool call <action> "
-                    "--arguments '<JSON 对象>'`\n"
-                    "发布文件:`\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
+                    "--arguments '<JSON object>'`\n"
+                    "Publish a file: `\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
                     "missioncrew.agent_tool publish-file "
-                    "--source <本地文件> --path <文档库相对路径>`\n"
-                    "可用动作:" + ", ".join(allowed_actions)
+                    "--source <local file> --path <path in the document library>`\n"
+                    "Available actions: " + ", ".join(allowed_actions)
                 )
                 allowed_dirs = project_allowed_dirs(project, library, workspace.root)
                 if (project.controls_platform(role.id)
@@ -1571,14 +1581,14 @@ class ChatEngine:
                 documents_dir=documents_dir, temp_dir=temp_dir)
         body_fields = dict(
             role_id=role.id, role_name=role.name, role_desc=role.description,
-            role_capabilities=", ".join(role.capabilities) or "无特别标注",
-            role_traits=role.preference or "无特别标注",
+            role_capabilities=", ".join(role.capabilities) or "none specified",
+            role_traits=role.preference or "none specified",
             role_runtime=role.runtime_id,
-            role_model=role.model or "(CLI 默认)",
+            role_model=role.model or "(CLI default)",
             role_effort=f"/effort={role.effort}" if role.effort else "",
             channel_name=channel.name or channel.id,
             channel_id=short_channel_id,
-            channel_purpose=channel.purpose or "(未说明)",
+            channel_purpose=channel.purpose or "(not specified)",
             project_line=project_line,
             workdir_section=workdir_section,
             repos_line=repos_line,
@@ -1759,7 +1769,7 @@ class ChatEngine:
             role_id = match.group(1) or match.group(2)
             if role_id not in redacted:
                 return match.group(0)
-            replacement = "[其他执行角色]"
+            replacement = "[other executor]"
             edits.append((match.end(), len(replacement) - len(match.group(0))))
             return replacement
 
@@ -1834,14 +1844,14 @@ class ChatEngine:
             # 视图靠范围判断本轮是派发还是回报,只剔除匿名角色并平移其余偏移。
             content, mention_spans = self._redact_mentions(
                 content, mention_spans, redacted, keep_spans=full_view)
-            mentions = ["其他执行角色" if item in redacted else item
+            mentions = ["other executor" if item in redacted else item
                         for item in mentions]
 
         record = {
             "id": int(message.get("id", 0)),
             "kind": str(message.get("kind") or "message"),
             "author": {
-                "id": "执行角色" if redact_author else author,
+                "id": "executor" if redact_author else author,
                 "type": author_type,
             },
             "content": content,
@@ -1981,34 +1991,34 @@ class ChatEngine:
                 _add("role", r.id, tag(r))
         for r in project.repos:
             _add("repo", r.id or r.name,
-                 f"- {r.name or r.id}: {r.path or '(无本地路径)'}"
-                 + (f"(git 远程 {r.remote})" if r.remote else ""))
+                 f"- {r.name or r.id}: {r.path or '(no local path)'}"
+                 + (f" (git remote {r.remote})" if r.remote else ""))
         for c in self.store.list_channels(project.id, include_archived=False):
             _add("channel", _short(c.id),
-                 f"- {_short(c.id)}(#{c.name}):{c.purpose or '无用途说明'}"
-                 + (f";工作目录 {c.workdir}"
-                    + ("(目录已不存在)" if not Path(c.workdir).is_dir() else "")
+                 f"- {_short(c.id)} (#{c.name}): {c.purpose or 'no purpose given'}"
+                 + (f"; workdir {c.workdir}"
+                    + (" (directory no longer exists)" if not Path(c.workdir).is_dir() else "")
                     if c.workdir else "")
-                 + f";Web {channel_resource_url(project.id, c.id)}")
+                 + f"; Web {channel_resource_url(project.id, c.id)}")
         for b in self.store.list_boards(project.id):
-            body = (f"数据源 {b.source},{len(b.filters)} 个筛选列"
+            body = (f"data source {b.source}, {len(b.filters)} filter columns"
                     if b.kind == "taskboard" else
-                    "组件 " + (", ".join(f"{w.id}/{w.type}" for w in b.layout) or "无"))
+                    "widgets " + (", ".join(f"{w.id}/{w.type}" for w in b.layout) or "none"))
             _add("board", _short(b.id),
-                 f"- {_short(b.id)}({b.name}):{b.description or '无描述'};{body};"
+                 f"- {_short(b.id)} ({b.name}): {b.description or 'no description'}; {body}; "
                  f"Web {dashboard_resource_url(project.id, b.id)}")
         for s in self.store.list_board_datasources(project.id):
             _add("source", _short(s.id),
-                 f"- {_short(s.id)}({s.name}):{s.description or '无描述'}")
+                 f"- {_short(s.id)} ({s.name}): {s.description or 'no description'}")
         for a in self.store.list_automations(project.id):
             _add("automation", _short(a.id),
-                 f"- {_short(a.id)}({a.name}):{a.description or '无描述'};"
-                 + (f"cron `{a.cron}`" if a.cron else "仅手动触发")
-                 + ("[停用]" if not a.enabled else ""))
-        _add("disabled", "guidelines", "- 停用的准则:"
-             + (", ".join(g.name for g in project.guidelines if not g.enabled) or "无"))
-        _add("disabled", "skills", "- 停用的 Skill:"
-             + (", ".join(s.id for s in project.skills if not s.enabled) or "无"))
+                 f"- {_short(a.id)} ({a.name}): {a.description or 'no description'}; "
+                 + (f"cron `{a.cron}`" if a.cron else "manual trigger only")
+                 + (" [disabled]" if not a.enabled else ""))
+        _add("disabled", "guidelines", "- Disabled guidelines: "
+             + (", ".join(g.name for g in project.guidelines if not g.enabled) or "none"))
+        _add("disabled", "skills", "- Disabled skills: "
+             + (", ".join(s.id for s in project.skills if not s.enabled) or "none"))
 
         def _block(kind: str) -> str:
             return "\n".join(line for key, line in entries.items()
@@ -2016,33 +2026,37 @@ class ChatEngine:
 
         # 频道只列 id:详情走 channel.list;条目行仍保留在快照里供差异提示引用
         channel_ids = ", ".join(key.partition(":")[2] for key in entries
-                                if key.startswith("channel:")) or "(无)"
+                                if key.startswith("channel:")) or "(none)"
         parts = [
             ROSTER_HEADER,
-            ("## 角色名册（仅主控可见，各自定位供你选人参考）\n"
+            ("## Role Roster (visible only to the orchestrator; use each profile to choose assignees)\n"
              if project.has_orchestrator else
-             "## 角色名册（各自定位供你派发时选人参考）\n")
-            + (_block("role") or "(无其他已启用角色)"),
-            "## 项目代码仓\n" + (_block("repo") or "(未配置)"),
-            "## 现有频道\n用 `channel.list` 按需查看(含归档);新建前先查重。活跃频道 id:"
+             "## Role Roster (use each profile to choose whom to dispatch to)\n")
+            + (_block("role") or "(no other enabled roles)"),
+            "## Project Repositories\n" + (_block("repo") or "(not configured)"),
+            "## Existing Channels\nView them on demand with `channel.list` (archived included); "
+            "check for duplicates before creating one. Active channel ids: "
             + channel_ids,
         ]
         # 空的段落折叠成一行,小项目里不再是一串「(无)」
-        optional = [("board", "## 现有面板", "面板"), ("source", "## 现有看板数据源", "看板数据源"),
-                    ("automation", "## 现有自动化", "自动化")]
+        optional = [("board", "## Existing Dashboards", "dashboards"),
+                    ("source", "## Existing Board Data Sources", "board data sources"),
+                    ("automation", "## Existing Automations", "automations")]
         empty = []
         for kind, title, label in optional:
             block = _block(kind)
             parts.append(f"{title}\n{block}") if block else empty.append(label)
         disabled_lines = [line for key, line in entries.items()
-                          if key.startswith("disabled:") and not line.endswith(":无")]
+                          if key.startswith("disabled:") and not line.endswith(": none")]
         if disabled_lines:
-            parts.append("## 停用的准则与 Skill\n" + "\n".join(disabled_lines))
+            parts.append("## Disabled Guidelines and Skills\n" + "\n".join(disabled_lines))
         else:
-            empty.append("停用的准则与 Skill")
+            empty.append("disabled guidelines and skills")
         if empty:
-            parts.append("、".join(empty) + ":无" + ("(内置看板数据源 built-in 始终可用)"
-                                                  if "看板数据源" in empty else ""))
+            listed = ", ".join(empty)
+            parts.append(listed[0].upper() + listed[1:] + ": none"
+                         + (" (the built-in board data source `built-in` is always available)"
+                            if "board data sources" in empty else ""))
         section = "\n".join(parts) + "\n"
         snapshot = {
             key: (hashlib.sha256(line.encode("utf-8")).hexdigest()[:16], line)

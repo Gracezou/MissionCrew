@@ -105,218 +105,236 @@ class AgentRunContext:
     depth: int
 
 
+# 动作说明只给 Agent 看(actions 命令与 /api/agent/v1/actions),与 Prompt 一样用英文;
+# 状态示例里的 待处理/处理中 等是项目真实的标签取值,保持原样
 ACTION_DEFINITIONS = {
     "task.create": {
-        "description": "创建一个可绑定多个 Channel 的 Issue 化 Task",
+        "description": "Create an issue-style Task that can be bound to several channels",
         "orchestrator_only": False,
         "arguments": {
-            "title": "任务标题", "summary": "一句话简介", "body": "正文",
-            "labels": ("标签数组;`文本` 或 `属性: 值` 高级标签,"
-                       "如 owner: 张三"),
-            "channel_ids": "可选绑定的 Channel id 数组",
-            "status": "状态文本,如 待处理/处理中/已阻塞/已完成,缺省 待处理",
+            "title": "task title", "summary": "one-line summary", "body": "body text",
+            "labels": ("label array; plain `text` or advanced `property: value` labels, "
+                       "e.g. owner: 张三"),
+            "channel_ids": "optional array of channel ids to bind",
+            "status": "status text such as 待处理/处理中/已阻塞/已完成; defaults to 待处理",
         },
     },
     "task.update": {
-        "description": "以乐观并发方式更新任务的需求字段",
+        "description": "Update a task's requirement fields with optimistic concurrency",
         "orchestrator_only": False,
         "arguments": {
-            "id": "任务 id", "snapshot_updated_at": "读取任务时的更新时间",
-            "title/summary/body/status/labels/channel_ids": "要更新的字段",
+            "id": "task id", "snapshot_updated_at": "the update time seen when reading the task",
+            "title/summary/body/status/labels/channel_ids": "fields to update",
         },
     },
     "task.brief": {
-        "description": "为 Task 追加一条状态简报，并可同时更新状态",
+        "description": "Append a status brief to a Task, optionally updating its status",
         "orchestrator_only": False,
         "arguments": {
-            "id": "任务 id", "content": "状态简报正文",
-            "status": "可选状态文本,如 待处理/处理中/已阻塞/已完成",
+            "id": "task id", "content": "status brief text",
+            "status": "optional status text such as 待处理/处理中/已阻塞/已完成",
         },
     },
     "task.delete": {
-        "description": "把 Task 及其状态简报移入项目回收站",
+        "description": "Move a Task and its status briefs to the project recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "任务 id"},
+        "arguments": {"id": "task id"},
     },
     "document.publish": {
-        "description": "把文本或二进制文件发布到项目版本化文档库",
+        "description": "Publish a text or binary file to the project's versioned document library",
         "orchestrator_only": False,
         "arguments": {
-            "path": "文档库相对路径",
-            "content 或 content_base64": "文件内容",
-            "overwrite": "目标存在时是否显式覆盖，默认 false",
-            "message": "可选版本说明",
+            "path": "path in the document library",
+            "content or content_base64": "file content",
+            "overwrite": "whether to explicitly overwrite an existing target; default false",
+            "message": "optional version message",
         },
     },
     "document.rename": {
-        "description": "移动或重命名项目版本化文档并保留 Git 历史",
+        "description": "Move or rename a versioned project document, keeping its Git history",
         "orchestrator_only": False,
         "arguments": {
-            "source": "现有文档库相对路径",
-            "target": "新的文档库相对路径；目标必须不存在",
+            "source": "existing path in the document library",
+            "target": "new path in the document library; the target must not exist",
         },
     },
     "document.delete": {
-        "description": "把项目版本化文档移入统一回收站并保留 Git 历史",
+        "description": ("Move a versioned project document to the unified recycle bin, "
+                        "keeping its Git history"),
         "orchestrator_only": True,
-        "arguments": {"path": "文档库相对路径"},
+        "arguments": {"path": "path in the document library"},
     },
     "message.publish": {
         "description": (
-            "向本项目频道发布消息，用于派发或向其他频道发消息；最终回复已由平台"
-            "自动发布到触发频道，不要用它复制答复；mentions 参数是唯一的角色派发通道；"
-            "返回的 dispatched(实际启动的角色)非空时结束当前 turn，"
-            "chain_budget 给出本条协作链已用次数与上限"
+            "Post a message to a project channel, only for dispatching or posting to other "
+            "channels; your final reply is already published to the trigger channel by the "
+            "platform, so do not use this to copy the answer. mentions is the only channel for "
+            "dispatching roles; end the current turn when the returned dispatched (roles actually "
+            "started) is non-empty; chain_budget gives the runs used and the limit of this "
+            "collaboration chain"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "channel": "项目内频道短 id",
-            "content": "消息正文；正文里的任何 @ 都不产生调度",
-            "mentions": "要显式调度的角色 id 数组；不传则只发消息不派发",
+            "channel": "short channel id within the project",
+            "content": "message body; any @ in it never dispatches",
+            "mentions": ("array of role ids to dispatch explicitly; omit it to post without "
+                         "dispatching"),
         },
     },
     "channel.runs.list": {
         "description": (
-            "按需查询频道中 queued/running/waiting_user 的角色运行(默认当前 "
-            "Channel,可传 channel 查项目内其他频道);状态不会预先写入聊天上下文"
+            "On demand, list queued/running/waiting_user role runs in a channel (the current "
+            "channel by default; pass channel for another project channel); run status is not "
+            "preloaded into the chat context"
         ),
         "orchestrator_only": True,
         "automation_allowed": False,
-        "arguments": {"channel": "项目内频道短 id；不传为当前 Channel"},
+        "arguments": {"channel": "short channel id within the project; defaults to the current channel"},
     },
     "channel.run.stop": {
-        "description": "停止当前 Channel 中指定的活动角色运行；应先查询取得 run_id",
+        "description": ("Stop the given active role run in the current channel; query it first "
+                        "to get the run_id"),
         "orchestrator_only": True,
         "automation_allowed": False,
-        "arguments": {"run_id": "channel.runs.list 返回的正整数 Run id"},
+        "arguments": {"run_id": "positive integer run id returned by channel.runs.list"},
     },
     "channel.history": {
         "description": (
-            "按需读取频道最近消息(默认当前 Channel,可传 channel 读项目内其他频道);"
-            "记录格式与 channel-history.json 相同,用于核对派发、进展与回报,"
-            "不要当作等待循环反复调用"
+            "On demand, read a channel's recent messages (the current channel by default; pass "
+            "channel for another project channel); records use the channel-history.json format, "
+            "for checking dispatches, progress and reports; do not call it repeatedly as a wait loop"
         ),
         "orchestrator_only": True,
         "automation_allowed": False,
         "arguments": {
-            "channel": "项目内频道短 id；不传为当前 Channel",
-            "limit": "返回最新几条,默认 20,最多 200",
-            "before_id": "只取 id 小于该值的更早消息,用于向前翻页",
+            "channel": "short channel id within the project; defaults to the current channel",
+            "limit": "how many latest messages to return; default 20, at most 200",
+            "before_id": "only return earlier messages with id below this value, for paging back",
         },
     },
     "channel.list": {
         "description": (
-            "按需列出项目频道(id、名称、用途、工作目录、归档态、最近消息时间、"
-            "活动运行数);频道清单不预先写入聊天上下文,新建频道前先查避免重复"
+            "On demand, list project channels (id, name, purpose, workdir, archive state, last "
+            "message time, active run count); the channel list is not preloaded into the chat "
+            "context, so check it before creating a channel to avoid duplicates"
         ),
         "orchestrator_only": True,
-        "arguments": {"scope": "active(默认)/archived/all"},
+        "arguments": {"scope": "active (default)/archived/all"},
     },
     "channel.create": {
-        "description": "创建项目频道(先用 channel.list 确认 id 未被占用)",
+        "description": "Create a project channel (check with channel.list first that the id is free)",
         "orchestrator_only": True,
-        "arguments": {"id": "频道短 id", "name": "名称", "purpose": "用途",
-                      "workdir": "可选项目仓库目录"},
+        "arguments": {"id": "short channel id", "name": "name", "purpose": "purpose",
+                      "workdir": "optional project repository directory"},
     },
     "dashboard.save": {
-        "description": "创建或更新项目面板(组件网格或任务看板)",
+        "description": "Create or update a project dashboard (widget grid or task board)",
         "orchestrator_only": True,
         "arguments": {
-            "id": "面板短 id", "name": "名称", "description": "用途",
-            "layout": "可选组件数组(widgets 形态)",
-            "kind": "可选 widgets/taskboard",
-            "source": "taskboard 数据源 id(内置 built-in 或自定义源短 id)",
-            "filters": ("taskboard 筛选列数组 [{title,query,color}],query 是"
-                        "标签表达式(& | ! 与括号,`属性: *` 匹配带该属性的"
-                        "任务);新建时缺省按数据源状态取值生成 status 列"),
-            "group_by": ("可选分列属性名;非空时改为按该属性取值横向分列(末尾"
-                         "「未设置」列),filters 的并集只划定卡片范围"),
+            "id": "short dashboard id", "name": "name", "description": "purpose",
+            "layout": "optional widget array (widgets form)",
+            "kind": "optional widgets/taskboard",
+            "source": ("taskboard data source id (the built-in `built-in` or a custom source's "
+                       "short id)"),
+            "filters": ("taskboard filter column array [{title,query,color}]; query is a label "
+                        "expression (& | ! and parentheses; `property: *` matches tasks with "
+                        "that property); when creating, defaults to status columns generated "
+                        "from the data source's status values"),
+            "group_by": ("optional property name to split columns by; when set, columns are "
+                         "that property's values (plus a trailing \"unset\" column) and the "
+                         "union of filters only scopes the cards"),
         },
     },
     "dashboard.delete": {
-        "description": "把项目面板移入统一回收站",
+        "description": "Move a project dashboard to the unified recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "面板短 id"},
+        "arguments": {"id": "short dashboard id"},
     },
     "board_source.save": {
         "description": (
-            "创建或更新自定义任务数据源;cards 按 id 整体同步为该源的任务"
-            "(新增/覆盖/删除),适合配自动化脚本定时同步 GitCode/GitHub "
-            "Issue 等外部列表,再用 dashboard.save 建任务看板绑定该源"
+            "Create or update a custom task data source; cards are synced by id as that "
+            "source's tasks (add/overwrite/delete); suited to automation scripts that "
+            "periodically sync external lists such as GitCode/GitHub issues, then use "
+            "dashboard.save to create a task board bound to the source"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "id": "数据源短 id(不能与内置源重名)",
-            "name": "名称", "description": "用途",
-            "columns": ("可选状态取值数组 [{value,color}](兼容旧版 "
-                        "{key,title,color}),缺省四态"),
-            "cards": ("可选卡片数组,按 id 整体同步;每张必须有 id、title,"
-                      "可选 summary、status(状态文本)、labels、updated_at、"
-                      "meta、url(外部链接);新任务会走项目自动处理规则"),
-            "mode": "create/update/upsert,缺省 upsert",
+            "id": "short data source id (must not clash with built-in sources)",
+            "name": "name", "description": "purpose",
+            "columns": ("optional array of status values [{value,color}] (legacy "
+                        "{key,title,color} accepted); defaults to four states"),
+            "cards": ("optional card array, synced as a whole by id; each card needs id and "
+                      "title, optionally summary, status (status text), labels, updated_at, "
+                      "meta and url (external link); new tasks go through the project's "
+                      "automatic handling rules"),
+            "mode": "create/update/upsert; default upsert",
         },
     },
     "board_source.delete": {
-        "description": "删除自定义看板数据源(仍被面板引用时拒绝)",
+        "description": ("Delete a custom board data source (refused while a dashboard still "
+                        "references it)"),
         "orchestrator_only": True,
-        "arguments": {"id": "数据源短 id"},
+        "arguments": {"id": "short data source id"},
     },
     "guideline.save": {
-        "description": "保存完整准则 Markdown",
+        "description": "Save a complete guideline Markdown file",
         "orchestrator_only": True,
-        "arguments": {"markdown": "含 name/description frontmatter 的全文",
-                      "enabled": "是否启用", "original_name": "重命名前名称"},
+        "arguments": {"markdown": "full text with name/description frontmatter",
+                      "enabled": "whether it is enabled",
+                      "original_name": "name before renaming"},
     },
     "guideline.delete": {
-        "description": "把准则 Markdown 移入统一回收站并保留 Git 历史",
+        "description": ("Move a guideline Markdown file to the unified recycle bin, keeping its "
+                        "Git history"),
         "orchestrator_only": True,
-        "arguments": {"name": "准则 name"},
+        "arguments": {"name": "guideline name"},
     },
     "skill.save": {
-        "description": "保存完整 Skill Markdown",
+        "description": "Save a complete skill Markdown file",
         "orchestrator_only": True,
-        "arguments": {"id": "Skill id", "markdown": "完整 SKILL.md",
-                      "enabled": "是否启用"},
+        "arguments": {"id": "skill id", "markdown": "the complete SKILL.md",
+                      "enabled": "whether it is enabled"},
     },
     "skill.delete": {
-        "description": "把完整 Skill 包移入统一回收站",
+        "description": "Move a complete skill package to the unified recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "Skill id"},
+        "arguments": {"id": "skill id"},
     },
     "automation.save": {
         "description": (
-            "创建或更新项目自动化脚本;脚本经统一定时入口按 cron 或手动触发,"
-            "以专属 token 调用平台动作"
+            "Create or update a project automation script; the unified scheduler triggers it "
+            "by cron or manually, and it calls platform actions with its own token"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "id": "脚本短 id", "name": "名称", "description": "用途",
-            "script": "脚本全文(有 shebang 按可执行文件运行,否则用 bash)",
-            "cron": "五段 crontab;空字符串表示仅手动触发",
-            "enabled": "是否启用定时触发",
-            "actions": "允许调用的动作白名单数组;不传保留现值",
-            "timeout_seconds": "单次运行超时秒数",
+            "id": "short script id", "name": "name", "description": "purpose",
+            "script": ("full script text (run as an executable when it has a shebang, "
+                       "otherwise with bash)"),
+            "cron": "five-field crontab; an empty string means manual trigger only",
+            "enabled": "whether scheduled triggering is enabled",
+            "actions": "allowlist array of actions it may call; omit it to keep the current value",
+            "timeout_seconds": "timeout of a single run in seconds",
         },
     },
     "automation.delete": {
-        "description": "删除项目自动化脚本及其运行记录",
+        "description": "Delete a project automation script and its run records",
         "orchestrator_only": True,
-        "arguments": {"id": "脚本短 id"},
+        "arguments": {"id": "short script id"},
     },
     "recycle.list": {
-        "description": "列出当前项目统一回收站",
+        "description": "List the current project's unified recycle bin",
         "orchestrator_only": True,
         "arguments": {},
     },
     "recycle.restore": {
-        "description": "从项目回收站恢复资源",
+        "description": "Restore a resource from the project recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "回收站条目 id"},
+        "arguments": {"id": "recycle bin entry id"},
     },
     "recycle.purge": {
-        "description": "永久删除一个项目回收站条目",
+        "description": "Permanently delete a project recycle bin entry",
         "orchestrator_only": True,
-        "arguments": {"id": "回收站条目 id"},
+        "arguments": {"id": "recycle bin entry id"},
     },
 }
 
@@ -1209,9 +1227,11 @@ class AgentActionService:
                 result["summary"] += (
                     "，已派发 " + "、".join(f"@{r}" for r in result["dispatched"]))
                 result["handoff"] = "end_turn"
+                # resume 是给调用方 Agent 的提示,与 Prompt 一样用英文;summary 会展示给人类
                 result["resume"] = (
-                    "不要向仍在执行的角色追问中间状态；MissionCrew 会在已派发角色"
-                    "完成或失败后自动启动你的新 turn 交回结果"
+                    "Do not ask still-running roles for interim status; MissionCrew automatically "
+                    "starts a new turn for you with the results once the dispatched roles finish "
+                    "or fail"
                 )
             if dropped:
                 result["not_dispatched"] = dropped

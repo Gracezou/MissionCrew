@@ -68,10 +68,10 @@ def test_human_multi_mention_starts_every_named_role(chat, peer, monkeypatch):
     assert sorted(m["author"] for m in replies) == ["dev", "expert"]
     assert all(json.loads(m["mentions"]) == [] for m in replies)
     # 每个角色都拿到名册与无主控流程,且互相看得见对方
-    assert "本项目没有主控" in prompts["dev"]
-    assert "角色名册" in prompts["dev"] and "@expert" in prompts["dev"]
+    assert "This project has no orchestrator" in prompts["dev"]
+    assert "Role Roster" in prompts["dev"] and "@expert" in prompts["dev"]
     assert "@dev" in prompts["expert"]
-    assert "平台只启动你" not in prompts["dev"]
+    assert "the platform starts only you" not in prompts["dev"]
 
 
 def test_human_message_without_mention_starts_nobody(chat, peer):
@@ -108,8 +108,8 @@ def test_any_role_can_dispatch_and_result_returns_to_dispatcher(
     # 触发说明区分派发与回报
     reviewer_prompt = next(p for r, p in prompts if r == "reviewer")
     dev_prompt = next(p for r, p in prompts if r == "dev")
-    assert "角色 @dev 派发的任务" in reviewer_prompt
-    assert "角色 @reviewer 的回报,请验收" in dev_prompt
+    assert "task dispatched by role @dev" in reviewer_prompt
+    assert "report from role @reviewer; review it" in dev_prompt
 
 
 def test_human_direct_dispatch_failure_and_wake_stay_in_channel(
@@ -190,7 +190,7 @@ def test_message_tool_dispatch_works_for_non_lead_role(peer):
     chat.wait_idle()
     assert result["dispatched"] == ["reviewer"]
     assert "reviewer" in _runs(peer)
-    assert "你的新 turn" in result["resume"]
+    assert "a new turn for you" in result["resume"]
 
 
 def test_project_api_accepts_empty_orchestrator_and_frees_lead(seeded):
@@ -235,8 +235,8 @@ def test_page_context_is_channel_shared_without_orchestrator(peer):
 def test_task_dispatch_and_manual_in_peer_mode(peer):
     chat = ChatEngine(peer)
     project = peer.get_project("webshop")
-    assert "仅主控" not in render_manual(project)
-    assert "本项目没有主控" in render_manual(project)
+    assert "orchestrator only" not in render_manual(project)
+    assert "This project has no orchestrator" in render_manual(project)
     task = create_task(peer, "webshop", title="复核金额", channel_ids=["general"])
     with pytest.raises(ValueError, match="没有主控"):
         dispatch_task(peer, chat, task)
@@ -263,11 +263,11 @@ def test_manual_only_role_stays_outside_peer_dispatch(chat, peer, monkeypatch):
     chat.wait_idle()
 
     assert sorted(_runs(peer)) == ["dev", "expert"]
-    assert "角色名册" in prompts["dev"] and "@expert" not in prompts["dev"]
-    assert "[其他执行角色]" in prompts["dev"]
-    assert "本项目没有主控" not in prompts["expert"]
-    assert "## 角色名册" not in prompts["expert"]
-    assert "你是仅人工点名的角色" in prompts["expert"]
+    assert "Role Roster" in prompts["dev"] and "@expert" not in prompts["dev"]
+    assert "[other executor]" in prompts["dev"]
+    assert "This project has no orchestrator" not in prompts["expert"]
+    assert "## Role Roster" not in prompts["expert"]
+    assert "You are a human-mention-only role" in prompts["expert"]
 
     # 它经 message.publish 点名别人不派发;别人点名它视同不存在
     body = "@dev 帮我看看"

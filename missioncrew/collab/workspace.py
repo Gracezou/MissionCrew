@@ -332,16 +332,16 @@ def migrate_resource_workspace_links(store: Store) -> int:
 
 def _render_project_file(project: Project) -> str:
     repos = "\n".join(
-        f"- {repo.name or repo.id}: {repo.path or repo.remote or '未配置本地路径'}"
-        for repo in project.repos) or "- 未配置"
+        f"- {repo.name or repo.id}: {repo.path or repo.remote or 'no local path configured'}"
+        for repo in project.repos) or "- not configured"
     return (
         f"# {project.name}\n\n"
         f"- Project ID: `{project.id}`\n"
-        f"- Description: {project.description or '未填写'}\n"
+        f"- Description: {project.description or 'not provided'}\n"
         f"- Orchestrator: "
         + (f"`@{project.orchestrator_role_id}`" if project.orchestrator_role_id
-           else "无(所有角色权限相同)") + "\n\n"
-        f"## 本地代码仓\n\n{repos}\n"
+           else "none (all roles have equal permissions)") + "\n\n"
+        f"## Local Repositories\n\n{repos}\n"
     )
 
 
@@ -349,32 +349,41 @@ def _render_workspace_readme(workspace: AgentWorkspace, project_id: str,
                              *, has_history: bool) -> str:
     """工作区目录说明;规则细节都在 manual.md,这里只留地图和三条硬约束。"""
     history = (
-        "- `channel-history.json`：当前频道的完整历史；执行角色看到的是脱敏视图。\n"
+        "- `channel-history.json`: full history of the current channel; executors see a "
+        "redacted view.\n"
         if has_history else "")
     return f"""# MissionCrew Agent Harness Workspace
 
-MissionCrew 是一个本地 Agent harness：它负责装配角色、Runtime/模型、项目上下文、
-共享资料和 Channel 协作；它不是当前业务代码仓。此 `.missioncrew` 目录是平台提供的
-独立工作区（`{workspace.root}`），位于业务代码仓之外，这里的文件不会进入业务代码提交。
+MissionCrew is a local agent harness: it assembles roles, runtimes/models, project context,
+shared materials and channel collaboration; it is not the current business repository. This
+`.missioncrew` directory is a dedicated workspace provided by the platform (`{workspace.root}`),
+located outside the business repositories; files here never enter business commits.
 
-## 目录
+## Layout
 
-- `manual.md`：MissionCrew 完整手册（平台规则、Agent Tool 各动作用法、文件系统边界、
-  资源 URL 规则）。做平台操作前先读对应章节。
-- `documents/`：项目版本化文档库的读取入口；协作草稿、报告和验证记录也归入该文档库。
-- `tasks/`：项目 Task 的只读 Markdown 快照；修改 Task 必须走 Agent Tool。
-- `guidelines/`：已启用项目准则的共享实时视图；根据 description 判断是否需要读取。
-- `skills/`：已启用项目 Skill 的共享实时视图；先读 SKILL.md，再按需使用同目录文件。
-- `project.md`：项目简介与代码仓；`temp/`：无项目约定时的临时目录，任务结束后清理。
+- `manual.md`: the full MissionCrew manual (platform rules, Agent Tool actions, file system
+  boundaries, resource URL rules). Read the matching section before any platform operation.
+- `documents/`: entry to the project's versioned document library; collaboration drafts, reports
+  and verification records also belong there.
+- `tasks/`: read-only Markdown snapshots of project Tasks; change Tasks only through the Agent Tool.
+- `guidelines/`: shared live view of enabled project guidelines; decide from the description
+  whether to read one.
+- `skills/`: shared live view of enabled project skills; read SKILL.md first, then use files in
+  the same directory as needed.
+- `project.md`: project summary and repositories; `temp/`: temporary directory when the project
+  has no convention, cleaned up when the task ends.
 {history}
-## 必须遵守
+## Must Follow
 
-- 只能读写 Prompt 中「本次可读写目录」列出的路径；边界与路径失败处理见手册第 3 节。
-- 修改 MissionCrew 资源（文档、Task、消息、频道、面板、准则、Skill）必须使用 Agent Tool；
-  不要读取或打印 `.agent-tool-token`，调用时不要传 `--run-id`。
-- 向频道引用平台资源用 `{missioncrew_project_url(project_id)}/<资源类型>/<稳定标识>`，
-  引用文档用 `{document_resource_url(project_id)}/<文档库相对路径>`；不要输出本工作区
-  绝对路径、`.missioncrew` 真实路径或 `file://` 链接。
+- Read and write only the paths listed as read/write directories in the prompt; boundaries and
+  path failure handling are in section 3 of the manual.
+- Changes to MissionCrew resources (documents, Tasks, messages, channels, dashboards, guidelines,
+  skills) must go through the Agent Tool; do not read or print `.agent-tool-token`, and do not
+  pass `--run-id` when calling it.
+- Reference platform resources in channels as
+  `{missioncrew_project_url(project_id)}/<resource type>/<stable id>`, and documents as
+  `{document_resource_url(project_id)}/<path in the document library>`; never output absolute
+  paths of this workspace, the real `.missioncrew` path or `file://` links.
 """
 
 

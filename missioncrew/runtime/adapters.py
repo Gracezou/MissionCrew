@@ -149,22 +149,25 @@ _INJECTION_LABELS = {
     "lean": "增量回合(版本未变,沿用会话内公共上下文)",
 }
 
+# 以下横幅是给角色的提示词,与公共上下文一样用英文
 LEAN_TURN_TEMPLATE = (
-    "# MissionCrew 增量回合\n"
-    "持久公共上下文版本 {context_version} 未变化,本轮不重发;会话中已注入的"
-    "公共上下文(角色、项目、权限、协作规则)继续有效。\n\n"
+    "# MissionCrew Incremental Turn\n"
+    "Durable shared context version {context_version} is unchanged and not resent this turn; "
+    "the shared context already injected in this session (role, project, permissions, "
+    "collaboration rules) remains in effect.\n\n"
 )
 
 _REINJECT_BANNER = (
-    "# MissionCrew 公共上下文重注入\n"
-    "距上次完整注入较久或会话历史发生过压缩,现重发完整公共上下文;"
-    "以本区块为准刷新角色、项目、权限与协作规则。\n\n"
+    "# MissionCrew Shared Context Reinjection\n"
+    "It has been a while since the last full injection, or the session history was compacted, "
+    "so the full shared context is resent; refresh your role, project, permissions and "
+    "collaboration rules from this block.\n\n"
 )
 
 _UPDATE_BANNER = (
-    "# MissionCrew 公共上下文更新\n"
-    "本轮公共上下文版本已经变化。立即以新版本完整替换会话中的旧版本，"
-    "不要继续引用旧项目设置。\n\n"
+    "# MissionCrew Shared Context Update\n"
+    "The shared context version changed this turn. Replace the old version in this session "
+    "with the new one completely and stop referring to old project settings.\n\n"
 )
 
 
@@ -1304,12 +1307,12 @@ def get_adapter(name: str):
 
 
 def _role_from_prompt(prompt: str) -> str:
-    m = re.search(r"你是角色 @([\w-]+)", prompt)
+    m = re.search(r"You are role @([\w-]+)", prompt)
     return m.group(1) if m else ""
 
 
 def _trigger_from_prompt(prompt: str) -> str:
-    m = re.search(r"# 触发消息[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.S)
+    m = re.search(r"# Trigger Message[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.S)
     if not m:
         return ""
     raw = m.group(1).strip()

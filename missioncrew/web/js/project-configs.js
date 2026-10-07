@@ -803,34 +803,43 @@ async function sendConfigChat() {
                          : { current_draft: currentConfigDraft(context) }),
       selection: selectionPayload, user_message: payload.content,
     };
+    // 下面的 instructions 是给角色的提示词,与平台 Prompt 一样用英文
     const guidelineEditingTip = context.tab === "guidelines"
-      ? `当前准则正文没有内嵌在消息中；先读取 current_page.content_path。文件包含 YAML frontmatter 和正文，` +
-        `frontmatter 只使用 name、description。保存时把修改后的完整文件放入 ${context.action}.markdown，` +
-        `并在修改现有文件时传 current_page.original_name；不要使用 id、title、summary。`
+      ? ` The current guideline text is not embedded in the message; read current_page.content_path first. ` +
+        `The file has YAML frontmatter and a body, and the frontmatter uses only name and description. ` +
+        `When saving, put the complete modified file in ${context.action}.markdown and pass ` +
+        `current_page.original_name when modifying an existing file; do not use id, title or summary.`
       : "";
     const documentEditingTip = context.tab !== "docs" ? ""
       : currentPage?.text_snapshot_available === false
-        ? `当前对象不是 UTF-8 纯文本，因此没有 current_page.content_path、selection 或行号。` +
-          `文件名、项目文档相对路径和 Web 地址分别在 current_page.filename、` +
-          `current_page.document_path、current_page.resource_url；需要读取或修改原文件时，` +
-          `以 MISSIONCREW_DOCUMENTS_DIR 为根解析 document_path，并使用适合该格式的工具。` +
-          `若通过 ${context.action} 覆盖二进制文件，使用 content_base64、原 document_path 和 overwrite=true。`
-        : `当前文档正文没有内嵌在消息中；先读取 current_page.content_path。保存时把完整结果放入 ` +
-          `${context.action}.content，目标路径使用 current_page.document_path。`;
+        ? ` The current object is not UTF-8 plain text, so there is no current_page.content_path, ` +
+          `selection or line number. The file name, the path in the project document library and the ` +
+          `web URL are in current_page.filename, current_page.document_path and current_page.resource_url; ` +
+          `to read or modify the original file, resolve document_path against MISSIONCREW_DOCUMENTS_DIR ` +
+          `and use a tool suited to the format. To overwrite the binary file through ${context.action}, ` +
+          `use content_base64, the original document_path and overwrite=true.`
+        : ` The current document text is not embedded in the message; read current_page.content_path first. ` +
+          `When saving, put the complete result in ${context.action}.content and use ` +
+          `current_page.document_path as the target path.`;
     const skillEditingTip = context.tab === "skills"
-      ? `当前编辑对象是一份完整 SKILL.md 文件。current_draft.markdown 包含 YAML frontmatter 和正文；` +
-        `frontmatter 必须含 name、description，其他附加属性保持原样。保存时把修改后的完整文件放入 ` +
-        `${context.action}.markdown，id 传 current_draft.id（Skill 目录名，不可修改）。`
+      ? ` The object being edited is a complete SKILL.md file. current_draft.markdown contains the ` +
+        `YAML frontmatter and the body; the frontmatter must contain name and description, and other ` +
+        `properties stay as they are. When saving, put the complete modified file in ` +
+        `${context.action}.markdown and pass current_draft.id as id (the skill directory name, which ` +
+        `cannot change).`
       : "";
     const dashboardEditingTip = context.tab === "custom"
-      ? `当前编辑对象是自定义面板，现有布局在 current_draft.layout（组件数组）。` +
-        `修改时用 ${context.action} 传 id=current_draft.board_id、mode=update 和修改后的完整 layout；` +
-        `不要新建面板或改动其他面板。`
+      ? ` The object being edited is a custom dashboard whose current layout is current_draft.layout ` +
+        `(a widget array). To modify it, call ${context.action} with id=current_draft.board_id, ` +
+        `mode=update and the complete modified layout; do not create a new dashboard or change other ` +
+        `dashboards.`
       : "";
     const instructions =
-      `这是围绕当前页面的对话：若用户只是提问、解释或讨论，只需回答，不要写入；` +
-      `若用户明确要求创建或修改，则使用 ${context.action} 控制动作实际保存完整结果。` +
-      `优先处理 selection 指定的字段和行；修改现有条目时沿用当前 name、id、match 或路径。` +
+      `This conversation is about the current page: if the user only asks, wants an explanation or ` +
+      `discusses, just answer and do not write anything; if the user explicitly asks to create or ` +
+      `modify, persist the complete result with the ${context.action} action. Handle the fields and ` +
+      `lines given in selection first; when modifying an existing item keep its current name, id, ` +
+      `match or path.` +
       guidelineEditingTip + documentEditingTip + skillEditingTip + dashboardEditingTip;
     // 附件路径追加在正文尾部,不影响前面提及范围的字符偏移
     let content = payload.content;

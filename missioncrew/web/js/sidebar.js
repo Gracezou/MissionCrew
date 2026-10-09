@@ -289,6 +289,41 @@ function renderMentionPicker(query) {
        <b>@${esc(role.id)}</b><span>${esc(role.name || "")}</span>
        <small>${esc(role.description || "")}</small></button>`).join("");
   picker.hidden = false;
+  placeDialogPicker(picker);
+}
+
+/* 弹窗里的选择器(Task 派发、自动处理规则):.dlg-body 是 overflow:auto 的滚动容器,绝对
+   定位的选择器展开后被它裁掉,只露出第一项。改为 fixed 定位贴着输入框——fixed 的包含块
+   是视口,不受祖先 overflow 裁剪;下方放不下且上方更宽裕时向上展开。聊天输入框的选择器
+   不在弹窗里,仍按 CSS 定位。 */
+const PICKER_GAP = 7, PICKER_MARGIN = 8, PICKER_MAX_HEIGHT = 240;
+
+function placeDialogPicker(picker) {
+  if (!picker.closest("dialog")) return;
+  const box = composerBox().getBoundingClientRect();
+  const width = Math.min(360, box.width);
+  // 内容全展开的高度(含边框),不读 offsetHeight:它受上次写入的 max-height 限制
+  const natural = Math.min(PICKER_MAX_HEIGHT,
+    picker.scrollHeight + picker.offsetHeight - picker.clientHeight);
+  const below = innerHeight - box.bottom - PICKER_GAP - PICKER_MARGIN;
+  const above = box.top - PICKER_GAP - PICKER_MARGIN;
+  const up = natural > below && above > below;
+  Object.assign(picker.style, {
+    position: "fixed",
+    left: `${Math.max(PICKER_MARGIN, Math.min(box.left, innerWidth - width - PICKER_MARGIN))}px`,
+    width: `${width}px`,
+    maxHeight: `${Math.min(PICKER_MAX_HEIGHT, up ? above : below)}px`,
+    top: up ? "auto" : `${box.bottom + PICKER_GAP}px`,
+    bottom: up ? `${innerHeight - box.top + PICKER_GAP}px` : "auto",
+  });
+}
+
+// 弹窗正文滚动或窗口缩放时输入框会移动,fixed 选择器跟着重新定位(选择器自身滚动除外)
+for (const type of ["scroll", "resize"]) {
+  window.addEventListener(type, event => {
+    const picker = composerPicker();
+    if (picker && !picker.hidden && event.target !== picker) placeDialogPicker(picker);
+  }, true);
 }
 
 function updateMentionPicker() {

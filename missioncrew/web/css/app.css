@@ -520,6 +520,9 @@
   .task-dispatch-picker button:hover, .task-dispatch-picker button.active,
   .config-chat-picker button:hover, .config-chat-picker button.active {
     background: var(--accent-soft); }
+  /* 角色 id 与名称不收缩,空间不够时只截断右侧的描述,否则名称会被挤成一字一行 */
+  #mention-picker button > :not(small), .task-dispatch-picker button > :not(small),
+  .config-chat-picker button > :not(small) { flex: none; white-space: nowrap; }
   #mention-picker small, .task-dispatch-picker small, .config-chat-picker small {
                           margin-left: auto; color: var(--muted); overflow: hidden;
                           text-overflow: ellipsis; white-space: nowrap; }

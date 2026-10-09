@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,6 +165,10 @@ def test_code_blocks_and_inline_code_carry_copy_buttons():
     assert 'document.execCommand("copy")' in ui
     assert ".markdown-body code > .markdown-copy { visibility: hidden" in css
     assert ".markdown-body code:hover > .markdown-copy" in css
+    # 折行的行内代码作包含块时左右缘可能颠倒,按钮必须停在文本末尾的静态位置,不能设偏移量
+    inline_rule = re.search(r"\.markdown-body code > \.markdown-copy \{([^}]*)\}", css).group(1)
+    assert "display: inline-flex" in inline_rule
+    assert not re.search(r"(^|[\s;])(top|right|bottom|left|inset):", inline_rule)
     assert ".markdown-code { position: relative" in css
 
 

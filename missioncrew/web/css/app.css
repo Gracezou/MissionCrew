@@ -1268,7 +1268,7 @@
   .markdown-body pre code { padding: 0; background: transparent; white-space: pre; }
   /* ---- 代码复制按钮 ----
      按钮是空元素,图标用 mask 着色绘制、跟随文字色。围栏代码块的按钮常显在容器右上角(弱化,
-     悬停加深);行内代码的按钮默认隐藏,悬停时贴着代码右上方浮出,绝对定位不占行内空间。 */
+     悬停加深);行内代码的按钮默认隐藏,悬停时贴着代码末尾的右上方浮出,绝对定位不占行内空间。 */
   .markdown-copy { --icon-copy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2'/%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/%3E%3C/svg%3E");
                    --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
                    position: absolute; z-index: 2; display: flex; align-items: center;
@@ -1287,12 +1287,18 @@
   .markdown-code { position: relative; margin: .9em 0; }
   .markdown-code > pre { margin: 0; }
   .markdown-code > .markdown-copy, .markdown-diagram > .markdown-copy { top: 7px; right: 7px; }
+  /* 行内代码会折行:被拆成多段的行内元素作包含块时,左缘取首段起点、右缘取末段终点,末行比
+     首段起点短时左右颠倒,right/bottom 定位会把按钮甩到首段左上方,够不着。所以不设偏移量,
+     让按钮停在静态位置(文本末尾,须是行内级 display),补回右内边距后平移到末段右上方;
+     按钮与代码之间隔着行距,隐藏延迟 .2s,鼠标斜穿空隙或文字时按钮不会先消失。 */
   .markdown-body code { position: relative; }
-  .markdown-body code > .markdown-copy { visibility: hidden; opacity: 1; width: 20px; height: 20px;
-                                         right: 0; bottom: 100%; }
+  .markdown-body code > .markdown-copy { visibility: hidden; display: inline-flex; opacity: 1;
+                                         width: 20px; height: 20px; margin-left: .4em;
+                                         transform: translate(-100%, -100%);
+                                         transition: visibility 0s .2s, color .15s; }
   .markdown-body code > .markdown-copy::before { width: 12px; height: 12px; }
   .markdown-body code:hover > .markdown-copy, .markdown-body code > .markdown-copy:focus-visible,
-  .markdown-body code > .markdown-copy.copied { visibility: visible; }
+  .markdown-body code > .markdown-copy.copied { visibility: visible; transition-delay: 0s; }
   .markdown-body a { color: var(--accent); text-decoration: none; }
   .markdown-body a:hover { text-decoration: underline; }
   .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }

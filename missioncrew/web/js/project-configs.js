@@ -711,8 +711,7 @@ function updateConfigChatContext() {
   } else if (target === CONFIG_CHAT_FOCUSED && !channelId) {
     status.textContent = binding?.resolved ? "发送第一条消息时会创建专注频道。" : "正在查找专注频道…";
   } else if (thread) {
-    status.textContent = thread.notice
-      || (thread.entries.some(entry => entry.author_type === "agent") ? "Agent 已回复。" : "");
+    status.textContent = thread.notice || "";
   }
   renderConfigChatThread(context, channelId, target);
   // 专注频道的存在与否决定选择器首项文案,所以无论当前目标是什么都先查一次

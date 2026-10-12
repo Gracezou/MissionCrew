@@ -273,19 +273,45 @@ An orchestrator's turn:
 _PEER_FLOW = """\
 ## 0. Typical Flow
 
-This project has no orchestrator and all roles have equal permissions: every role executes
-tasks and may also dispatch work to other roles.
+This project has no orchestrator: every role holds the orchestrator-level management actions
+(channels, dashboards, data sources, guidelines, skills, automations, the recycle bin), but roles
+cannot dispatch each other; only humans start roles.
 A turn:
-1. Read the task: the trigger message is a human request, a brief dispatched by another role, or a report; if information is missing, raise it in your reply instead of widening the scope.
+1. Read the task: the trigger message is a human request or an automation script message; if information is missing, raise it in your reply instead of widening the scope.
 2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
-3. Do the work or dispatch: do what you can yourself by reading/writing code and running commands in the working directory; when you need other roles, pick them from the role roster and call
-   `message.publish` with `channel`, `mentions` and a brief stating the background, requirements and acceptance criteria.
+3. Do the work: read/write code and run commands in the working directory; when part of the work needs another role, finish what you can and name that role in your reply so a human can mention it.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool.
-5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links. When `dispatched` is non-empty, say in one sentence
-   that the work was dispatched and end the turn; do not poll, chase or take over; the platform wakes you up with the result after the dispatched role finishes.
+5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links. The result is only published to the channel and triggers no other role.
 """
 
-# 无主控项目:去掉"仅主控"限定,派发与回传按派发者口径描述
+# 无主控项目的第 7 节:只发布消息、不派发,整节替换主控版
+_PEER_MESSAGES = """\
+## 7. Messages
+
+- This project has no orchestrator, so roles cannot dispatch each other: `message.publish`
+  rejects `mentions`, and any @roleID or @[roleID] in a message body you send (including your
+  final reply) is plain text and never triggers execution. Only humans start roles; when a human
+  picks several roles in one trigger message, each starts on its own without waiting for the
+  others, and each result is only published to the channel.
+- When the work needs another role, finish what you can and say in your final reply which role
+  should take it and why; a human decides whether to mention it.
+- Active run status is not written into your context automatically; when a human asks about runs
+  or asks to stop a role, take a one-off snapshot of the current channel with `channel.runs.list`
+  and pass the returned `run_id` to `channel.run.stop`; do not turn on-demand queries into a wait
+  loop.
+- Cross-channel checks: both `channel.runs.list` and `channel.history` accept `channel` (a short
+  channel id in the project) to inspect another channel's active runs and recent messages (`limit`
+  defaults to 20, at most 200; `before_id` pages backwards); `channel.run.stop` can still only
+  stop runs in the current channel.
+- Your output this turn (the final reply) is automatically published by the platform as the
+  result to the trigger message's channel: put answers to humans, conclusions, current status and
+  anything else you need to include into it. Use `message.publish` only to post to another
+  channel; do not call it to post the same answer again, or the channel shows two copies of the
+  result.
+
+"""
+
+# 无主控项目:去掉"仅主控"限定和派发相关说明
 _PEER_REPLACEMENTS = (
     (" (orchestrator only)", ""),
     (" (deletion is orchestrator only)", ""),
@@ -293,31 +319,32 @@ _PEER_REPLACEMENTS = (
     ("(orchestrator only, channel defaults", "(channel defaults"),
     ("action's description, arguments and whether it is orchestrator-only.",
      "action's description and arguments (this project has no orchestrator, so every action is "
-     "open to every role)."),
-    ("## 7. Messages and Dispatch (Orchestrator)", "## 7. Messages and Dispatch"),
-    ("so the orchestrator or a human can adjust", "so the dispatcher or a human can adjust"),
-    ("When the executor finishes or fails, the platform automatically starts a new orchestrator "
-     "turn with its full result; review, dispatch further, or summarize then.",
-     "When the dispatched role finishes or fails, the platform automatically starts a new turn "
-     "for the dispatcher with its full result; review, dispatch further, or summarize then."),
-    ("- When a human picks several roles in one trigger message, the platform starts only the "
-     "orchestrator; the trigger message JSON's `mentions` and\n"
-     "  `mention_spans` keep the full list, and the orchestrator decides on parallel or "
-     "sequential order or different assignees, then dispatches each.",
-     "- This project has no orchestrator: when a human picks several roles in one trigger "
-     "message, every mentioned role starts on its own without waiting for the others;\n"
-     "  results of work dispatched by a role through `message.publish` go back to that "
-     "dispatcher, and results of roles a human mentioned directly stay in the channel."),
+     "open to every role; `message.publish` only posts and cannot dispatch)."),
+    ("work with Tasks, dispatch\nmessages", "work with Tasks, post\nmessages"),
+    ("so the orchestrator or a human can adjust", "so a human can adjust"),
+    ("check\n  it before referencing, dispatching to, or creating another channel.",
+     "check\n  it before referencing or creating another channel."),
+    ("A new channel\n  starts empty: post the task brief into it with `message.publish` and name the "
+     "executor\n  explicitly in `mentions` to start the work.",
+     "A new channel\n  starts empty; a human mentions the roles that should work there."),
 )
+
+
+def _replace_section(text: str, heading: str, next_heading: str, body: str) -> str:
+    """把从 heading 到 next_heading(不含)之间的整节换成 body;next_heading 为空则换到结尾。"""
+    head, _, rest = text.partition(heading)
+    tail = rest[rest.index(next_heading):] if next_heading else ""
+    return head + body + tail
 
 
 def render_manual(project: Project) -> str:
     """按项目渲染手册;占位用字符串替换而非 format,正文里的 JSON 花括号不必转义。"""
     text = _MANUAL
     if not project.has_orchestrator:
-        head, _, rest = text.partition("## 0. Typical Flow")
-        rest = rest[rest.index("## 1. "):]
-        text = head + _PEER_FLOW + "\n" + rest
+        text = _replace_section(text, "## 0. Typical Flow", "## 1. ", _PEER_FLOW + "\n")
+        text = _replace_section(text, "## 7. Messages", "## 8. ", _PEER_MESSAGES)
+        # 协作链预算只约束派发,角色不能派发时整节不适用
+        text = _replace_section(text, "## 14. ", "", "").rstrip() + "\n"
         for old, new in _PEER_REPLACEMENTS:
             assert old in text, old
             text = text.replace(old, new)

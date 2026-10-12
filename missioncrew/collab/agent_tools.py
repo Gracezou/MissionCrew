@@ -342,6 +342,21 @@ AUTOMATION_ACTIONS = frozenset(
     name for name, definition in ACTION_DEFINITIONS.items()
     if definition.get("automation_allowed", True))
 
+# 无主控项目里角色能发消息但不能派发:列出动作时用这份说明替换 message.publish,
+# 不给出 mentions 参数(服务端在 _publish_message 里同样拒绝)
+PEER_MESSAGE_PUBLISH = {
+    "description": (
+        "Post a message to a project channel, only for posting to other channels (such as a "
+        "brief in a new channel); this project has no orchestrator, so roles cannot dispatch "
+        "each other and only humans start roles; your final reply is already published to the "
+        "trigger channel by the platform, so do not use this to copy the answer"
+    ),
+    "arguments": {
+        "channel": "short channel id within the project",
+        "content": "message body; any @ in it is plain text and never starts a role",
+    },
+}
+
 ACTION_ARGUMENTS = {
     "task.create": {
         "title", "summary", "body", "labels", "channel_ids", "status",
@@ -414,7 +429,7 @@ class AgentActionService:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def allowed_actions(self, project: Project, role_id: str) -> list[str]:
-        # 无主控项目里每个角色都拥有主控级动作
+        # 无主控项目里每个角色都拥有主控级动作;派发另由 can_dispatch 把关
         is_orchestrator = project.controls_platform(role_id)
         return [
             name for name, definition in ACTION_DEFINITIONS.items()
@@ -569,16 +584,20 @@ class AgentActionService:
     def capabilities(self, identity: AgentIdentity) -> dict:
         project = self._identity_project(identity)
         allowed = self._identity_actions(project, identity)
+        actions = {
+            name: {key: value for key, value in ACTION_DEFINITIONS[name].items()
+                   if key not in {"orchestrator_only", "automation_allowed"}}
+            for name in allowed
+        }
+        if ("message.publish" in actions and not identity.is_automation
+                and not project.can_dispatch(identity.role_id)):
+            actions["message.publish"] = PEER_MESSAGE_PUBLISH
         return {
             "project_id": identity.project_id,
             "channel_id": identity.channel_id,
             "role_id": identity.role_id,
             "token_id": identity.token_id,
-            "actions": {
-                name: {key: value for key, value in ACTION_DEFINITIONS[name].items()
-                       if key not in {"orchestrator_only", "automation_allowed"}}
-                for name in allowed
-            },
+            "actions": actions,
         }
 
     def execute(self, identity: AgentIdentity, action: str, arguments: dict,
@@ -1158,6 +1177,13 @@ class AgentActionService:
         if (not isinstance(mentions, list)
                 or not all(isinstance(item, str) for item in mentions)):
             raise AgentToolError("invalid_arguments", "mentions 必须是角色 id 数组")
+        if (mentions and not identity.is_automation
+                and not project.can_dispatch(identity.role_id)):
+            # 无主控项目的角色有主控级管理权限,但不能派发:只有人类点名启动角色
+            raise AgentToolError(
+                "permission_denied",
+                "本项目没有主控,角色之间不能派发;需要其他角色时请在最终回复里说明,"
+                "由人类点名", 403)
         unique_mentions: list[str] = []
         for role_id in mentions:
             if not identity.is_automation and role_id == identity.role_id:

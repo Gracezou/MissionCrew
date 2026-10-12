@@ -75,7 +75,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`、`pub
 | `automation.save` / `automation.delete` | 禁止 | 允许 |
 | `recycle.list` / `recycle.restore` / `recycle.purge` | 禁止 | 允许 |
 
-项目未选择主控（无主控模式）时没有「普通角色」一列：每个角色都按「项目主控」列授权，`message.publish` 派发对所有角色开放，由角色派发的结果自动交回派发者。
+项目未选择主控（无主控模式）时没有「普通角色」一列：每个角色都按「项目主控」列授权，但角色之间不能派发——`message.publish` 只能发消息，带非空 `mentions` 时返回 `permission_denied`（`actions` 列出的该动作说明也不含 `mentions` 参数）；角色只由人类点名启动，结果只留在频道。派发权限由 `Project.can_dispatch` 判定，只有主控为真。
 
 `guideline.save` 与 Web 准则编辑器共用准则 Git 版本库。`skill.save` 同样把当前完整 Skill 目录提交到项目 Skill 版本库，因此已有 `scripts/`、`references/`、`assets/` 等辅助文件会与更新后的 `SKILL.md` 一起构成版本；两个动作成功后都返回 `revision`，并记录当前角色。准则重命名会继续原文件的历史链。删除属于主控权限：文档、准则、Skill 和面板都会进入项目统一回收站，文档、准则与 Skill 删除同时形成新 Git 提交，历史不会被抹除。`recycle.restore` 在原标识已被占用时返回 `already_exists` 并保留回收项；`recycle.purge` 是不可撤销的永久删除，只应在用户明确要求时调用。工具响应不会暴露回收目录的本地路径。
 

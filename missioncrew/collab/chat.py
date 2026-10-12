@@ -10,9 +10,8 @@
   执行角色看不到其他角色名册,主控调度的结果自动交回主控，
   人类直接调度的结果只留在频道等待后续消息;
 - 所有主控调度与执行结果都对人类完全可见,全程审计。
-- 无主控模式(项目未选择主控):所有角色权限相同,都能看到名册并经 message.publish
-  派发;人类同时点名多个角色时各自启动;由角色显式派发的结果自动交回派发者,
-  人类直接点名的结果只留在频道。
+- 无主控模式(项目未选择主控):所有角色都有主控级管理权限、能看到名册,但不能
+  互相派发;只有人类点名启动角色,同时点名多个角色时各自启动,结果只留在频道。
 
 防失控:项目可配置的单条协作链执行总数上限 + 不响应自己 @ 自己。
 """
@@ -145,14 +144,14 @@ ORCHESTRATOR_WORKFLOW = """\
 4. Wrap up and wait for reports: once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is done; say briefly in your final reply that the work was dispatched, then end the turn, and do not call `message.publish` again for that note. When the executor finishes or fails, the platform automatically starts a new orchestrator turn with its full result; review, dispatch further, or summarize then.
 5. Review and summarize: check reports against the acceptance criteria, then dispatch further or write the conclusion. Record milestone conclusions in the Task with `task.brief`; state across turns lives there, not in session memory. Run verification commands inside the "Project repositories" directories; the current working directory is not necessarily a repository."""
 
-# 无主控项目:每个角色既执行也可派发,流程是执行与主控两条线的合并
+# 无主控项目:每个角色都有主控级管理权限,但只执行、不派发,由人类点名启动
 PEER_WORKFLOW = """\
-1. Read the task: this turn's input is the human request, the task brief dispatched by another role, or the report in the "Trigger Message" at the bottom; its type is on the "This Turn's Trigger" line. Your role profile is not a task. If the brief is missing information, raise it in your reply instead of guessing or widening the scope.
+1. Read the task: this turn's input is the human request (or automation script message) in the "Trigger Message" at the bottom; its type is on the "This Turn's Trigger" line. Your role profile is not a task. If the request is missing information, raise it in your reply instead of guessing or widening the scope.
 2. Gather context only when needed; do not preload. Channel history is `channel-history.json` under "Workspace Overview"; for guidelines and skills, check their descriptions under "Project Materials" first and read the full text only if relevant; project documents are in `{documents_dir}`.
-3. Do the work or dispatch: do what you can yourself by reading/writing code and running commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. When you need other roles, pick them from the "Role Roster" below by profile, capabilities and preferences, and dispatch with `message.publish`, passing `channel` (`{channel_id}` for the current channel) and a `mentions` array; the content states the background, requirements and acceptance criteria. This is the only way to dispatch.
+3. Do the work: read/write code and run commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. You cannot dispatch other roles: when part of the work needs another role, finish what you can and name that role in your reply (see the "Role Roster" below) so a human can mention it.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
-5. Reply: your final reply is published to the chat channel in full and verbatim. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths. Once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is done: say briefly that the work was dispatched and end the turn; when the dispatched role finishes or fails, the platform automatically starts a new turn for you with its full result; review, dispatch further, or summarize then.
-- This project has no orchestrator: all roles have equal permissions. Results of tasks you dispatch come back to you automatically; results of tasks a human assigned directly are only published to the channel and trigger no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others."""
+5. Reply: your final reply is published to the chat channel in full and verbatim. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths.
+- This project has no orchestrator: every role holds the orchestrator-level management permissions but cannot dispatch other roles. Your result is only published to the channel and triggers no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others."""
 
 DURABLE_CONTEXT_TEMPLATE = """\
 # MissionCrew Durable Shared Context
@@ -241,29 +240,51 @@ RECOVERY_PROMPT = """\
 {turn_prompt}
 """
 
-ORCHESTRATOR_HEADER = """\
-# Orchestrator Duties
-You are the only orchestrator of this project: you understand the project goals, break down the work and dispatch other roles; every MissionCrew write operation must go through the Agent Tool above."""
+# 主控与无主控角色共用的规则条目:配置页协作、按需查询运行、手册指引
+_CONFIG_PAGE_RULE = (
+    "- Messages from config-page collaboration include the current page, the current item, "
+    "unsaved drafts and the user's selection: if the user only asks or discusses, just answer and "
+    "do not change the configuration; when explicitly asked to create or modify, persist it with "
+    "the corresponding action.\n")
+_RUN_QUERY_RULE = (
+    "- Active run status is not written into your context automatically; only when a human asks "
+    "about runs or asks to stop a role, call `channel.runs.list` for a one-off snapshot and pass "
+    "the returned `run_id` to `channel.run.stop`.\n")
+_MANUAL_RULE = (
+    "- The rules for dashboards, board data sources, guideline and skill formats, document "
+    "publishing and renaming, automation scripts and the recycle bin are in the corresponding "
+    "manual sections; read them before acting.\n")
 
-PEER_HEADER = """\
-# Collaboration Duties (No-Orchestrator Project)
-This project has no orchestrator and all roles have equal permissions: you execute tasks and may also dispatch work to other roles as needed; every MissionCrew write operation must go through the Agent Tool above."""
-
-# 主控级规则(派发纪律、按需查询、预算):有主控时给主控,无主控时给每个角色
+# 主控级规则(派发纪律、按需查询、预算),只给有主控项目的主控
 CONTROL_RULES_TEMPLATE = """\
-{header}
+# Orchestrator Duties
+You are the only orchestrator of this project: you understand the project goals, break down the work and dispatch other roles; every MissionCrew write operation must go through the Agent Tool above.
 Discipline:
 - Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution; dispatching works only through the `mentions` of `message.publish`. Do not pass mentions unless you need collaboration; do not dispatch to yourself or invent roles; each role's runtime/model is fixed in the project definition, and you cannot and need not change it.
 - After dispatching, do not use `sleep`, do not poll channel history, worktrees or run status, do not take over an executor's task, and do not send `message.publish` to a role that is still running to ask for interim status: a role's persistent session in a channel cannot accept a new turn mid-run, so such requests just queue behind the original task and cannot give live progress. Continue the current turn only if `dispatched` is empty or you still have immediate work that does not depend on the dispatched roles.
 - Your output this turn (the final reply) is automatically published in full as this turn's result to the channel of the trigger message: put answers to humans, conclusions, status and anything else you need to include into that one output. Use `message.publish` only when necessary, i.e. to dispatch (with `mentions`) or to post to another channel; do not call `message.publish` with empty `mentions` to post the answer again, or the same result appears twice in the channel.
-- Messages from config-page collaboration include the current page, the current item, unsaved drafts and the user's selection: if the user only asks or discusses, just answer and do not change the configuration; when explicitly asked to create or modify, persist it with the corresponding action.
+""" + _CONFIG_PAGE_RULE + """\
 On-demand queries:
-- Active run status is not written into your context automatically; only when a human asks about runs or asks to stop a role, call `channel.runs.list` for a one-off snapshot and pass the returned `run_id` to `channel.run.stop`.
+""" + _RUN_QUERY_RULE + """\
 - Other channels are not in your context: to check whether a channel was dispatched or how it is progressing, call `channel.runs.list` / `channel.history` with `channel` once; do not poll on them.
 - The channel list is not in your context; query it with `channel.list`. The workdir of `channel.create` must be a project repository path or a subdirectory of one; a new channel starts empty, so post the task brief into it with `message.publish` and name the executor in `mentions`.
-- The rules for dashboards, board data sources, guideline and skill formats, document publishing and renaming, automation scripts and the recycle bin are in the corresponding manual sections; read them before acting.
+""" + _MANUAL_RULE + """\
 Collaboration chain budget: a single collaboration chain in this project allows at most {max_runs} agent runs, and the `chain_budget` in the `message.publish` result shows how many are used. This is only a total cap against runaway loops and does not limit dispatch depth; break down, assign, review and drive the work autonomously within the budget.
 """
+
+# 无主控项目:每个角色都有主控级管理权限,但不能互相派发,只由人类点名启动
+PEER_RULES = """\
+# Collaboration Duties (No-Orchestrator Project)
+This project has no orchestrator: every role holds the orchestrator-level management permissions (channels, dashboards, board data sources, guidelines, skills, automations, the recycle bin, run queries), but roles cannot dispatch each other and only humans start roles. Do the work yourself; every MissionCrew write operation must go through the Agent Tool above.
+Discipline:
+- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution, and `message.publish` rejects `mentions` in this project. When the work needs another role, say in your final reply which role should take it and why; a human decides whether to mention it.
+- Your output this turn (the final reply) is automatically published in full as this turn's result to the channel of the trigger message: put answers to humans, conclusions, status and anything else you need to include into that one output. Use `message.publish` only to post to another channel; do not call it to post the answer again, or the same result appears twice in the channel.
+""" + _CONFIG_PAGE_RULE + """\
+On-demand queries:
+""" + _RUN_QUERY_RULE + """\
+- Other channels are not in your context: to see how work in another channel is going, call `channel.runs.list` / `channel.history` with `channel` once; do not poll on them.
+- The channel list is not in your context; query it with `channel.list`. The workdir of `channel.create` must be a project repository path or a subdirectory of one; a new channel starts empty, and a human mentions the roles that should work there.
+""" + _MANUAL_RULE
 
 # 主控的项目清单:附在公共区块末尾但不参与版本哈希,差异经本轮输入提示
 ROSTER_HEADER = (
@@ -279,23 +300,15 @@ def _role_line(r: Role) -> str:
             f" · preferences {r.preference or 'unspecified'} · profile {desc}")
 
 
-def _trigger_kind(record: dict, orchestrator_id: str, is_orchestrator: bool,
-                  role_id: str = "") -> str:
-    """一句话说明本轮触发是谁发的,主控据此区分人类请求与执行角色回报。
-
-    无主控项目里没有固定的派发方:触发消息的提及范围点到自己就是派发,
-    否则是回报。"""
+def _trigger_kind(record: dict, orchestrator_id: str,
+                  is_orchestrator: bool) -> str:
+    """一句话说明本轮触发是谁发的,主控据此区分人类请求与执行角色回报。"""
     author = record.get("author") or {}
     kind, author_id = str(author.get("type") or ""), str(author.get("id") or "")
     if kind == "human":
         text = "human message"
     elif kind == "agent":
-        if not orchestrator_id:
-            dispatched = any(span.get("role_id") == role_id
-                             for span in record.get("mention_spans") or [])
-            text = (f"task dispatched by role @{author_id}" if dispatched
-                    else f"report from role @{author_id}; review it")
-        elif is_orchestrator:
+        if is_orchestrator:
             text = f"report from executor @{author_id}; review it"
         elif author_id == orchestrator_id:
             text = f"task dispatched by orchestrator @{author_id}"
@@ -422,15 +435,13 @@ class ChatEngine:
                 if author_type == "agent" else None)
 
         legal_spans: list[dict] = []
-        # 无主控模式:项目未选择主控,所有角色同权
-        peer_mode = bool(project) and not orchestrator
-        # Agent 派发只认 message.publish 显式命令传入的结构化范围;正文里的
-        # 任何 @（含 @[role] 旧语法）都是普通文字。有主控时执行角色无论写
-        # 什么,都只把完整结果交回主控,避免横向看见或调用名册;无主控时
-        # 由角色显式派发的结果交回派发者,人类直接点名的留在频道。
+        # 只有主控能派发:Agent 派发只认 message.publish 显式命令传入的结构化
+        # 范围;正文里的任何 @（含 @[role] 旧语法）都是普通文字。有主控时执行
+        # 角色无论写什么,都只把完整结果交回主控,避免横向看见或调用名册;无主控
+        # 时角色不能互相派发,回复只留在频道。
+        can_dispatch = (author_type == "agent" and bool(project)
+                        and project.can_dispatch(author))
         if author_type == "agent":
-            can_dispatch = ((peer_mode or author == orchestrator)
-                            and not self._manual_only_role(project, role))
             if can_dispatch and mention_spans:
                 mentions, legal_spans = self._validate_mention_spans(
                     content, mention_spans, channel.project_id or "",
@@ -439,9 +450,6 @@ class ChatEngine:
                     mentions = [item for item in mentions if item != author]
                     legal_spans = [span for span in legal_spans
                                    if span["role_id"] != author]
-            elif peer_mode:
-                dispatcher = self._dispatching_role(reply_to, author)
-                mentions = [dispatcher] if dispatcher else []
             elif (author != orchestrator and orchestrator_available
                   and not self._is_direct_human_dispatch(reply_to, author)):
                 mentions = [orchestrator]
@@ -495,8 +503,7 @@ class ChatEngine:
                 channel_id, author, author_type, content, mentions, reply_to,
                 root_id, depth, runtime_id or "", model or "", effort or "",
                 kind=kind, mention_spans=legal_spans, context=context)
-            if (author_type == "agent" and not legal_spans
-                    and (peer_mode or author == orchestrator)):
+            if can_dispatch and not legal_spans:
                 # 旧契约的存量会话可能仍在正文里写 @[角色] 试图派发;
                 # 静默不触发会让协作链无声死亡,补一条平台提示。
                 known = {r.id for r in
@@ -532,25 +539,6 @@ class ChatEngine:
             and trigger.get("author_type") in ("human", "automation")
             and role_id in self._decoded_mentions(trigger)
         )
-
-    def _dispatching_role(self, trigger_message_id: Optional[int],
-                          role_id: str) -> str:
-        """无主控模式:触发消息若是其他角色经 message.publish 显式点名本角色
-        的派发,返回派发者 id;人类消息、平台消息或平台自动交回的消息返回空。
-
-        只认落库的结构化提及范围:自动交回的消息 mentions 由平台写入而没有
-        范围,因此验收方的最终回复不会再弹回执行方,避免两个角色互相唤起。
-        """
-        if trigger_message_id is None:
-            return ""
-        trigger = self.store.get_message(trigger_message_id)
-        if not trigger or trigger.get("author_type") != "agent":
-            return ""
-        author = str(trigger.get("author") or "")
-        if not author or author == role_id:
-            return ""
-        spans = self._decoded_mention_spans(trigger)
-        return author if any(span.get("role_id") == role_id for span in spans) else ""
 
     def wait_idle(self) -> None:
         """等待当前所有聊天执行(含级联)结束,供 CLI 同步模式与测试使用。"""
@@ -923,7 +911,7 @@ class ChatEngine:
 
     def _post_failure(self, channel: Channel, role_id: str, msg_id: int,
                       root_id: int, depth: int, content: str) -> None:
-        """公开执行失败;有主控时只把主控派发的失败交回主控,无主控时交回派发者。"""
+        """公开执行失败;有主控时只把主控派发的失败交回主控,无主控时只留在频道。"""
         project = self.store.get_project(channel.project_id or "")
         if project:
             content = normalize_document_resource_urls(
@@ -938,11 +926,7 @@ class ChatEngine:
             self.store.get_role(channel.project_id or "", orchestrator)
             if orchestrator else None
         )
-        if project and not orchestrator:
-            dispatcher = self._dispatching_role(msg_id, role_id)
-            if dispatcher:
-                self._trigger(channel, dispatcher, failure_id, root_id, result_depth)
-        elif (orchestrator_role and orchestrator_role.enabled
+        if (orchestrator_role and orchestrator_role.enabled
                 and role_id != orchestrator
                 and not self._is_direct_human_dispatch(msg_id, role_id)):
             self._trigger(channel, orchestrator, failure_id, root_id, result_depth)
@@ -1163,8 +1147,8 @@ class ChatEngine:
                            tasks: list[dict]) -> tuple[int, int, int]:
         """唤醒汇报继承"启动后台任务的那轮"的派发语义:该轮由人类直接点名
         时,汇报挂回原人类消息(post 会因此不再交回主控);否则按常规
-        Agent 回复回路交回主控验收。无主控项目一律挂回原触发消息,由
-        post 按派发者(角色显式点名)或人类直达决定是否交回。"""
+        Agent 回复回路交回主控验收。无主控项目没有交回对象,一律挂回原触发
+        消息。"""
         origin_trigger = next(
             (int(task.get("origin_trigger") or 0) for task in tasks
              if task.get("origin_trigger")), 0)
@@ -1570,8 +1554,7 @@ class ChatEngine:
             roster_section, roster_snapshot = self._roster_snapshot(
                 project, role, _role_line)
             workflow_section = PEER_WORKFLOW.format(
-                documents_dir=documents_dir, temp_dir=temp_dir,
-                channel_id=short_channel_id)
+                documents_dir=documents_dir, temp_dir=temp_dir)
         elif is_orchestrator:
             roster_section, roster_snapshot = self._roster_snapshot(
                 project, role, _role_line)
@@ -1652,7 +1635,7 @@ class ChatEngine:
             resource_notice=resource_notice,
             reply_hint=CONTROL_REPLY_HINT if is_orchestrator else "",
             trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
-                                       is_orchestrator, role.id),
+                                       is_orchestrator),
             trigger=json.dumps(trigger_record, ensure_ascii=False))
         recovery_prompt = RECOVERY_PROMPT.format(
             history=_compact_records(history_records), turn_prompt=turn_prompt)
@@ -1966,10 +1949,10 @@ class ChatEngine:
 
     def _orchestrator_section(self, project) -> str:
         """主控级规则(派发纪律、频道创建、预算);动作细节在手册,清单见 _roster_snapshot。
-        有主控时给主控,无主控时给每个角色。"""
-        header = ORCHESTRATOR_HEADER if project.has_orchestrator else PEER_HEADER
-        return CONTROL_RULES_TEMPLATE.format(
-            header=header, max_runs=project.max_chain_runs)
+        有主控时给主控;无主控时每个角色拿不含派发的 PEER_RULES。"""
+        if not project.has_orchestrator:
+            return PEER_RULES
+        return CONTROL_RULES_TEMPLATE.format(max_runs=project.max_chain_runs)
 
     def _roster_snapshot(self, project, role: Role, tag) -> tuple[str, dict]:
         """主控的项目清单:角色名册、代码仓、频道、面板、数据源、自动化、停用项。
@@ -2031,7 +2014,8 @@ class ChatEngine:
             ROSTER_HEADER,
             ("## Role Roster (visible only to the orchestrator; use each profile to choose assignees)\n"
              if project.has_orchestrator else
-             "## Role Roster (use each profile to choose whom to dispatch to)\n")
+             "## Role Roster (for reference: roles cannot dispatch each other here; when another "
+             "role is needed, name it in your reply for a human to mention)\n")
             + (_block("role") or "(no other enabled roles)"),
             "## Project Repositories\n" + (_block("repo") or "(not configured)"),
             "## Existing Channels\nView them on demand with `channel.list` (archived included); "

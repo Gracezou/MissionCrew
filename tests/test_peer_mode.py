@@ -1,5 +1,5 @@
-"""无主控模式:项目未选择主控时所有角色同权,人类点名多个角色各自启动,
-角色显式派发的结果交回派发者,人类直接点名的结果留在频道。"""
+"""无主控模式:项目未选择主控时所有角色都有主控级管理权限,但不能互相派发;
+只有人类点名启动角色,点名多个角色各自启动,结果留在频道。"""
 import json
 from pathlib import Path
 
@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from missioncrew.api import create_app
+from missioncrew.collab.agent_tools import AgentToolError
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.manual import render_manual
 from missioncrew.collab.tasks import create_task, dispatch_task
@@ -44,9 +45,11 @@ def test_project_helpers_reflect_peer_mode(peer):
     project = peer.get_project("webshop")
     assert project.has_orchestrator is False
     assert project.controls_platform("dev") and project.controls_platform("scribe")
+    assert not project.can_dispatch("dev") and not project.can_dispatch("lead")
     normal = Project(id="p", name="p", orchestrator_role_id="lead")
     assert normal.has_orchestrator and normal.controls_platform("lead")
     assert not normal.controls_platform("dev")
+    assert normal.can_dispatch("lead") and not normal.can_dispatch("dev")
 
 
 def test_human_multi_mention_starts_every_named_role(chat, peer, monkeypatch):
@@ -67,11 +70,14 @@ def test_human_multi_mention_starts_every_named_role(chat, peer, monkeypatch):
     replies = [m for m in _msgs(peer) if m["author_type"] == "agent"]
     assert sorted(m["author"] for m in replies) == ["dev", "expert"]
     assert all(json.loads(m["mentions"]) == [] for m in replies)
-    # 每个角色都拿到名册与无主控流程,且互相看得见对方
+    # 每个角色都拿到名册与无主控流程,互相看得见对方,但被告知不能派发
     assert "This project has no orchestrator" in prompts["dev"]
+    assert "roles cannot dispatch each other" in prompts["dev"]
+    assert "dispatch work to other roles as needed" not in prompts["dev"]
     assert "Role Roster" in prompts["dev"] and "@expert" in prompts["dev"]
     assert "@dev" in prompts["expert"]
     assert "the platform starts only you" not in prompts["dev"]
+    assert "Collaboration chain budget" not in prompts["dev"]
 
 
 def test_human_message_without_mention_starts_nobody(chat, peer):
@@ -81,41 +87,28 @@ def test_human_message_without_mention_starts_nobody(chat, peer):
     assert [m["author_type"] for m in _msgs(peer)] == ["human"]
 
 
-def test_any_role_can_dispatch_and_result_returns_to_dispatcher(
-        chat, peer, monkeypatch):
-    """dev 经 message.publish 派发 reviewer:reviewer 结果交回 dev;
-    dev 验收后的最终回复不再弹回 reviewer。"""
-    prompts = []
-
-    def _start(config):
-        prompts.append((config.role_id, config.prompt))
-        return RunResult(True, "ok", output=f"{config.role_id} 完成。")
-
-    monkeypatch.setattr(runtime_manager, "start", _start)
-    dispatch = chat.post("general", "dev", "@reviewer\n\n请复核金额计算。",
-                         author_type="agent",
-                         mention_spans=[{"role_id": "reviewer", "start": 0, "end": 9}])
+def test_agent_mention_spans_never_dispatch_in_peer_mode(chat, peer, monkeypatch):
+    """角色消息即使带结构化提及范围也不触发任何角色,提及不落库。"""
+    monkeypatch.setattr(runtime_manager, "start",
+                        lambda config: RunResult(True, "ok", output="完成。"))
+    chat.post("general", "dev", "@reviewer\n\n请复核金额计算。",
+              author_type="agent",
+              mention_spans=[{"role_id": "reviewer", "start": 0, "end": 9}])
     chat.wait_idle()
 
-    assert _runs(peer) == ["reviewer", "dev"]
-    msgs = _msgs(peer)
-    reviewer = next(m for m in msgs if m["author"] == "reviewer")
-    assert reviewer["reply_to"] == dispatch
-    assert json.loads(reviewer["mentions"]) == ["dev"]
-    dev_final = [m for m in msgs if m["author"] == "dev" and m["id"] != dispatch]
-    assert len(dev_final) == 1
-    assert json.loads(dev_final[0]["mentions"]) == []      # 不再弹回 reviewer
-    # 触发说明区分派发与回报
-    reviewer_prompt = next(p for r, p in prompts if r == "reviewer")
-    dev_prompt = next(p for r, p in prompts if r == "dev")
-    assert "task dispatched by role @dev" in reviewer_prompt
-    assert "report from role @reviewer; review it" in dev_prompt
+    assert _runs(peer) == []
+    message = _msgs(peer)[-1]
+    assert json.loads(message["mentions"]) == []
+    # 正文 @[角色] 的旧派发语法也不再补"请改用 mentions"的平台提示
+    chat.post("general", "dev", "@[reviewer] 看一下", author_type="agent")
+    chat.wait_idle()
+    assert _runs(peer) == []
+    assert all(m["author_type"] != "platform" for m in _msgs(peer))
 
 
 def test_human_direct_dispatch_failure_and_wake_stay_in_channel(
         chat, peer, monkeypatch):
-    """人类直接点名的角色失败:公开失败,不拉起别人;
-    角色派发的执行失败:交回派发者。"""
+    """人类直接点名的角色失败:公开失败,不拉起别人;角色消息点名别人也不触发。"""
     monkeypatch.setattr(
         runtime_manager, "start",
         lambda config: RunResult(False, "环境不可用"))
@@ -129,13 +122,13 @@ def test_human_direct_dispatch_failure_and_wake_stay_in_channel(
     chat.post("general", "expert", "@dev\n\n再试一次。", author_type="agent",
               mention_spans=[{"role_id": "dev", "start": 0, "end": 4}])
     chat.wait_idle()
-    assert _runs(peer) == ["dev", "dev", "expert"]
+    assert _runs(peer) == ["dev"]
 
 
-def test_runtime_wake_returns_to_dispatcher_in_peer_mode(chat, peer):
-    """后台命令唤醒汇报挂回启动那轮的派发消息,由派发者验收。"""
+def test_runtime_wake_stays_in_channel_in_peer_mode(chat, peer):
+    """后台命令唤醒汇报挂回启动那轮的人类消息,不拉起任何角色。"""
     dispatch = peer.add_message(
-        "general", "expert", "agent", "@dev\n\n部署到测试机", ["dev"],
+        "general", "human", "human", "@dev 部署到测试机", ["dev"],
         mention_spans=[{"role_id": "dev", "start": 0, "end": 4}])
     peer.put_chat_session("general::dev", "general", "dev", "b1",
                           "claude_code", "/tmp", "n1", "v1")
@@ -151,14 +144,15 @@ def test_runtime_wake_returns_to_dispatcher_in_peer_mode(chat, peer):
     reply = next(m for m in _msgs(peer)
                  if m["author"] == "dev" and m["author_type"] == "agent")
     assert reply["reply_to"] == dispatch
-    assert json.loads(reply["mentions"]) == ["expert"]
-    assert [r["role_id"] for r in peer.chat_runs_for_channel("general")] == ["dev", "expert"]
+    assert json.loads(reply["mentions"]) == []
+    assert [r["role_id"] for r in peer.chat_runs_for_channel("general")] == ["dev"]
 
 
 def test_every_role_gets_orchestrator_actions_and_full_history(chat, peer):
     project = peer.get_project("webshop")
     allowed = set(chat.agent_tools.allowed_actions(project, "scribe"))
-    assert {"message.publish", "channel.create", "channel.list",
+    assert {"message.publish", "channel.create", "channel.list", "guideline.save",
+            "skill.save", "automation.save", "dashboard.save",
             "task.delete", "document.delete"} <= allowed
     assert allowed == set(chat.agent_tools.allowed_actions(project, "dev"))
 
@@ -172,7 +166,8 @@ def test_every_role_gets_orchestrator_actions_and_full_history(chat, peer):
     assert "@dev" in record["content"]
 
 
-def test_message_tool_dispatch_works_for_non_lead_role(peer):
+def test_message_tool_rejects_mentions_for_peer_roles(peer):
+    """角色能用 message.publish 发消息、建频道、写准则,但带 mentions 派发被拒。"""
     chat = ChatEngine(peer)
     channel = peer.get_channel("general")
     root = peer.add_message(channel.id, "human", "human", "@dev 安排复核", ["dev"])
@@ -182,15 +177,25 @@ def test_message_tool_dispatch_works_for_non_lead_role(peer):
                             peer.get_backend("std-1"), root, run_id=run_id)
     token = Path(config.env["MISSIONCREW_AGENT_TOKEN_FILE"]).read_text().strip()
     identity = chat.agent_tools.authenticate(token)
-    assert "message.publish" in chat.agent_tools.capabilities(identity)["actions"]
+    publish = chat.agent_tools.capabilities(identity)["actions"]["message.publish"]
+    assert "mentions" not in publish["arguments"]
+    assert "cannot dispatch" in publish["description"]
 
-    result = chat.agent_tools.execute(identity, "message.publish", {
-        "channel": "general", "content": "请复核。", "mentions": ["reviewer"],
-    }, run_id, "peer-dispatch")
+    with pytest.raises(AgentToolError) as denied:
+        chat.agent_tools.execute(identity, "message.publish", {
+            "channel": "general", "content": "请复核。", "mentions": ["reviewer"],
+        }, run_id, "peer-dispatch")
+    assert denied.value.code == "permission_denied"
+    assert "reviewer" not in _runs(peer)
+
+    created = chat.agent_tools.execute(identity, "channel.create", {
+        "id": "review", "name": "复核", "purpose": "金额复核"}, run_id, "peer-channel")
+    assert created["channel"]["id"].endswith("review")
+    posted = chat.agent_tools.execute(identity, "message.publish", {
+        "channel": "review", "content": "复核清单见文档。"}, run_id, "peer-post")
     chat.wait_idle()
-    assert result["dispatched"] == ["reviewer"]
-    assert "reviewer" in _runs(peer)
-    assert "a new turn for you" in result["resume"]
+    assert "dispatched" not in posted
+    assert _runs(peer) == ["dev"]   # 只有本轮自身,没有派生新运行
 
 
 def test_project_api_accepts_empty_orchestrator_and_frees_lead(seeded):
@@ -235,8 +240,11 @@ def test_page_context_is_channel_shared_without_orchestrator(peer):
 def test_task_dispatch_and_manual_in_peer_mode(peer):
     chat = ChatEngine(peer)
     project = peer.get_project("webshop")
-    assert "orchestrator only" not in render_manual(project)
-    assert "This project has no orchestrator" in render_manual(project)
+    manual = render_manual(project)
+    assert "orchestrator only" not in manual
+    assert "This project has no orchestrator" in manual
+    assert "`message.publish`\n  rejects `mentions`" in manual
+    assert "Collaboration Chain Budget" not in manual
     task = create_task(peer, "webshop", title="复核金额", channel_ids=["general"])
     with pytest.raises(ValueError, match="没有主控"):
         dispatch_task(peer, chat, task)
@@ -269,13 +277,10 @@ def test_manual_only_role_stays_outside_peer_dispatch(chat, peer, monkeypatch):
     assert "## Role Roster" not in prompts["expert"]
     assert "You are a human-mention-only role" in prompts["expert"]
 
-    # 它经 message.publish 点名别人不派发;别人点名它视同不存在
+    # 它经 message.publish 点名别人不派发
     body = "@dev 帮我看看"
     chat.post("general", "expert", body, author_type="agent",
               mention_spans=[_span(body, "dev")])
     chat.wait_idle()
     assert sorted(_runs(peer)) == ["dev", "expert"]
     assert json.loads(_msgs(peer)[-1]["mentions"]) == []
-    with pytest.raises(ValueError, match="提及范围无效"):
-        chat.post("general", "dev", "@expert 看看", author_type="agent",
-                  mention_spans=[_span("@expert 看看", "expert")])

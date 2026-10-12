@@ -1287,6 +1287,8 @@
   .markdown-copy.copied, .markdown-copy.copied:hover { opacity: 1; color: var(--ok);
                                                        border-color: var(--ok); }
   .markdown-copy.copied::before { -webkit-mask-image: var(--icon-check); mask-image: var(--icon-check); }
+  .markdown-copy.message-copy { position: static; width: 28px; height: 28px;
+                                margin: 5px 4px 0; box-shadow: none; }
   .markdown-code { position: relative; margin: .9em 0; }
   .markdown-code > pre { margin: 0; }
   .markdown-code > .markdown-copy, .markdown-diagram > .markdown-copy { top: 7px; right: 7px; }

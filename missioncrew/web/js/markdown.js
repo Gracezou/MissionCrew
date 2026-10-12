@@ -400,6 +400,7 @@ function markdownPreviewHtml(markdown, { showFrontmatter = true, imageResolver =
    容器里。用捕获阶段监听:行内代码可能出现在链接文字里,要抢在链接自身的 onclick 之前
    吃掉这次点击。渲染器也在无 DOM 的测试环境里执行,挂监听前先确认 document 存在。 */
 function markdownCopySource(button) {
+  if (button.copySource !== undefined) return button.copySource;
   const code = button.parentElement?.matches("code") ? button.parentElement
     : button.closest(".markdown-code, .markdown-diagram")?.querySelector("pre > code");
   if (!code) return "";

@@ -410,6 +410,7 @@ function syncRunLiveOutput(run, card, pane, events, liveOutput) {
   const textEl = bubble.querySelector(".live-text");
   textEl.hidden = !text.trim();
   textEl.innerHTML = text.trim() ? fmtBody(text, true) : "";
+  syncMessageCopyButton(bubble, text);
   // 提问表单只在待处理请求集合变化时重建:轮询刷新不能清掉用户已选/已填的回答
   const askEl = bubble.querySelector(".live-ask");
   const askKey = asks.map(a => a.payload.request_id).join(",");

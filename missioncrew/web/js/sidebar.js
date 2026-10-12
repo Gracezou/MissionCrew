@@ -458,6 +458,21 @@ function toggleMessageBody(button) {
   button.textContent = expanded ? "收起长回复" : `展开完整回复（${button.dataset.size} 字符）`;
 }
 
+function syncMessageCopyButton(message, content) {
+  const source = String(content ?? "");
+  let button = message.querySelector(".message-copy");
+  if (!source.trim()) { button?.remove(); return; }
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "markdown-copy message-copy";
+    button.title = "复制全文";
+    message.querySelector(".msg-main").appendChild(button);
+  }
+  // 保留原始 Markdown,折叠与实时重绘都不影响复制完整正文。
+  button.copySource = source;
+}
+
 function agentToolReceiptMeta(message) {
   const context = message.context?.agent_tool || {};
   const legacy = String(message.content || "").match(
@@ -617,6 +632,7 @@ function appendMessagesToSurface(list, surface) {
         ${longReply ? `<button type="button" class="message-fold-toggle" data-size="${m.content.length}"
           aria-expanded="false" onclick="toggleMessageBody(this)">展开完整回复（${m.content.length} 字符）</button>` : ""}
       </div>`;
+    if (isAgent) syncMessageCopyButton(div, m.content);
     pane.appendChild(div);
     surface.lastMsgId = Math.max(surface.lastMsgId, m.id);
   }

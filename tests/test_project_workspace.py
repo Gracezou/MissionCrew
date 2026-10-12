@@ -1743,6 +1743,10 @@ def test_harness_workspace_contains_documents_without_polluting_source_workdir(s
     assert "When a listed path reports `Read-only file system`, check where it is" in manual
     assert "permission_request event" in manual
     assert "dashboard.save" in manual and "guideline.save" in manual
+    # 准则/Skill 视图只读,保存被拒时的出口是发草稿并说明未保存
+    assert "`guidelines/` and `skills/` are read-only views" in manual
+    assert "`permission_denied` means your role may not perform that action" in manual
+    assert "state that the guideline or skill is not saved yet" in manual
     assert Path(cfg.env["MISSIONCREW_MANUAL"]) == workspace / "manual.md"
     assert str(workspace / "manual.md") in cfg.prompt
     assert "dashboard.save" not in cfg.prompt   # 面板用法不再占公共上下文

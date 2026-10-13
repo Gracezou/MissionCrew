@@ -1292,6 +1292,13 @@
   .markdown-code { position: relative; margin: .9em 0; }
   .markdown-code > pre { margin: 0; }
   .markdown-code > .markdown-copy, .markdown-diagram > .markdown-copy { top: 7px; right: 7px; }
+  /* 代码引用的「路径:行号」标题条接在 pre 上方,右侧留出复制按钮的位置 */
+  .markdown-code-title { padding: 6px 40px 6px 15px; border: 1px solid var(--line); border-bottom: 0;
+                         border-radius: 9px 9px 0 0; background: var(--bg-soft); color: var(--muted);
+                         font: 12px/18px ui-monospace, SFMono-Regular, Menlo, monospace;
+                         overflow-wrap: anywhere; }
+  .markdown-code-title ~ pre { border-top-left-radius: 0; border-top-right-radius: 0; }
+  .markdown-code-title ~ .markdown-copy { top: 4px; }
   /* 行内代码会折行:被拆成多段的行内元素作包含块时,左缘取首段起点、右缘取末段终点,末行比
      首段起点短时左右颠倒,right/bottom 定位会把按钮甩到首段左上方,够不着。所以不设偏移量,
      让按钮停在静态位置(文本末尾,须是行内级 display),补回右内边距后平移到末段右上方;

@@ -189,9 +189,30 @@ function markdownTableCells(line) {
   return cells;
 }
 
+/* ---- 围栏代码块 ----
+   按 CommonMark:3 个以上反引号或波浪号开栏,其后整行都是信息串(反引号围栏的信息串不得
+   含反引号,否则那是行内代码),首个词是语言。Agent 引用代码常写 ```14:29:src/a.ts 这类
+   「起行:止行:路径」信息串,只认 [\w+-] 会把开栏行当正文,之后围栏内外整体颠倒。 */
+function markdownFenceOpen(line) {
+  const match = String(line ?? "").match(/^\s*(`{3,}|~{3,})(.*)$/);
+  if (!match || (match[1][0] === "`" && match[2].includes("`"))) return null;
+  const info = match[2].trim();
+  const cited = info.match(/^(\d+):(\d+):(\S.*)$/);
+  return {
+    marker: match[1],
+    language: cited ? "" : info.split(/\s+/)[0],
+    citation: cited ? { start: Number(cited[1]), end: Number(cited[2]), path: cited[3] } : null,
+  };
+}
+
+// 闭栏须是同种字符且不短于开栏(```` 围栏内可嵌 ```),其后多余文字从宽忽略,仍算闭栏
+function markdownFenceClose(line, marker) {
+  return new RegExp(`^\\s*${marker[0]}{${marker.length},}`).test(line);
+}
+
 function markdownBlockStart(lines, index) {
   const line = lines[index] || "";
-  return /^\s*(```|~~~)/.test(line) || /^(#{1,6})\s+/.test(line)
+  return Boolean(markdownFenceOpen(line)) || /^(#{1,6})\s+/.test(line)
     || /^\s*(?:[-*+] |\d+[.)] )/.test(line) || /^\s*>/.test(line)
     || /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)
     || (line.includes("|") && /^\s*\|?\s*:?-{3,}:?/.test(lines[index + 1] || ""));
@@ -270,15 +291,15 @@ function miniMarkdown(text) {
     const line = lines[index];
     if (!line.trim()) { index += 1; continue; }
 
-    const fence = line.match(/^\s*(```|~~~)\s*([\w+-]*)\s*$/);
+    const fence = markdownFenceOpen(line);
     if (fence) {
       const body = [];
       index += 1;
-      while (index < lines.length && !new RegExp(`^\\s*${fence[1]}`).test(lines[index]))
+      while (index < lines.length && !markdownFenceClose(lines[index], fence.marker))
         body.push(lines[index++]);
       if (index < lines.length) index += 1;
       const source = esc(body.join("\n"));
-      if (fence[2].toLowerCase() === "mermaid") {
+      if (fence.language.toLowerCase() === "mermaid") {
         // 图表围栏输出待渲染容器并保留源码:diagrams.js 按需加载 Mermaid 渲染成 SVG,
         // 渲染库缺失或语法错误时读者仍能看到原文。
         output.push(`<div class="markdown-diagram" data-diagram="mermaid">` +
@@ -287,8 +308,12 @@ function miniMarkdown(text) {
         continue;
       }
       // 代码块套一层容器:复制按钮定位在容器上,pre 横向滚动时按钮不跟着滚走
-      const language = fence[2] ? ` class="language-${esc(fence[2])}"` : "";
-      output.push(`<div class="markdown-code">${markdownCopyButton()}` +
+      // 引用块把「路径:行号」作为标题条显示,读者能知道这段代码出自哪里
+      const { citation } = fence;
+      const title = citation ? `<div class="markdown-code-title">${esc(citation.path)}:` +
+        `${citation.start}${citation.end !== citation.start ? `-${citation.end}` : ""}</div>` : "";
+      const language = fence.language ? ` class="language-${esc(fence.language)}"` : "";
+      output.push(`<div class="markdown-code">${title}${markdownCopyButton()}` +
         `<pre><code${language}>${source}</code></pre></div>`);
       continue;
     }

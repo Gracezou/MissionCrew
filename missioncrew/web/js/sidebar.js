@@ -953,6 +953,12 @@ async function send() {
     toast("频道已归档，请先恢复后再发送消息", "error");
     return;
   }
+  // 无主控项目只靠点名启动角色:不 @ 就没人处理,保留输入内容让用户补选角色
+  if (peerModeProject() && !mentions.length) {
+    toast("本项目没有主控，请先 @ 至少一个角色再发送", "error");
+    box.focus();
+    return;
+  }
   // 附件路径追加在正文尾部，不影响前面提及范围的字符偏移
   if (attachments.length)
     content = (content ? content + "\n\n" : "") + attachmentBlock(attachments);

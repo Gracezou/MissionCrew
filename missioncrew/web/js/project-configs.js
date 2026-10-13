@@ -743,7 +743,7 @@ async function resolveConfigChatTargetChannel(context, target) {
 }
 
 /* 发送与频道输入框同一套交付:结构化 @ 提及决定接收者(不 @ 则由后端交给主控,
-   无主控项目不 @ 就不触发),附件路径追加在正文尾部;页面身份、正文快照与选区
+   无主控项目必须 @,否则不发送),附件路径追加在正文尾部;页面身份、正文快照与选区
    放在 context.page_collaboration 里随消息带给接收方。 */
 async function sendConfigChat() {
   const project = projObj();
@@ -761,6 +761,12 @@ async function sendConfigChat() {
     status.textContent = "请输入要询问或修改的内容。";
     return;
   }
+  const peer = peerModeProject();
+  if (peer && !mentions.length) {
+    status.textContent = "本项目没有主控，请先 @ 至少一个角色再发送。";
+    box.focus();
+    return;
+  }
   const target = configChatTarget(context);
   if (!target) {
     status.textContent = "请先保存当前条目，再开始页面内对话。";
@@ -768,7 +774,6 @@ async function sendConfigChat() {
   }
   const selection = configChatSelection?.context_key === context.key
     ? configChatSelection : null;
-  const peer = peerModeProject();
   configChatSending = true;
   status.textContent = "正在发送…";
   box.replaceChildren();
@@ -850,13 +855,12 @@ async function sendConfigChat() {
       author: "human", content, mentions, context: messageContext,
     });
     const thread = configChatThread(channel.id, true);
-    thread.running = Boolean(mentions.length) || !peer;
+    thread.running = true;
     thread.refreshedAfterReply = false;
     const named = [...new Set(mentions.map(item => `@${item.role_id}`))];
     thread.notice = named.length
       ? `已发送给 ${named.join("、")}${named.length > 1 && !peer ? "（由主控协调）" : ""}；回复会显示在此处。`
-      : peer ? "已发送；本项目没有主控，未 @ 角色的消息不会触发执行。"
-             : "已发送给项目主控；回复会显示在此处。";
+      : "已发送给项目主控；回复会显示在此处。";
     status.textContent = thread.notice;
     configChatSending = false;
     if (currentChan === channel.id) pollMessages();

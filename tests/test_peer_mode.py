@@ -80,11 +80,23 @@ def test_human_multi_mention_starts_every_named_role(chat, peer, monkeypatch):
     assert "Collaboration chain budget" not in prompts["dev"]
 
 
-def test_human_message_without_mention_starts_nobody(chat, peer):
-    chat.post("general", "human", "大家看看这个问题。")
+def test_human_message_without_mention_is_rejected(chat, peer):
+    """无主控时不点名的消息没人处理:引擎与 API 都拒收,不落库也不触发。"""
+    with pytest.raises(ValueError, match="至少一个角色"):
+        chat.post("general", "human", "大家看看这个问题。")
+    with pytest.raises(ValueError, match="至少一个角色"):
+        chat.post("general", "human", "大家看看", mention_spans=[])
+    response = TestClient(create_app()).post(
+        "/api/chat/general/messages",
+        json={"author": "human", "content": "大家看看", "mentions": []})
+    assert response.status_code == 400
+    assert "至少一个角色" in response.json()["detail"]
     chat.wait_idle()
     assert _runs(peer) == []
-    assert [m["author_type"] for m in _msgs(peer)] == ["human"]
+    assert _msgs(peer) == []
+    # 自动化脚本不点名仍可只发消息
+    chat.post("general", "nightly", "巡检完成。", author_type="automation")
+    assert [m["author_type"] for m in _msgs(peer)] == ["automation"]
 
 
 def test_agent_mention_spans_never_dispatch_in_peer_mode(chat, peer, monkeypatch):

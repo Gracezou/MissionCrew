@@ -262,7 +262,10 @@ def chat_send(content: str = typer.Argument(..., help="消息内容；@[角色] 
     chat = ChatEngine(store)
     msgs = store.list_messages(cid)
     before = msgs[-1]["id"] if msgs else 0
-    chat.post(cid, author, content)
+    try:
+        chat.post(cid, author, content)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
     if wait:
         chat.wait_idle()
     for m in store.list_messages(cid, after_id=before):

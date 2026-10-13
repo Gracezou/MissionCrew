@@ -480,6 +480,10 @@ class ChatEngine:
             # 平台消息只用于展示状态和操作回执，不解析提及，也不触发角色。
             mentions = []
         if not mentions and author_type == "human" and channel.project_id:
+            if project and not project.has_orchestrator:
+                # 无主控项目只靠人类点名启动角色,不点名的消息谁也不会处理;
+                # 直接拒收,免得人类以为发出去就有人接手。
+                raise ValueError("本项目没有主控，请先 @ 至少一个角色再发送")
             if orchestrator_available and author != orchestrator:
                 mentions = [orchestrator]
         dispatch_targets = list(mentions)

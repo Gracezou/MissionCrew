@@ -376,6 +376,7 @@ function insertComposerMention(id) {
   selection.addRange(range);
   savedComposerRange = range.cloneRange();
   hideMentionPicker();
+  if (box.id === "input") setComposerError();
 }
 
 function chooseComposerMention(id) {
@@ -402,6 +403,7 @@ function selectChannel(id, jump = true) {
   runCards.clear();
   pendingUploads = [];
   renderPendingUploads();
+  setComposerError();
   updateChatRunControls([]);
   document.getElementById("msgs").innerHTML = "";
   if (jump && currentTab !== "chat") switchTab("chat");
@@ -942,6 +944,14 @@ function openImagePreview(url, name = "") {
   document.getElementById("idlg").showModal();
 }
 
+// 发送前校验未通过的提示贴在输入框上方,比右上角 toast 醒目;补选角色或换频道即清除
+function setComposerError(text = "") {
+  const el = document.getElementById("composer-error");
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
 async function send() {
   const box = document.getElementById("input");
   const payload = composerPayload();
@@ -955,10 +965,11 @@ async function send() {
   }
   // 无主控项目只靠点名启动角色:不 @ 就没人处理,保留输入内容让用户补选角色
   if (peerModeProject() && !mentions.length) {
-    toast("本项目没有主控，请先 @ 至少一个角色再发送", "error");
+    setComposerError("本项目没有主控，请先 @ 至少一个角色再发送");
     box.focus();
     return;
   }
+  setComposerError();
   // 附件路径追加在正文尾部，不影响前面提及范围的字符偏移
   if (attachments.length)
     content = (content ? content + "\n\n" : "") + attachmentBlock(attachments);

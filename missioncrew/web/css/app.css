@@ -474,6 +474,10 @@
                             border-radius: 999px; background: var(--warn-soft);
                             color: var(--warn); font-size: 10.5px; font-weight: 600; }
   .role-background-marker[hidden] { display: none; }
+  .composer-error { margin-bottom: 8px; padding: 7px 12px; border: 1px solid var(--bad);
+                    border-radius: 8px; background: var(--bad-soft); color: var(--bad);
+                    font-size: 13px; }
+  .composer-error[hidden] { display: none; }
   #input-row { display: flex; gap: 10px; align-items: flex-end; }
   #input-wrap { position: relative; flex: 1; min-width: 0; }
   #input { box-sizing: border-box; width: 100%; min-height: 58px; max-height: 160px;

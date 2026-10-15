@@ -124,7 +124,12 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": False,
         "arguments": {
             "id": "task id", "snapshot_updated_at": "the update time seen when reading the task",
-            "title/summary/body/status/labels/channel_ids": "fields to update",
+            "title/summary/body/status/labels/channel_ids": ("fields to update; labels "
+                                                             "replaces the whole label list"),
+            "properties": ("set individual `property: value` labels without touching the rest, "
+                           "e.g. {\"owner\": \"张三\", \"priority\": null}; a value may be a "
+                           "string or an array, null clears the property; status wins if "
+                           "also given"),
         },
     },
     "task.brief": {
@@ -253,7 +258,7 @@ ACTION_DEFINITIONS = {
     "board_source.save": {
         "description": (
             "Create or update a custom task data source; cards are synced by id as that "
-            "source's tasks (add/overwrite/delete); suited to automation scripts that "
+            "source's tasks (add/update/delete); suited to automation scripts that "
             "periodically sync external lists such as GitCode/GitHub issues, then use "
             "dashboard.save to create a task board bound to the source"
         ),
@@ -263,10 +268,16 @@ ACTION_DEFINITIONS = {
             "name": "name", "description": "purpose",
             "columns": ("optional array of status values [{value,color}] (legacy "
                         "{key,title,color} accepted); defaults to four states"),
-            "cards": ("optional card array, synced as a whole by id; each card needs id and "
-                      "title, optionally summary, status (status text), labels, updated_at, "
-                      "meta and url (external link); new tasks go through the project's "
-                      "automatic handling rules"),
+            "cards": ("optional card array, synced as a whole by id: tasks absent from the "
+                      "list are deleted. Each card needs id (title too when it creates a task), "
+                      "optionally summary, status (status text), labels, properties, "
+                      "updated_at, meta and url (external link). Existing tasks only change "
+                      "what a card carries: omit status to keep the local status (new tasks "
+                      "default to the first status value); plain labels in labels replace the "
+                      "task's plain labels as a set, `property: value` labels and properties "
+                      "({property: value | [values] | null}) replace only those properties, "
+                      "null clears. New tasks go through the project's automatic handling "
+                      "rules"),
             "mode": "create/update/upsert; default upsert",
         },
     },
@@ -363,7 +374,7 @@ ACTION_ARGUMENTS = {
     },
     "task.update": {
         "id", "snapshot_updated_at", "title", "summary", "body", "status",
-        "labels", "channel_ids",
+        "labels", "properties", "channel_ids",
     },
     "task.brief": {"id", "content", "status"},
     "task.delete": {"id"},

@@ -13,6 +13,7 @@ from missioncrew.collab.automations import (AutomationScheduler,
                                             AutomationService,
                                             delete_automation, save_automation)
 from missioncrew.collab.chat import ChatEngine
+from missioncrew.collab.tasks import update_task
 from missioncrew.core.cron import next_cron_time, parse_cron, validate_cron
 
 
@@ -162,6 +163,59 @@ def test_automation_token_scopes_and_message_publish(seeded):
     runs = seeded._query("SELECT role_id FROM chat_runs ORDER BY id")
     assert [row["role_id"] for row in runs] == ["dev"]
     assert result["dispatched"] == ["dev"]
+
+
+def test_board_source_sync_only_updates_what_cards_carry(seeded):
+    """同步按「带了才改、没带保留」合并:本地状态与属性不会被下一次同步冲掉。"""
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def sync(cards, request_id):
+        return tools.execute(identity, "board_source.save",
+                             {"id": "gh", "cards": cards}, None, request_id)["sync"]
+
+    issue = {"id": "7", "title": "退款后库存未回滚", "labels": ["bug", "order"],
+             "url": "https://github.com/acme/webshop/issues/7"}
+    assert sync([issue], "s1") == {"created": 1, "updated": 0, "removed": 0}
+    task = seeded.list_tasks("webshop", source_id="gh")[0]
+    assert task.labels == ["status: 待处理", "bug", "order"]   # 没带状态落第一列
+
+    # 本地推进:改状态、加属性
+    update_task(seeded, task, snapshot_updated_at=task.updated_at,
+                changes={"status": "待验证", "properties": {"owner": "dev"}})
+    stamp = seeded.get_task(task.id).updated_at
+
+    # 外部源没变:不写库(updated_at 不动,避免 task.update 版本冲突),本地改动保留
+    assert sync([issue], "s2") == {"created": 0, "updated": 0, "removed": 0}
+    task = seeded.get_task(task.id)
+    assert task.updated_at == stamp
+    assert task.labels == ["status: 待验证", "bug", "order", "owner: dev"]
+
+    # 外部源改标题、去掉 order、加 priority:普通标签整组替换,属性只动同名的
+    assert sync([{"id": "7", "title": "退款成功后库存没有回滚",
+                  "labels": ["bug", "priority: 高"]}], "s3")["updated"] == 1
+    task = seeded.get_task(task.id)
+    assert task.title == "退款成功后库存没有回滚"
+    assert task.url.endswith("/issues/7")   # 没带 url,保留
+    assert task.labels == ["status: 待验证", "bug", "owner: dev", "priority: 高"]
+
+    # 带了 status 才覆盖;properties 的 null 清空属性;已有任务可以不带 title
+    sync([{"id": "7", "status": "已完成", "properties": {"owner": None}}], "s4")
+    task = seeded.get_task(task.id)
+    assert task.title == "退款成功后库存没有回滚"
+    assert task.labels == ["status: 已完成", "bug", "priority: 高"]
+
+    # 新卡片必须带 title;检查发生在写库之前,已有任务不受影响
+    with pytest.raises(AgentToolError) as missing:
+        sync([{"id": "7", "status": "待处理"}, {"id": "8"}], "s5")
+    assert missing.value.code == "invalid_arguments"
+    assert seeded.get_task(task.id).status == "已完成"
+    assert [t.external_id for t in seeded.list_tasks(
+        "webshop", source_id="gh")] == ["7"]
 
 
 def test_automation_refreshes_custom_board_source_and_board_binds_it(seeded):

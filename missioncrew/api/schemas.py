@@ -1,7 +1,7 @@
 """API 请求体模型(pydantic)。"""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,8 @@ class TaskUpdate(BaseModel):
     summary: Optional[str] = None
     body: Optional[str] = None
     labels: Optional[list[str]] = None
+    # 逐个设置属性:{属性名: 值 | [值...] | null},null 清空;没提到的属性不动
+    properties: Optional[dict[str, Optional[Union[str, list[str]]]]] = None
     channel_ids: Optional[list[str]] = None
     status: Optional[str] = None
 

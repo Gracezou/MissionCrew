@@ -67,6 +67,31 @@ def test_task_api_supports_issue_fields_updates_and_briefs(seeded):
         assert payload["task"]["updated_at"] > edited_task["updated_at"]
 
 
+def test_task_update_sets_single_properties_without_touching_others(seeded):
+    with TestClient(create_app()) as client:
+        task = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "订单导出",
+            "labels": ["export", "owner: 张三", "owner: 李四", "priority: 低"],
+        }).json()
+
+        edited = client.patch(f"/api/tasks/{task['id']}", json={
+            "snapshot_updated_at": task["updated_at"],
+            # 多值属性整组替换、单值清空、新属性追加;status 也是属性
+            "properties": {"owner": ["王五"], "priority": None,
+                           "area": "订单", "status": "处理中"},
+        })
+        assert edited.status_code == 200, edited.text
+        task = edited.json()["task"]
+        assert task["labels"] == [
+            "status: 处理中", "export", "owner: 王五", "area: 订单"]
+
+        for bad in ({"owner:x": "a"}, {"status": ["a", "b"]}, {"owner": 1},
+                    ["owner"]):
+            rejected = client.patch(f"/api/tasks/{task['id']}", json={
+                "snapshot_updated_at": task["updated_at"], "properties": bad})
+            assert rejected.status_code in (400, 422), bad
+
+
 def test_tasks_sort_by_latest_edit_or_progress_for_existing_data(seeded):
     tasks = [
         Task(id="t_recent-created", project_id="webshop", title="最近创建",

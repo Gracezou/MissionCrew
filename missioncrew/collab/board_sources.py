@@ -18,17 +18,19 @@ from typing import Optional
 from ..core import label_query
 from ..core.models import (BUILTIN_SOURCE_ID, BUILTIN_STATUS_VALUES,
                            LEGACY_STATUS_TEXT, STATUS_PROPERTY, Task, new_id,
-                           normalize_labels, normalize_status_values,
-                           status_of, with_status)
+                           normalize_labels, normalize_properties,
+                           normalize_status_values, status_of, with_property,
+                           with_status)
 
 MAX_BOARD_FILTERS = 20
 MAX_SOURCE_STATUS_VALUES = 12
 # 看板显示范围:活跃 / 已归档 / 全部(counts 始终按全量口径统计)
 BOARD_SCOPES = ("active", "archived", "all")
 MAX_SOURCE_CARDS = 1000
-# 同步卡片允许的字段(status 是状态文本;旧脚本发状态列 key 也能映射)
+# 同步卡片允许的字段(status 是状态文本;旧脚本发状态列 key 也能映射;
+# properties 逐个设置属性,null 清空)
 SOURCE_CARD_FIELDS = {"id", "title", "summary", "status", "labels",
-                      "updated_at", "meta", "url"}
+                      "properties", "updated_at", "meta", "url"}
 # 状态取值不能包含表达式运算符:状态文本要参与标签表达式匹配
 _OPERATOR_CHARS = set("&|!()")
 
@@ -177,7 +179,12 @@ def _column_key_map(raw_columns) -> dict[str, str]:
 
 
 def validate_source_cards(raw) -> list[dict]:
-    """校验并归一化同步卡片;非法抛 ValueError。状态文本不做取值校验。"""
+    """校验并归一化同步卡片;非法抛 ValueError。状态文本不做取值校验。
+
+    只保留卡片实际带了的字段(值为 null 等同没带):同步按「带了才改、没带
+    保留」合并进已有任务,所以缺省要和空值区分开。id 必填;title 只在新建
+    任务时必填,由 sync_source_tasks 检查。
+    """
     if not isinstance(raw, list):
         raise ValueError("cards 必须是数组")
     if len(raw) > MAX_SOURCE_CARDS:
@@ -190,29 +197,74 @@ def validate_source_cards(raw) -> list[dict]:
         if unknown:
             raise ValueError(f"卡片含未知字段: {', '.join(sorted(unknown))}")
         card_id = str(item.get("id") or "").strip()
-        title = str(item.get("title") or "").strip()
-        if not card_id or not title:
-            raise ValueError("每张卡片必须有 id 和 title")
+        if not card_id:
+            raise ValueError("每张卡片必须有 id")
         if card_id in seen:
             raise ValueError(f"卡片 id 重复: {card_id}")
         seen.add(card_id)
-        labels_raw = item.get("labels") or []
-        if (not isinstance(labels_raw, list)
-                or not all(isinstance(x, str) for x in labels_raw)):
-            raise ValueError(f"卡片 {card_id} 的 labels 必须是字符串数组")
-        meta_raw = item.get("meta") or []
-        if not isinstance(meta_raw, list):
-            raise ValueError(f"卡片 {card_id} 的 meta 必须是数组")
-        cards.append({
-            "id": card_id, "title": title,
-            "summary": str(item.get("summary") or ""),
-            "status": str(item.get("status") or "").strip(),
-            "labels": normalize_labels(labels_raw),
-            "updated_at": float(item.get("updated_at") or time.time()),
-            "meta": [str(x) for x in meta_raw],
-            "url": str(item.get("url") or "").strip(),
-        })
+        given = {key: value for key, value in item.items() if value is not None}
+        card = {"id": card_id,
+                "updated_at": float(given.get("updated_at") or time.time())}
+        if "title" in given:
+            card["title"] = str(given["title"]).strip()
+            if not card["title"]:
+                raise ValueError(f"卡片 {card_id} 的 title 不能为空")
+        if "summary" in given:
+            card["summary"] = str(given["summary"])
+        if "url" in given:
+            card["url"] = str(given["url"]).strip()
+        status = str(given.get("status") or "").strip()
+        if status:   # 空状态等同没带
+            card["status"] = status
+        if "labels" in given:
+            labels_raw = given["labels"]
+            if (not isinstance(labels_raw, list)
+                    or not all(isinstance(x, str) for x in labels_raw)):
+                raise ValueError(f"卡片 {card_id} 的 labels 必须是字符串数组")
+            card["labels"] = normalize_labels(labels_raw)
+        if "meta" in given:
+            if not isinstance(given["meta"], list):
+                raise ValueError(f"卡片 {card_id} 的 meta 必须是数组")
+            card["meta"] = [str(x) for x in given["meta"]]
+        if "properties" in item:   # properties 里的 null 是「清空」,单独校验
+            card["properties"] = normalize_properties(
+                item["properties"], f"卡片 {card_id} 的 properties")
+        cards.append(card)
     return cards
+
+
+def _merge_card_labels(labels: list[str], card: dict,
+                       status_text: str) -> list[str]:
+    """把卡片带了的标签部分合并进任务标签,没带的保持原样。
+
+    - labels 里的普通标签:整组以卡片为准(外部源删掉的标签才能同步删掉),
+      保留的标签留在原位,新增的追加在后;
+    - labels 里的 `属性: 值`:只替换同名属性;
+    - properties:逐个属性替换,空取值即清空;
+    - status:最后写入,优先级最高。
+    """
+    result = list(labels)
+    if "labels" in card:
+        plain = [label for label in card["labels"]
+                 if not label_query.split_label(label)[0]]
+        wanted = {label.lower() for label in plain}
+        result = [label for label in result
+                  if label_query.split_label(label)[0]
+                  or label.lower() in wanted]
+        have = {label.lower() for label in result}
+        result += [label for label in plain if label.lower() not in have]
+        grouped: dict[str, tuple[str, list[str]]] = {}
+        for label in card["labels"]:
+            prop, value = label_query.split_label(label)
+            if prop:
+                grouped.setdefault(prop.lower(), (prop, []))[1].append(value)
+        for prop, values in grouped.values():
+            result = with_property(result, prop, values)
+    for prop, values in card.get("properties", {}).items():
+        result = with_property(result, prop, values)
+    if status_text:
+        result = with_status(result, status_text)
+    return normalize_labels(result)
 
 
 def sync_source_tasks(store, project_id: str, source_id: str,
@@ -220,9 +272,11 @@ def sync_source_tasks(store, project_id: str, source_id: str,
                       status_values=None, auto_process=None) -> dict:
     """把同步卡片 upsert 成该源的任务(整体同步语义)。
 
-    卡片按 external_id 匹配既有任务:命中则整卡覆盖(标签含状态,最后写入
-    者生效,本地简报与频道绑定保留);未命中则新建,新任务会走项目自动处理
-    规则(auto_process 回调);本次未出现的 external_id 任务连带简报删除。
+    卡片按 external_id 匹配既有任务:命中则只更新卡片带了的字段与属性,
+    没带的保持本地值(本地改过的状态、Agent 加的属性不会被下一次同步冲掉;
+    内容没有变化时不写库,不刷新 updated_at);未命中则新建,没带状态时落到
+    第一个状态取值,新任务会走项目自动处理规则(auto_process 回调);本次
+    未出现的 external_id 任务连带简报删除。
     """
     key_text = _column_key_map(raw_columns)
     declared = [str(c.get("value") or "") for c in status_values or []]
@@ -234,22 +288,28 @@ def sync_source_tasks(store, project_id: str, source_id: str,
     existing = {task.external_id: task
                 for task in store.list_tasks(project_id, source_id=source_id)
                 if task.external_id}
+    # 先整体检查再写库,避免半途报错留下部分同步结果
+    untitled = [card["id"] for card in cards
+                if card["id"] not in existing and "title" not in card]
+    if untitled:
+        raise ValueError(f"新卡片必须有 title: {', '.join(untitled[:5])}")
     created, updated = 0, 0
     seen_ids = set()
     for card in cards:
         external_id = card["id"]
         seen_ids.add(external_id)
-        status_raw = card["status"]
-        status_text = key_text.get(status_raw, status_raw) or default_status
-        labels = with_status(card["labels"], status_text) \
-            if status_text or not status_of(card["labels"]) else card["labels"]
+        status_text = (key_text.get(card["status"], card["status"])
+                       if "status" in card else "")
         task = existing.get(external_id)
         if task is None:
+            labels = _merge_card_labels([], card, status_text)
+            if not status_of(labels):
+                labels = with_status(labels, default_status)
             task = Task(
                 id=new_id("t"), project_id=project_id, title=card["title"],
                 source_id=source_id, external_id=external_id,
-                summary=card["summary"], labels=labels,
-                url=card["url"], meta=card["meta"],
+                summary=card.get("summary", ""), labels=labels,
+                url=card.get("url", ""), meta=card.get("meta", []),
                 created_at=card["updated_at"], updated_at=card["updated_at"],
             )
             store.put_task(task)
@@ -257,13 +317,15 @@ def sync_source_tasks(store, project_id: str, source_id: str,
             if auto_process is not None:
                 auto_process(task)
         else:
-            task.title = card["title"]
-            task.summary = card["summary"]
-            task.labels = labels
-            task.url = card["url"]
-            task.meta = card["meta"]
-            store.put_task(task)
-            updated += 1
+            before = (task.title, task.summary, task.url, task.meta, task.labels)
+            for key in ("title", "summary", "url", "meta"):
+                if key in card:
+                    setattr(task, key, card[key])
+            task.labels = _merge_card_labels(task.labels, card, status_text)
+            if (task.title, task.summary, task.url, task.meta,
+                    task.labels) != before:
+                store.put_task(task)
+                updated += 1
     removed = 0
     for external_id, task in existing.items():
         if external_id not in seen_ids:

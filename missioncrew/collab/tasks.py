@@ -6,7 +6,8 @@ from typing import Optional
 
 from .resource_urls import task_resource_url
 from ..core import label_query
-from ..core.models import (Channel, Task, new_id, normalize_labels, status_of,
+from ..core.models import (Channel, Task, new_id, normalize_labels,
+                           normalize_properties, status_of, with_property,
                            with_status)
 from ..core.store import Store
 
@@ -111,6 +112,10 @@ def update_task(store: Store, task: Task, *, snapshot_updated_at: object,
         task.body = _text(changes["body"], "body")
     if "labels" in changes:
         task.labels = _labels(changes["labels"])
+    if "properties" in changes:
+        # 逐个属性替换/清空,没提到的属性和普通标签保持原样
+        for prop, values in normalize_properties(changes["properties"]).items():
+            task.labels = with_property(task.labels, prop, values)
     if "status" in changes:
         task.labels = with_status(
             task.labels, _text(changes["status"], "status", required=True))

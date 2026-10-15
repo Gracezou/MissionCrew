@@ -68,7 +68,7 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 
    ![自动化脚本：每 30 分钟同步一次 GitHub Issue，下方是运行记录](docs/images/get-started/automation.jpg)
 
-   `board_source.save` 每次按 Issue 编号整卡覆盖，所以状态要从 GitHub 推导，不能写死；否则 Agent 回写的进度会在下一次同步时被冲掉。下面的脚本把「已关闭」映射为已完成，把 Issue 上的「处理中 / 待验证」标签映射为对应状态：
+   同步是按 Issue 编号合并的：卡片带了的字段才更新，没带的保留本地值。所以脚本只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带状态——新 Issue 落进第一列「待处理」，之后主控、Agent 推进的「处理中 / 待验证」不会被下一次同步冲掉。完整合并规则见 [docs/automation.md](docs/automation.md)。
 
    <details>
    <summary>同步脚本示例</summary>
@@ -80,18 +80,14 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
    gh issue list --repo acme/webshop --state all --limit 100 \
      --json number,title,body,state,labels,url > issues.json
 
-   # 状态以 GitHub 为准：已关闭 → 已完成，带「处理中 / 待验证」标签的按标签，其余待处理
-   jq '[.[] | [.labels[].name] as $l | {
+   # 只给已关闭的 Issue 带 status；打开的不带，保留本地状态（新任务默认落在第一列）
+   jq '[.[] | {
          id: ("#" + (.number | tostring)),
          title: ("#" + (.number | tostring) + " " + .title),
          summary: (.body // "" | .[0:300]),
-         labels: ($l - ["处理中", "待验证"]),
-         url: .url,
-         status: (if .state == "CLOSED" then "已完成"
-                  elif ($l | index("待验证")) then "待验证"
-                  elif ($l | index("处理中")) then "处理中"
-                  else "待处理" end)
-       }]' issues.json > cards.json
+         labels: [.labels[].name],
+         url: .url
+       } + (if .state == "CLOSED" then {status: "已完成"} else {} end)]' issues.json > cards.json
 
    "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save \
      --arguments "$(jq -c '{id: "github", name: "GitHub Issues",
@@ -107,7 +103,7 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 
    <img src="docs/images/get-started/task-rule.jpg" width="640" alt="「待处理」列的自动处理规则：交给 @lead 判断类型，缺陷按 dev-workflow 修复并上库">
 
-3. **自动完成**。新 Issue 命中规则后，平台以「Task 自动规则」的身份把任务详情发到频道。主控按 `dev-workflow` 调度分析和修复，完成后在 Issue 下回复、打上「待验证」标签，并用 `task.brief` 回写状态，看板上的卡片随之流转到「待验证」。人只需要在频道里看进展，必要时插一句话。
+3. **自动完成**。新 Issue 命中规则后，平台以「Task 自动规则」的身份把任务详情发到频道。主控按 `dev-workflow` 调度分析和修复，完成后在 Issue 下回复，并用 `task.brief` 回写状态，看板上的卡片随之流转到「待验证」。人只需要在频道里看进展，必要时插一句话。
 
    ![#231 被自动派发给主控：分析、修复、创建 PR，最后回写任务状态为待验证](docs/images/get-started/auto-dispatch.jpg)
 

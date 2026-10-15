@@ -21,7 +21,15 @@
 
 ## 外部列表同步成任务（数据源）
 
-`board_source.save` 创建或更新一个自定义任务数据源：`columns` 声明状态取值（顺序与颜色），`cards` 按 id **整体同步**为该源的任务——新增、覆盖、删除本次未出现的条目。每张卡片可带 `title`、`summary`、`status`（状态文本，落库为 `status: 文本` 标签）、`labels`（支持 `属性: 值` 高级标签，如 `owner: 张三`）、`url`（原始链接）、`meta`。
+`board_source.save` 创建或更新一个自定义任务数据源：`columns` 声明状态取值（顺序与颜色），`cards` 按 id **整体同步**为该源的任务——新增、更新、删除本次未出现的条目。每张卡片必须带 `id`，新建任务时还必须带 `title`；可选 `summary`、`status`（状态文本，落库为 `status: 文本` 标签）、`labels`（支持 `属性: 值` 高级标签，如 `owner: 张三`）、`properties`、`url`（原始链接）、`meta`。
+
+已有任务按「**卡片带了才改，没带保留**」合并，所以 Agent 或人在本地推进的状态、补充的属性不会被下一次同步冲掉：
+
+- `title`、`summary`、`url`、`meta`：带了才覆盖；值为 `null` 等同没带。
+- `status`：带了才设置；没带时保留本地状态，新建任务落到第一个状态取值。脚本只在外部源有明确结论时带上它，比如 Issue 已关闭时带 `已完成`。
+- `labels` 里的普通标签（如 `bug`）：带了就整组替换任务的普通标签，外部源删掉的标签会同步删掉；本地要长期保留的标记请用 `属性: 值` 形式。
+- `labels` 里的 `属性: 值` 与 `properties`（`{属性: 值 | [值...] | null}`）：只替换同名属性，`null` 清空，没提到的属性不动。同一属性同时出现时，`status` 字段优先于 `properties`，`properties` 优先于 `labels`。
+- 内容没有变化的任务不写库，`updated_at` 不变，不会让 Agent 手里的 `task.update` 快照失效。
 
 同步进来的条目就是普通 Task：可以打开详情、追加状态简报、绑定频道、被派发；**新同步的任务会立即走项目自动处理规则**。再用 `dashboard.save` 建一块 taskboard 面板绑定该源即可查看，列用标签表达式（`filters`）定义，或传 `group_by` 按属性取值动态分列（此时 `filters` 的并集只划定卡片范围）。
 
@@ -35,10 +43,10 @@
 
 ## 闭环示例：自动处理 GitCode/GitHub Issue
 
-1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本，用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。
+1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本，用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
 2. **看板**：用 `dashboard.save` 建 taskboard 绑定该源，按状态或负责人分列查看。
 3. **规则**：在看板列头 ⚡ 配置，如表达式 `bug & status: 待处理`，处理要求「@dev 请分析并修复，完成后追加状态简报」。
-4. **自动流转**：新 Issue 被同步成 Task → 命中规则 → 自动派发给 dev → dev 在频道内分析修复（也可以用 `gh`/`gitcode` CLI 把结论回写到外部系统）→ 用 `task.brief`/`task.update` 更新任务状态。
+4. **自动流转**：新 Issue 被同步成 Task → 命中规则 → 自动派发给 dev → dev 在频道内分析修复（也可以用 `gh`/`gitcode` CLI 把结论回写到外部系统）→ 用 `task.brief`/`task.update` 更新任务状态；同步脚本不带 `status` 时，这个状态在后续同步中保留，直到 Issue 关闭被同步为 `已完成`。
 
 PR 审查、告警值守同理：任何能写成「外部列表 → cards」的数据都能进入这条流水线，处理要求和角色选择决定它被怎样消化。
 

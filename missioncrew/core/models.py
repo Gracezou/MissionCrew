@@ -62,6 +62,56 @@ def with_status(labels, value: str) -> list[str]:
     return rest
 
 
+def with_property(labels, prop: str, values) -> list[str]:
+    """返回替换某个属性全部取值后的标签列表;values 为空表示移除该属性。
+
+    status 走 with_status(单值、排在首位);其他属性在第一次出现的位置原地
+    替换,原先没有该属性时追加到末尾。属性名大小写不敏感。
+    """
+    key = prop.strip().lower()
+    if key == STATUS_PROPERTY:
+        return with_status(labels, values[0] if values else "")
+    labels = list(labels or [])
+    rest = [label for label in labels if split_label(label)[0].lower() != key]
+    # 第一次出现之前的标签都不属于该属性,所以原下标就是在 rest 里的插入位置
+    position = next((i for i, label in enumerate(labels)
+                     if split_label(label)[0].lower() == key), len(rest))
+    added = [f"{prop.strip()}: {value}" for value in values]
+    return normalize_labels(rest[:position] + added + rest[position:])
+
+
+def normalize_properties(raw, field: str = "properties") -> dict[str, list[str]]:
+    """校验「逐个设置属性」的参数:{属性名: 值 | [值...] | null}。
+
+    返回 属性名 -> 取值列表,空列表表示清空该属性;没提到的属性一律不动。
+    status 只能有一个取值。非法抛 ValueError。
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field} 必须是对象")
+    result: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for name, value in raw.items():
+        prop = str(name).strip() if isinstance(name, str) else ""
+        if not prop or ":" in prop:
+            raise ValueError(f"{field} 的属性名必须是不含冒号的非空字符串")
+        if prop.lower() in seen:
+            raise ValueError(f"{field} 的属性名重复: {prop}")
+        seen.add(prop.lower())
+        if value is None:
+            values = []
+        elif isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+            values = value
+        else:
+            raise ValueError(f"{field}.{prop} 必须是字符串、字符串数组或 null")
+        values = list(dict.fromkeys(v.strip() for v in values if v.strip()))
+        if prop.lower() == STATUS_PROPERTY and len(values) > 1:
+            raise ValueError(f"{field}.{prop} 只能有一个取值")
+        result[prop] = values
+    return result
+
+
 def normalize_labels(labels) -> list[str]:
     """标签统一归一化 + 去重(大小写不敏感,保留首次写法)。"""
     seen, result = set(), []

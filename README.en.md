@@ -68,7 +68,7 @@ A scheduled script syncs an external list into tasks, and task auto-processing r
 
    ![Automation script syncing GitHub issues every 30 minutes, with the run history below](docs/images/get-started/automation.jpg)
 
-   `board_source.save` overwrites each card by issue number on every sync, so derive the status from GitHub instead of hard-coding it — otherwise progress written back by agents is wiped out by the next sync. The script below maps closed issues to done and the `处理中` / `待验证` (in progress / to verify) issue labels to the matching status:
+   Syncing merges by issue number: an existing task only changes what its card carries and keeps everything else. So the script sends `status: 已完成` (done) only for closed issues and no status for open ones — new issues land in the first column, and the "in progress / to verify" progress made by the orchestrator and agents is not wiped out by the next sync. See [docs/automation.md](docs/automation.md) (Chinese) for the full merge rules.
 
    <details>
    <summary>Example sync script</summary>
@@ -80,18 +80,14 @@ A scheduled script syncs an external list into tasks, and task auto-processing r
    gh issue list --repo acme/webshop --state all --limit 100 \
      --json number,title,body,state,labels,url > issues.json
 
-   # GitHub is the source of truth: closed → done, labelled 处理中/待验证 → that status, otherwise to do
-   jq '[.[] | [.labels[].name] as $l | {
+   # Only closed issues carry a status; open ones keep their local status (new tasks start in the first column)
+   jq '[.[] | {
          id: ("#" + (.number | tostring)),
          title: ("#" + (.number | tostring) + " " + .title),
          summary: (.body // "" | .[0:300]),
-         labels: ($l - ["处理中", "待验证"]),
-         url: .url,
-         status: (if .state == "CLOSED" then "已完成"
-                  elif ($l | index("待验证")) then "待验证"
-                  elif ($l | index("处理中")) then "处理中"
-                  else "待处理" end)
-       }]' issues.json > cards.json
+         labels: [.labels[].name],
+         url: .url
+       } + (if .state == "CLOSED" then {status: "已完成"} else {} end)]' issues.json > cards.json
 
    "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save \
      --arguments "$(jq -c '{id: "github", name: "GitHub Issues",
@@ -107,7 +103,7 @@ A scheduled script syncs an external list into tasks, and task auto-processing r
 
    <img src="docs/images/get-started/task-rule.jpg" width="640" alt="Auto-processing rule on the to-do column: @lead decides the issue type and fixes bugs following dev-workflow">
 
-3. **Done automatically.** When a new issue matches the rule, the platform posts the task details to the channel as *Task auto rule*. The orchestrator runs analysis and the fix following `dev-workflow`, replies on the issue, adds the `待验证` label and writes the status back with `task.brief`; the card on the board moves to "to verify". You just follow the channel and step in when needed.
+3. **Done automatically.** When a new issue matches the rule, the platform posts the task details to the channel as *Task auto rule*. The orchestrator runs analysis and the fix following `dev-workflow`, replies on the issue and writes the status back with `task.brief`; the card on the board moves to "to verify". You just follow the channel and step in when needed.
 
    ![Issue #231 auto-dispatched to the orchestrator: analysis, fix, PR, and the task status written back as to verify](docs/images/get-started/auto-dispatch.jpg)
 

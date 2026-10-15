@@ -12,6 +12,8 @@ MissionCrew 是一个本地多 Agent 协作平台。它把本机已安装的 Age
 
 ### 安装与启动
 
+**最省事的做法是让你的 Agent 来装**：在本仓库目录里打开常用的 Agent CLI（如 Claude Code、Codex），让它读这份 README，帮你安装依赖、用 pm2 部署成常驻服务，并顺带讲解各项配置和下面三个场景怎么用。想自己动手，按下面的步骤即可。
+
 环境要求：Python 3.10+、[uv](https://docs.astral.sh/uv/)、Node.js 18+（pm2 与 pi 需要 npm），以及本机至少一个已登录可用的 Agent CLI（如 `claude`、`codex`）。
 
 ```bash
@@ -40,31 +42,29 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 
 ### 场景二：定制工作流程，让主控调度全流程
 
-把团队的工作方式写成准则、把常用操作封装成 Skill，再选一个主控：之后只需一句话提需求，主控就按流程把任务依次交给不同角色，分析 → 开发 → 检视 → 测试 → 上库一路推进，人只在开头提需求、在结尾验收。
+**流程准则和 Skill 都不用自己动手写**：在聊天里把你的流程和要求讲给主控，它会调用平台动作直接写好准则和 Skill，并把链接贴回频道，你在页面上审阅、微调即可（无主控项目里任何角色都能做这些配置）。配好之后只需一句话提需求，主控就按流程把任务依次交给不同角色，分析 → 开发 → 检视 → 测试 → 上库一路推进，人只在开头提需求、在结尾验收。
 
-1. **写流程准则**。侧栏「准则」的 ＋ 新建一篇 Markdown，写清每个阶段由谁负责、做到什么程度算完成。准则列表会进入每个角色的上下文，主控据此决定派发顺序。
+1. **选一个主控**。默认项目已经把 `@lead` 设为主控；要换人时在「项目设置 → 项目信息」选择项目主控角色。再按各自所长给角色配好 runtime 与模型，比如主控和分析用 Claude Opus、开发用 Codex、评审用 Claude Sonnet、测试用 Kimi。
+
+   ![项目设置：项目主控角色选为 @lead](docs/images/get-started/orchestrator.jpg)
+
+2. **让主控写流程准则**。在频道里说「把分析、开发、检视、测试、上库五个阶段写成准则 dev-workflow，写清每个阶段谁负责、做到什么算完成」，主控会用 `guideline.save` 写好并贴回链接。之后想调整，在准则页右下角的「页面对话」里说一句就行；也可以在侧栏「准则」的 ＋ 自己写。准则列表会进入每个角色的上下文，主控据此决定派发顺序。
 
    ![准则 dev-workflow：分析、开发、检视、测试、上库五个阶段分别由哪个角色负责、要做到什么](docs/images/get-started/guideline.jpg)
 
-2. **添加自己的 Skill**。在 Skill 页上传 ZIP、导入本地目录，或者直接把含 `SKILL.md` 的目录复制到页面显示的投放目录，平台会自动发现并用 Git 管理版本，详见 [项目 Skill 目录](docs/skills.md)。图中的 `local-ci`、`code-review`、`git-commit` 分别对应流程里的本地自测、检视清单和提交规范。
+3. **让主控写 Skill**。同样一句话：「把本地 CI 写成 Skill local-ci，依次跑 ruff、mypy、pytest，三步都通过才算成功」，主控会用 `skill.save` 生成 `SKILL.md`。手上已有现成的 Skill 包时，在 Skill 页上传 ZIP、导入本地目录，或者直接把目录复制到页面显示的投放目录，平台会自动发现并用 Git 管理版本，详见 [项目 Skill 目录](docs/skills.md)。图中的 `local-ci`、`code-review`、`git-commit` 分别对应流程里的本地自测、检视清单和提交规范。
 
    ![Skill 页：local-ci 的完整目录与 SKILL.md 预览](docs/images/get-started/skills.jpg)
-
-3. **选一个主控**。在「项目设置 → 项目信息」选择项目主控角色，并按各自所长给角色配好 runtime 与模型，比如主控和分析用 Claude Opus、开发用 Codex、评审用 Claude Sonnet、测试用 Kimi。
-
-   ![项目设置：项目主控角色选为 @lead](docs/images/get-started/orchestrator.jpg)
 
 4. **一句话启动**。在频道里不 @ 任何角色，直接描述需求，消息默认交给主控。主控按准则逐个派发，每个角色完成后结果自动交回主控；检视发现问题时主控把它退回开发，直到所有阶段通过。
 
    ![主控按 dev-workflow 依次派发：分析、开发、检视（退回修复一次）、测试、上库，最后汇总](docs/images/get-started/workflow.jpg)
 
-准则、Skill、频道这些资源也可以直接在聊天里让主控维护，比如「把这次的检视要求写进准则」，主控会调用对应动作完成并把链接贴回频道。
-
 ### 场景三：自动化，定时拉取 GitHub Issue 并自动处理
 
-定时脚本把外部列表同步成 Task，Task 自动处理规则把命中的新任务派给角色，两者拼成一条无人值守的流水线，原理见 [定时自动化与任务自动处理](docs/automation.md)。
+**同步脚本和看板也可以让主控来写**，你只需要说清要同步什么、怎么处理，再在看板上点一下开启自动处理规则。定时脚本把外部列表同步成 Task，Task 自动处理规则把命中的新任务派给角色，两者拼成一条无人值守的流水线，原理见 [定时自动化与任务自动处理](docs/automation.md)。
 
-1. **写同步脚本**。侧栏「自动化」的 ＋ 新建脚本，cron 填 `*/30 * * * *`。脚本用 `gh issue list` 拉取 Issue，整理成卡片后调用平台动作 `board_source.save`。平台每次运行都签发一次性令牌，脚本只能调用白名单里的动作；运行记录里能看到每次的退出码和输出。
+1. **让主控写同步脚本**。在频道里说「写一个自动化脚本，每 30 分钟用 gh 把 acme/webshop 的 Issue 同步成数据源 github，已关闭的标为已完成」，主控会用 `automation.save` 保存脚本并设好 cron；也可以在侧栏「自动化」的 ＋ 自己写。脚本用 `gh issue list` 拉取 Issue，整理成卡片后调用平台动作 `board_source.save`。平台每次运行都签发一次性令牌，脚本只能调用白名单里的动作；运行记录里能看到每次的退出码和输出。
 
    ![自动化脚本：每 30 分钟同步一次 GitHub Issue，下方是运行记录](docs/images/get-started/automation.jpg)
 
@@ -97,7 +97,7 @@ uv run mc serve    # 启动 Web 服务，默认监听 127.0.0.1:8321
 
    </details>
 
-2. **建看板、设规则**。在侧栏「面板」新建一块任务看板绑定 `github` 数据源（也可以让主控用 `dashboard.save` 建），同步进来的 Issue 就是普通 Task，按状态分列显示。点「待处理」列头的 ⚡，写下处理要求并 @ 负责的角色：之后新同步进来的任务只要命中这一列的标签表达式，就会自动派发。规则只对新建的 Task 生效，建议先手动运行一次脚本、把存量 Issue 同步进来，再开启规则，避免存量 Issue 一次性全部派发。
+2. **建看板、设规则**。看板同样可以让主控用 `dashboard.save` 建好并绑定 `github` 数据源，也可以在侧栏「面板」自己新建；同步进来的 Issue 就是普通 Task，按状态分列显示。自动处理规则由你在看板上设置：点「待处理」列头的 ⚡，写下处理要求并 @ 负责的角色，之后新同步进来的任务只要命中这一列的标签表达式，就会自动派发。规则只对新建的 Task 生效，建议先手动运行一次脚本、把存量 Issue 同步进来，再开启规则，避免存量 Issue 一次性全部派发。
 
    ![GitHub Issues 看板：按 待处理 / 处理中 / 待验证 / 已完成 分列](docs/images/get-started/issue-board.jpg)
 
@@ -148,6 +148,8 @@ MissionCrew 为 Agent 提供一系列接口脚本，Agent 可以用执行命令�
 平台数据（SQLite、文档库、Agent 工作区、pm2 日志）默认放在用户主目录的 `~/.missioncrew/`，可用环境变量 `MISSIONCREW_HOME` 覆盖，pm2 部署配置跟随同一变量；业务代码仓内不会被写入任何平台文件。
 
 ## 用 pm2 常驻运行
+
+这一步同样可以交给你的 Agent：让它按本节的约定完成部署，并解释每一步在做什么。
 
 日常使用建议交给 [pm2](https://pm2.keymetrics.io/) 托管。仓库提供统一入口 `scripts/serve.sh`（配置在 `ecosystem.config.cjs`，服务名 `missioncrew`，用 `.venv/bin/python -m missioncrew.cli serve` 启动），不要再用 `nohup`/`setsid` 手工拉起：
 

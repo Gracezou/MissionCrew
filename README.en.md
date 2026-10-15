@@ -12,6 +12,8 @@ The point is to combine several local Agent CLIs so you can play to the strength
 
 ### Install and run
 
+**The easiest way is to let your agent install it**: open your usual Agent CLI (such as Claude Code or Codex) in this repository, ask it to read this README, install the dependencies, deploy the service under pm2, and walk you through the configuration and the three scenarios below. To do it yourself, follow the steps below.
+
 Requirements: Python 3.10+, [uv](https://docs.astral.sh/uv/), Node.js 18+ (npm is needed for pm2 and pi), and at least one logged-in Agent CLI on this machine (such as `claude` or `codex`).
 
 ```bash
@@ -40,31 +42,29 @@ Here the human mentions @claude and @codex together to investigate a slow order 
 
 ### Scenario 2: your own workflow, driven end to end by the orchestrator
 
-Write down how your team works as guidelines, package recurring procedures as skills, and pick an orchestrator. From then on a one-line request is enough: the orchestrator hands the work to different roles in turn — analysis → development → review → testing → merge — and you only state the request at the start and accept the result at the end.
+**You don't have to write the workflow guideline or the skills yourself**: describe your process and requirements to the orchestrator in the chat, and it writes the guideline and skills through platform actions and posts the links back to the channel; you review and fine-tune them on the pages (in a project without an orchestrator, any role can do this configuration). After that a one-line request is enough: the orchestrator hands the work to different roles in turn — analysis → development → review → testing → merge — and you only state the request at the start and accept the result at the end.
 
-1. **Write the workflow as a guideline.** Use the ＋ next to **Guidelines** to create a Markdown file stating who owns each stage and what "done" means. The guideline list is injected into every role's context, and the orchestrator dispatches accordingly.
+1. **Pick an orchestrator.** The default project already uses `@lead` as its orchestrator; to change it, choose the orchestrator role in **Project settings → Project info**. Then give each role the runtime and model that suits it — for example Claude Opus for the orchestrator and analyst, Codex for the developer, Claude Sonnet for the reviewer and Kimi for the tester.
+
+   ![Project settings: @lead selected as the orchestrator](docs/images/get-started/orchestrator.jpg)
+
+2. **Have the orchestrator write the workflow guideline.** Say in a channel "write the five stages — analysis, development, review, testing, merge — as a guideline named dev-workflow, stating who owns each stage and what done means", and the orchestrator writes it with `guideline.save` and posts the link. To adjust it later, just say so in the page chat at the bottom right of the guideline page, or write it yourself with the ＋ next to **Guidelines**. The guideline list is injected into every role's context, and the orchestrator dispatches accordingly.
 
    ![Guideline dev-workflow: which role owns analysis, development, review, testing and merge, and what each stage must deliver](docs/images/get-started/guideline.jpg)
 
-2. **Add your own skills.** On the Skills page upload a ZIP, import a local directory, or simply copy a directory containing `SKILL.md` into the drop directory shown on the page; the platform discovers it and versions it with Git (see [Project skills](docs/skills.md)). The `local-ci`, `code-review` and `git-commit` skills in the screenshot back the self-test, review checklist and commit conventions of the workflow.
+3. **Have the orchestrator write skills.** Again one sentence: "turn our local CI into a skill named local-ci that runs ruff, mypy and pytest in order and only succeeds when all three pass", and the orchestrator generates the `SKILL.md` with `skill.save`. If you already have skill packages, upload a ZIP or import a local directory on the Skills page, or simply copy the directory into the drop directory shown on the page; the platform discovers it and versions it with Git (see [Project skills](docs/skills.md)). The `local-ci`, `code-review` and `git-commit` skills in the screenshot back the self-test, review checklist and commit conventions of the workflow.
 
    ![Skills page: the full local-ci directory and its SKILL.md preview](docs/images/get-started/skills.jpg)
-
-3. **Pick an orchestrator.** In **Project settings → Project info** choose the project's orchestrator role, and give each role the runtime and model that suits it — for example Claude Opus for the orchestrator and analyst, Codex for the developer, Claude Sonnet for the reviewer and Kimi for the tester.
-
-   ![Project settings: @lead selected as the orchestrator](docs/images/get-started/orchestrator.jpg)
 
 4. **Start with one sentence.** Describe the request in a channel without mentioning anyone; it goes to the orchestrator by default. The orchestrator dispatches stage by stage following the guideline, every role's result flows back to it automatically, and when review finds a problem the orchestrator sends the work back to the developer until every stage passes.
 
    ![The orchestrator follows dev-workflow: analysis, development, review (one round of fixes), testing, merge, then a summary](docs/images/get-started/workflow.jpg)
 
-Guidelines, skills and channels can also be maintained by the orchestrator straight from the chat, e.g. "put these review requirements into the guideline"; it calls the matching action and posts the link back to the channel.
-
 ### Scenario 3: automation — pull GitHub issues on a schedule and handle them automatically
 
-A scheduled script syncs an external list into tasks, and task auto-processing rules dispatch matching new tasks to roles; together they form an unattended pipeline. See [Scheduled automation and task auto-processing](docs/automation.md) (Chinese) for how it works.
+**The orchestrator can write the sync script and the board too**: you only say what to sync and how to handle it, then switch on the auto-processing rule on the board with one click. A scheduled script syncs an external list into tasks, and task auto-processing rules dispatch matching new tasks to roles; together they form an unattended pipeline. See [Scheduled automation and task auto-processing](docs/automation.md) (Chinese) for how it works.
 
-1. **Write the sync script.** Use the ＋ next to **Automation** in the sidebar and set the cron to `*/30 * * * *`. The script fetches issues with `gh issue list`, turns them into cards and calls the platform action `board_source.save`. Every run gets a one-time token that only allows the actions on the script's allow-list; the run history shows each run's exit code and output.
+1. **Have the orchestrator write the sync script.** Say in a channel "write an automation script that syncs the issues of acme/webshop into a data source named github with gh every 30 minutes, marking closed ones as done", and the orchestrator saves it with `automation.save` and sets the cron; or write it yourself with the ＋ next to **Automation** in the sidebar. The script fetches issues with `gh issue list`, turns them into cards and calls the platform action `board_source.save`. Every run gets a one-time token that only allows the actions on the script's allow-list; the run history shows each run's exit code and output.
 
    ![Automation script syncing GitHub issues every 30 minutes, with the run history below](docs/images/get-started/automation.jpg)
 
@@ -97,7 +97,7 @@ A scheduled script syncs an external list into tasks, and task auto-processing r
 
    </details>
 
-2. **Create a board and a rule.** Create a task board bound to the `github` data source under **Dashboards** in the sidebar (or let the orchestrator create it with `dashboard.save`). Synced issues are ordinary tasks, shown in columns by status. Click the ⚡ on the to-do column header, write the handling instructions and mention the responsible role: from then on every newly synced task that matches the column's label expression is dispatched automatically. Rules only apply to newly created tasks, so run the script once by hand to import existing issues before enabling the rule; otherwise all existing issues would be dispatched at once.
+2. **Create a board and a rule.** The orchestrator can also create the task board with `dashboard.save` and bind it to the `github` data source, or you create it under **Dashboards** in the sidebar. Synced issues are ordinary tasks, shown in columns by status. The auto-processing rule is set by you on the board: click the ⚡ on the to-do column header, write the handling instructions and mention the responsible role: from then on every newly synced task that matches the column's label expression is dispatched automatically. Rules only apply to newly created tasks, so run the script once by hand to import existing issues before enabling the rule; otherwise all existing issues would be dispatched at once.
 
    ![GitHub Issues board with to do / in progress / to verify / done columns](docs/images/get-started/issue-board.jpg)
 
@@ -140,6 +140,8 @@ Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/age
 Platform data (SQLite, document libraries, agent workspaces, logs) lives in `.missioncrew/` under the current directory; override it with `MISSIONCREW_HOME`. Nothing is ever written into your code repositories.
 
 ## Running under pm2
+
+This step can be handed to your agent as well: ask it to deploy following the conventions in this section and explain what each step does.
 
 For day-to-day use let [pm2](https://pm2.keymetrics.io/) manage the service. The repository ships a single entry point, `scripts/serve.sh` (configured in `ecosystem.config.cjs`, process name `missioncrew`, started as `.venv/bin/python -m missioncrew.cli serve`). Do not start the service by hand with `nohup`/`setsid`:
 

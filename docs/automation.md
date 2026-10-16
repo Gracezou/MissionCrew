@@ -10,43 +10,113 @@
 ## 自动化脚本
 
 - **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 仅手动触发）、`enabled`、`actions`、`timeout_seconds`。
-- **执行**：所有 cron 触发都走统一定时入口调度；脚本在独立工作目录运行，平台把一次性令牌写入该目录的 `.agent-tool-token`，并注入 `MISSIONCREW_AGENT_TOKEN_FILE`、`MISSIONCREW_AGENT_TOOL_URL`、`MISSIONCREW_AGENT_TOOL_PYTHON`（平台自身的 Python 解释器）等环境变量，运行结束立即撤销令牌。脚本内调用平台动作的方式：
+- **调度**：所有 cron 触发都走统一定时入口；同一脚本上一次还没跑完时不会重复启动；停机期间错过的触发不补跑。
+- **权限**：脚本身份的可用动作以自身 `actions` 白名单为事实源，默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`；审计 actor 记为 `automation:<项目>:<脚本>`。
+- **运行记录**：自动化详情页可查看每次运行的触发方式、退出码与 stdout/stderr。退出码非零记为失败。
+
+### 运行环境
+
+- **工作目录**：`<数据目录>/automations/<项目 id>/<脚本短 id>/`，跨次运行保留，可以存放状态文件（例如上次同步的时间）。每次运行前平台把脚本正文写成该目录下的 `script`，不要用这个文件名保存别的内容。
+- **环境变量**：脚本继承 MissionCrew 服务进程的环境，`PATH` 以及 `gh`、`gitcode` 等 CLI 的登录状态都来自启动服务的用户；平台另外注入：
+
+  | 变量 | 含义 |
+  | --- | --- |
+  | `MISSIONCREW_AGENT_TOOL_PYTHON` | 平台自身的 Python 解释器，用它运行 `-m missioncrew.agent_tool` |
+  | `MISSIONCREW_AGENT_TOOL_URL` | Agent Tool API 根地址 |
+  | `MISSIONCREW_AGENT_TOKEN_FILE` | 本次运行的一次性令牌文件（工作目录下的 `.agent-tool-token`）；CLI 自行读取，脚本不需要读取，也不要打印 |
+  | `MISSIONCREW_PROJECT_ID` | 项目 id |
+  | `MISSIONCREW_AUTOMATION_ID` | 脚本 id，格式 `<项目 id>:<脚本短 id>` |
+
+- **令牌与超时**：令牌在运行结束时立即撤销，超时被终止时同样撤销；运行超过 `timeout_seconds` 的脚本会被终止并记为超时。
+- **调用平台动作**：
 
   ```bash
   "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call <action> --arguments '<JSON>'
+
+  # 参数较大（例如整批同步卡片）时从文件或 stdin 读，避免超出单个命令行参数的长度上限
+  jq -c '{id: "github", cards: .}' cards.json \
+    | "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save --arguments-file -
   ```
 
-- **权限**：脚本身份的可用动作以自身 `actions` 白名单为事实源，默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`；审计 actor 记为 `automation:<项目>:<脚本>`。
-- **运行记录**：自动化详情页可查看每次运行的触发方式、退出码与 stdout/stderr；停机期间错过的触发不补跑。
+  CLI 成功时退出码为 0；平台返回错误、无法连接或参数不合法时退出码非零，并把错误 JSON 打印到 stdout。bash 脚本开头加 `set -euo pipefail`，任何一步失败都会让本次运行失败并留下记录。
 
 ## 外部列表同步成任务（数据源）
 
-`board_source.save` 创建或更新一个自定义任务数据源：`columns` 声明状态取值（顺序与颜色），`cards` 按 id **整体同步**为该源的任务——新增、更新、删除本次未出现的条目。每张卡片必须带 `id`，新建任务时还必须带 `title`；可选 `summary`、`status`（状态文本，落库为 `status: 文本` 标签）、`labels`（支持 `属性: 值` 高级标签，如 `owner: 张三`）、`properties`、`url`（原始链接）、`meta`。
+`board_source.save` 创建或更新一个自定义任务数据源：`columns` 声明状态取值（顺序与颜色），`cards` 按 id **整体同步**为该源的任务——新增、更新、删除本次未出现的条目。
+
+> **本次 `cards` 里没有的任务会连同全部状态简报永久删除，不进回收站。** 所以拉取外部列表失败时脚本必须非零退出，不能拿空列表或半份列表去保存；分页拉取要拉全；卡片 `id` 的生成规则要跨次保持不变，否则每次都会删掉旧任务、再新建一份。
+
+### 卡片字段
+
+| 字段 | 格式 | 说明 |
+| --- | --- | --- |
+| `id` | 字符串，必填 | 外部条目的稳定标识，例如 `#231`；同步按它匹配已有任务 |
+| `title` | 字符串 | 新建任务时必填，更新时可省略 |
+| `summary` | 字符串 | 简介 |
+| `status` | 字符串 | 状态文本，落库为 `status: 文本` 标签；合并规则见下文 |
+| `labels` | 字符串数组 | 普通标签（如 `bug`）或 `属性: 值` 高级标签（如 `owner: 张三`） |
+| `properties` | 对象 | `{属性: 值 \| [值...] \| null}`，单独设置某个属性，`null` 清空 |
+| `url` | 字符串 | 原始链接；Agent 在任务快照的 `url` 字段和自动派发消息里能看到它 |
+| `meta` | 字符串数组 | 卡片上显示的附注文本，例如 `["@alice", "3 条评论"]` |
+| `updated_at` | 数字，Unix 秒 | 只在新建任务时作为创建与更新时间，缺省为同步时刻 |
+
+`columns` 是 `[{value, color}]` 数组：新建数据源时不传，默认 `待处理`、`处理中`、`已阻塞`、`已完成` 四个状态；更新时不传保留原有状态取值，传了就整体替换。状态文本本身不做校验，可以写 `columns` 之外的值，但这样的任务不会出现在按状态分列的看板上。
+
+### 合并规则
 
 已有任务按「**卡片带了才改，没带保留**」合并，所以 Agent 或人在本地推进的状态、补充的属性不会被下一次同步冲掉：
 
 - `title`、`summary`、`url`、`meta`：带了才覆盖；值为 `null` 等同没带。
 - `status`：带了才设置；没带时保留本地状态，新建任务落到第一个状态取值。脚本只在外部源有明确结论时带上它，比如 Issue 已关闭时带 `已完成`。
-- `labels` 里的普通标签（如 `bug`）：带了就整组替换任务的普通标签，外部源删掉的标签会同步删掉；本地要长期保留的标记请用 `属性: 值` 形式。
+- `labels` 里的普通标签（如 `bug`）：只要卡片带了 `labels` 字段，任务的普通标签就整组以卡片为准，外部源删掉的标签会同步删掉；`labels` 为空数组或只有 `属性: 值` 时，普通标签会全部清掉。不想让同步管理普通标签就不要带 `labels`；本地要长期保留的标记请用 `属性: 值` 形式，并避开脚本会带的属性名。
 - `labels` 里的 `属性: 值` 与 `properties`（`{属性: 值 | [值...] | null}`）：只替换同名属性，`null` 清空，没提到的属性不动。同一属性同时出现时，`status` 字段优先于 `properties`，`properties` 优先于 `labels`。
 - 内容没有变化的任务不写库，`updated_at` 不变，不会让 Agent 手里的 `task.update` 快照失效。
 
-同步进来的条目就是普通 Task：可以打开详情、追加状态简报、绑定频道、被派发；**新同步的任务会立即走项目自动处理规则**。再用 `dashboard.save` 建一块 taskboard 面板绑定该源即可查看，列用标签表达式（`filters`）定义，或传 `group_by` 按属性取值动态分列（此时 `filters` 的并集只划定卡片范围）。
+换句话说，脚本带上的字段归外部源管理，每次同步都会改回外部的值；处理任务的 Agent 应把进展记在状态、`属性: 值` 标签和状态简报里，只要脚本不带这些字段，它们就会一直保留。
+
+同步进来的条目就是普通 Task：可以打开详情、追加状态简报、绑定频道、被派发；**新同步的任务会立即走项目自动处理规则**。同步任务在派发前没有绑定频道。再用 `dashboard.save` 建一块 taskboard 面板绑定该源即可查看，列用标签表达式（`filters`）定义，或传 `group_by` 按属性取值动态分列（此时 `filters` 的并集只划定卡片范围）。
 
 ## 任务自动处理规则
 
-规则存在项目上，每条 = **标签表达式 + 处理要求 + 可选的 @角色提及 + 启停开关**。配置入口是任意任务看板（内置或自定义）列头的 ⚡ 图标，表达式预填该列的查询。
+规则存在项目上，每条 = **标签表达式 + 处理要求 + 可选的 @角色提及 + 启停开关**。
 
-- **触发时机**：任务新建时——人在页面建、Agent 用 `task.create` 建、数据源同步新建，标签命中第一条启用规则即派发。
-- **派发行为**：在任务绑定的频道（缺省项目 `general`）发一条带任务详情的消息；提及单个角色则该角色直接执行，多个角色或未提及则交给项目主控调度，后续完全复用聊天协作。
+- **配置入口**：任意任务看板（内置或自定义）列头的 ⚡ 图标，表达式预填该列的查询。规则只能由人在页面上配置，Agent Tool 没有对应动作；Agent 被要求设置规则时，应告诉人去对应看板列头的 ⚡ 设置，并给出建议的表达式和处理要求。
+- **触发时机**：任务新建时——人在页面建、Agent 用 `task.create` 建、数据源同步新建，标签命中第一条启用规则即派发；状态已是 `已完成` 的新任务不派发。已有任务后来改了标签，即使命中规则也不会触发。`task.create` 触发派发时，返回结果带 `auto_dispatch`（`rule_query`、`sent`）。
+- **派发行为**：在任务绑定的频道发一条带任务详情（含原始链接）的消息，任务没有绑定频道时用项目的 `general` 频道，派发后任务状态改为 `处理中`；提及单个角色则该角色直接执行，多个角色或未提及则交给项目主控调度，后续完全复用聊天协作。收到这条消息的 Agent 会看到它来自任务自动处理规则。
 - **表达式语法**：整串标签匹配（`bug`、`owner: 张三`）、`属性: *` 存在性匹配，用 `&`、`|`、`!` 与括号组合。例：`bug & !status: 已完成`（未完成的缺陷）、`!owner: *`（还没有负责人）。
 
 ## 闭环示例：自动处理 GitCode/GitHub Issue
 
 1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本，用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
+
+   ```bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+
+   # gh 失败时 set -e 让脚本非零退出，不会拿半份列表去同步
+   LIMIT=1000
+   gh issue list --repo acme/webshop --state all --limit "$LIMIT" \
+     --json number,title,body,state,labels,url > issues.json
+   # 条数到了上限说明可能没拉全，同样失败退出
+   [ "$(jq length issues.json)" -lt "$LIMIT" ] || { echo "Issue 超过 $LIMIT 条，请调大 LIMIT" >&2; exit 1; }
+
+   jq '[.[] | {
+         id: ("#" + (.number | tostring)),
+         title: ("#" + (.number | tostring) + " " + .title),
+         summary: (.body // "" | .[0:300]),
+         labels: [.labels[].name],
+         url: .url
+       } + (if .state == "CLOSED" then {status: "已完成"} else {} end)]' issues.json > cards.json
+
+   jq -c '{id: "github", name: "GitHub Issues",
+     columns: [{value: "待处理"}, {value: "处理中"}, {value: "待验证"}, {value: "已完成"}],
+     cards: .}' cards.json \
+     | "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save --arguments-file -
+   ```
+
 2. **看板**：用 `dashboard.save` 建 taskboard 绑定该源，按状态或负责人分列查看。
-3. **规则**：在看板列头 ⚡ 配置，如表达式 `bug & status: 待处理`，处理要求「@dev 请分析并修复，完成后追加状态简报」。
-4. **自动流转**：新 Issue 被同步成 Task → 命中规则 → 自动派发给 dev → dev 在频道内分析修复（也可以用 `gh`/`gitcode` CLI 把结论回写到外部系统）→ 用 `task.brief`/`task.update` 更新任务状态；同步脚本不带 `status` 时，这个状态在后续同步中保留，直到 Issue 关闭被同步为 `已完成`。
+3. **规则**：人在看板列头 ⚡ 配置，如表达式 `bug & status: 待处理`，处理要求「@dev 请分析并修复，完成后追加状态简报」。建议先手动运行一次脚本把存量 Issue 同步进来，再开启规则，避免存量一次性全部派发。
+4. **自动流转**：新 Issue 被同步成 Task → 命中规则 → 自动派发给 dev → dev 在频道内分析修复（也可以用 `gh`/`gitcode` CLI 把结论回写到外部系统）→ 用 `task.brief`/`task.update` 更新任务状态；同步脚本不带 `status` 时，这个状态在后续同步中保留，直到 Issue 关闭被同步为 `已完成`。这种写法下，重新打开的 Issue 不会自动退回 `待处理`，需要时由人或 Agent 改状态，或让脚本对重新打开的 Issue 带上状态。
 
 PR 审查、告警值守同理：任何能写成「外部列表 → cards」的数据都能进入这条流水线，处理要求和角色选择决定它被怎样消化。
 

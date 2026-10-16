@@ -11,6 +11,7 @@ from missioncrew.runtime import adapters, runtime_manager
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.documents import (document_resource_url, library_for,
                                           normalize_document_resource_urls)
+from missioncrew.collab.platform_docs import SOURCE_DIR, platform_docs_dir
 from missioncrew.collab.project_context import guideline_context_dir
 from missioncrew.collab.resource_urls import (channel_resource_url,
                                               dashboard_resource_url,
@@ -724,8 +725,9 @@ def test_all_project_directories_are_assembled_for_chat(seeded, tmp_path):
     skill_view = str(skill_context_dir(project))
     chat_workspace = str(Path(chat_cfg.env["MISSIONCREW_WORKSPACE"]).resolve())
     assert chat_cfg.timeout is None
+    platform_docs = str(platform_docs_dir().resolve())
     assert chat_cfg.allowed_dirs == [
-        *shared, chat_workspace, guideline_view, skill_view, skill_root]
+        *shared, chat_workspace, guideline_view, skill_view, skill_root, platform_docs]
     assert chat_cfg.runtime_policy.readable_paths == chat_cfg.allowed_dirs
     assert chat_cfg.runtime_policy.writable_paths == chat_cfg.allowed_dirs
     assert all(path in chat_cfg.prompt for path in shared)
@@ -1721,8 +1723,9 @@ def test_harness_workspace_contains_documents_without_polluting_source_workdir(s
     assert "MissionCrew is a local multi-agent harness" in cfg.prompt
     assert "never enter business source code or" in cfg.prompt
     assert "verification records from ordinary chats " in cfg.prompt
-    assert "A Task has a title, summary, body, status" in cfg.prompt
-    assert "Snapshots are read-only for the current run" in cfg.prompt
+    assert "refreshed when a turn is assembled and right after your own `task.*` calls" in cfg.prompt
+    assert "at least one available channel" not in cfg.prompt
+    assert "`platform-docs/` MissionCrew's own documentation" in cfg.prompt
     assert "including `/tmp`, `/var/tmp`" in cfg.prompt
     assert str(workspace / "temp") in cfg.prompt
     assert "Path access failures" in cfg.prompt
@@ -1748,6 +1751,7 @@ def test_harness_workspace_contains_documents_without_polluting_source_workdir(s
     assert "`permission_denied` means your role may not perform that action" in manual
     assert "state that the guideline or skill is not saved yet" in manual
     assert Path(cfg.env["MISSIONCREW_MANUAL"]) == workspace / "manual.md"
+    assert "`platform-docs/`" in readme and "platform-docs/README.md" in manual
     assert str(workspace / "manual.md") in cfg.prompt
     assert "dashboard.save" not in cfg.prompt   # 面板用法不再占公共上下文
     assert (workspace / "project.md").is_file()
@@ -2420,3 +2424,32 @@ def test_document_viewer_reloads_body_when_file_version_changes(seeded):
     # 准则查看器同一组件同一缺陷,以总览里的内容指纹作版本标记
     configs = client.get("/assets/js/project-configs.js").text
     assert "selectedGuideline()?.markdown_fingerprint ?? null" in configs
+
+
+def test_platform_docs_mirror_repo_docs_and_restore_edits(seeded):
+    """Agent 读到的平台文档就是仓库 docs/ 的副本:索引逐篇列出,改动与多余文件下次装配还原。"""
+    chat = ChatEngine(seeded)
+
+    def assemble():
+        message = seeded.add_message("general", "human", "human", "@dev 看文档", ["dev"])
+        return chat._assemble(seeded.get_channel("general"),
+                              seeded.get_role("webshop", "dev"),
+                              seeded.get_backend("std-1"), message)
+
+    cfg = assemble()
+    docs = Path(cfg.env["MISSIONCREW_PLATFORM_DOCS_DIR"])
+    assert docs == Path(cfg.env["MISSIONCREW_WORKSPACE"]) / "platform-docs"
+    assert docs.is_symlink() and not os.path.isabs(os.readlink(docs))
+    assert docs.resolve() == platform_docs_dir().resolve()
+    names = sorted(path.name for path in SOURCE_DIR.glob("*.md"))
+    assert "README.md" in names
+    assert sorted(path.name for path in docs.iterdir()) == names
+    index = (docs / "README.md").read_text(encoding="utf-8")
+    assert all(f"]({name})" in index for name in names if name != "README.md")
+
+    (docs / "automation.md").write_text("被改坏", encoding="utf-8")
+    (docs / "stray.md").write_text("多余", encoding="utf-8")
+    assemble()
+    assert ((docs / "automation.md").read_bytes()
+            == (SOURCE_DIR / "automation.md").read_bytes())
+    assert not (docs / "stray.md").exists()

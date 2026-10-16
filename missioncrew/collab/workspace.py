@@ -22,6 +22,7 @@ from ..core.config import mc_home, workspaces_dir
 from ..core.models import Project, Task
 from .documents import document_resource_url
 from .manual import render_manual
+from .platform_docs import INDEX_NAME, sync_platform_docs
 from .project_context import guideline_context_dir, write_guideline_context
 from .resource_urls import missioncrew_project_url
 from .skills import (link_points_to, relative_link_target, skill_context_dir,
@@ -49,6 +50,7 @@ class AgentWorkspace:
     tasks: Path
     channel_history: Path | None = None
     manual: Path | None = None       # 完整手册,Agent 按需读取
+    platform_docs: Path | None = None   # MissionCrew 自身文档(仓库 docs/ 的副本)
 
 
 def _safe_segment(value: str) -> str:
@@ -363,6 +365,9 @@ located outside the business repositories; files here never enter business commi
 
 - `manual.md`: the full MissionCrew manual (platform rules, Agent Tool actions, file system
   boundaries, resource URL rules). Read the matching section before any platform operation.
+- `platform-docs/`: MissionCrew's own documentation (in Chinese, read-only); `{INDEX_NAME}`
+  there lists every document and what it covers. Search it when you need details of a platform
+  mechanism that the manual does not give.
 - `documents/`: entry to the project's versioned document library; collaboration drafts, reports
   and verification records also belong there.
 - `tasks/`: read-only Markdown snapshots of project Tasks; change Tasks only through the Agent Tool.
@@ -395,6 +400,11 @@ def _render_task(task: Task, briefs: list[dict] | None = None) -> str:
         "status": task.status,
         "labels": task.labels,
         "channel_ids": task.channel_ids,
+        # 外部源同步来的任务带上来源与原始链接,Agent 才能回到 Issue 等原始条目
+        **({"source": task.source_id, "external_id": task.external_id}
+           if task.external_id else {}),
+        **({"url": task.url} if task.url else {}),
+        **({"meta": task.meta} if task.meta else {}),
         "snapshot_updated_at": task.updated_at,
         "status_briefs": [
             {key: brief.get(key) for key in
@@ -480,6 +490,7 @@ def prepare_agent_workspace(store: Store, project: Project,
         tasks=root / "tasks",
         channel_history=(root / "channel-history.json") if has_history else None,
         manual=root / "manual.md",
+        platform_docs=root / "platform-docs",
     )
     with _workspace_lock(root):
         root.mkdir(parents=True, exist_ok=True)
@@ -498,6 +509,7 @@ def prepare_agent_workspace(store: Store, project: Project,
 
         write_skill_context(project)
         _link_managed_directory(workspace.skills, skill_context_dir(project))
+        _link_managed_directory(workspace.platform_docs, sync_platform_docs())
 
         write_task_files(store, project.id, workspace.tasks)
         _atomic_write_text(root / "project.md", _render_project_file(project))

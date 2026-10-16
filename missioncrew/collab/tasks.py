@@ -151,10 +151,16 @@ def add_task_brief(store: Store, task: Task, *, content: object,
     return brief
 
 
+# 自动处理规则派发消息的作者 id(author_type=automation),聊天侧据此区分规则与脚本
+TASK_RULE_AUTHOR = "task-rule"
+
+
 def _task_block(task: Task) -> str:
+    link = f"**原始链接**\n{task.url}\n\n" if task.url else ""
     return (
         f"请处理 Task [{task.id} · {task.title}]"
         f"({task_resource_url(task.project_id, task.id)})。\n\n"
+        f"{link}"
         f"**简介**\n{task.summary or '（无）'}\n\n"
         f"**正文**\n{task.body or '（无）'}\n\n"
         "请在本 Channel 中协调处理，并通过 Task 编辑或状态简报同步进展。"
@@ -305,7 +311,7 @@ def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
             store, chat, task, message=rule.prompt,
             mention_spans=rule.mentions or None,
             target_role_ids=None if rule.mentions else rule.role_ids,
-            author="task-rule", author_type="automation",
+            author=TASK_RULE_AUTHOR, author_type="automation",
         )
     except (TaskDispatchError, ValueError) as exc:
         store.add_task_brief(

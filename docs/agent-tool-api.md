@@ -48,7 +48,7 @@ Runtime
   --arguments '{"source":"reports/result.md","target":"archive/result.md"}'
 ```
 
-CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`、`publish-file --source <本地文件> --path <文档库路径> [--message <版本说明>] [--overwrite]`、`publish-message --channel <频道短 id> --content <正文> [--mention <角色 id>]...`；后两者分别是 `document.publish` 与 `message.publish` 的便捷封装。安装项目后也可以使用等价的 `missioncrew-tool` 命令。CLI 在成功时退出码为 0；API 错误、连接错误或客户端参数错误时退出码非零，并把 JSON 原样打印到 stdout，便于 Runtime 在同一回合读取、修正和重试。
+CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参数较大时改用 `--arguments-file <文件>`，`--arguments-file -` 从 stdin 读，避免超出单个命令行参数的长度上限）、`publish-file --source <本地文件> --path <文档库路径> [--message <版本说明>] [--overwrite]`、`publish-message --channel <频道短 id> --content <正文> [--mention <角色 id>]...`；后两者分别是 `document.publish` 与 `message.publish` 的便捷封装。安装项目后也可以使用等价的 `missioncrew-tool` 命令。CLI 在成功时退出码为 0；API 错误、连接错误或客户端参数错误时退出码非零，并把 JSON 原样打印到 stdout，便于 Runtime 在同一回合读取、修正和重试。
 
 ## 身份、权限与生命周期
 
@@ -91,7 +91,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`、`pub
 
 除逐 Run 绑定的角色令牌外，还有一类**自动化脚本令牌**：`automation.save` 定义的项目脚本经统一定时入口（cron 或手动）触发时，平台为该次运行签发一次性令牌（`kind=automation`，不绑定 Run），写入脚本工作目录的 `.agent-tool-token` 并在运行结束后立即撤销。脚本身份的可用动作以脚本自身的 `actions` 白名单为事实源（默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`），与主控权限位无关；白名单只能包含除 `channel.runs.list`、`channel.run.stop`、`channel.history` 之外的动作，`automation.save` 传入这些动作会返回 `invalid_arguments`。审计 actor 记为 `automation:<项目id>:<脚本短id>`，可与角色触发区分。
 
-脚本身份的 `message.publish` 以 `author_type=automation` 发布：不传 `mentions` 时只发消息、不触发任何角色；显式提及单个角色时直接派发该角色（结果不自动交回主控），提及多个角色时与人类消息一致收敛为只启动主控。任何身份调用 `task.create` 时，若项目配置的 Task 自动处理规则命中 label，都会按规则的默认提示词和处理角色立即派发，结果附带 `auto_dispatch`（`rule_label`、`sent`）；脚本同步外部 Task 是最常见的场景。
+脚本身份的 `message.publish` 以 `author_type=automation` 发布：不传 `mentions` 时只发消息、不触发任何角色；显式提及单个角色时直接派发该角色（结果不自动交回主控），提及多个角色时与人类消息一致收敛为只启动主控。任何身份调用 `task.create` 时，若项目配置的 Task 自动处理规则命中 label，都会按规则的处理要求和处理角色立即派发（状态已是 `已完成` 的任务除外），结果附带 `auto_dispatch`（`rule_query`、`sent`）；脚本同步外部 Task 是最常见的场景。规则只能由人在任务看板列头的 ⚡ 配置，没有对应的 Agent Tool 动作，详见 [automation.md](automation.md)。
 
 ## 动作和并发规则
 
@@ -114,8 +114,9 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`、`pub
 - `task.delete`、`document.delete`、`dashboard.delete`、`guideline.delete` 和 `skill.delete` 都要求项目主控身份。目标不存在时返回 `task_not_found` 或 `not_found`，不会把删除不存在的资源误报为成功；成功结果包含 `recycle_item`。
 - `recycle.list` 返回当前项目全部类型的回收项；`recycle.restore` 和 `recycle.purge` 使用回收项 `id`，均要求项目主控身份。
 - `channel.runs.list` 与 `channel.history` 默认查询 token 绑定的当前 Channel，传 `channel` 可查项目内其他频道；`channel.run.stop` 只接受当前 Channel 查询返回的正整数 `run_id`，不能停止其他频道的运行或当前主控自身的 Run。
-- `task.update` 必须带读取任务时得到的 `snapshot_updated_at`。任务已经被其他执行更新时返回 `version_conflict`，防止旧快照覆盖新状态。
-- `task.create` 和 `task.update` 使用 `title`、`summary`、`body`、`status`、`labels`、`channel_ids`；`status` 是状态文本（落库为 `status: 文本` 标签），标签支持 `属性: 值` 高级形式，Channel 绑定可选。`task.update` 的 `labels` 整体替换标签列表；只想改某个属性时用 `properties`（如 `{"owner": "张三", "priority": null}`），值可以是字符串或数组，`null` 清空该属性，其余标签不动；同时给了 `status` 时以 `status` 为准。
+- `task.create`、`task.update`、`task.brief` 成功时结果都带 `task`，即写入后的完整任务（含新的 `updated_at`）；同时立即刷新调用角色工作区里的 `tasks/` 快照，不必等下一轮。
+- `task.update` 必须带 `snapshot_updated_at`，取值是任务当前的 `updated_at`：来自 `tasks/` 快照，或上一次 `task.*` 结果里的 `task`。任务已经被其他执行更新时返回 `version_conflict`，防止旧快照覆盖新状态；此时平台已刷新快照，错误的 `details.task` 就是当前任务，核对变化后用它的 `updated_at` 重试即可。`task.brief` 不需要版本号，只记录进展或只改状态时用它更省事。
+- `task.create` 和 `task.update` 使用 `title`、`summary`、`body`、`status`、`labels`、`channel_ids`；`status` 是状态文本（落库为 `status: 文本` 标签），标签支持 `属性: 值` 高级形式。Channel 绑定可选：`task.create` 不传 `channel_ids` 时绑定当前频道，`task.update` 传 `[]` 解除全部绑定；派发任务时才要求至少一个频道，没有绑定时用项目的 `general` 频道。`task.update` 的 `labels` 整体替换标签列表；只想改某个属性时用 `properties`（如 `{"owner": "张三", "priority": null}`），值可以是字符串或数组，`null` 清空该属性，其余标签不动；同时给了 `status` 时以 `status` 为准。
 - `task.brief` 追加状态简报，可用 `status` 同时更新状态文本（如 `待处理`、`处理中`、`已阻塞`、`已完成`）。简报是追加记录，不覆盖正文。
 - `task.delete` 把 Task 正文和全部状态简报一起移入项目回收站；恢复后保留原 Task id、字段、简报作者、内容和时间。
 - `board_source.save` 创建或更新自定义任务数据源（`columns` 声明状态取值，`cards` 按 id 整体同步为该源的任务：新增、更新、删除本次未出现的），供 `dashboard.save` 的 taskboard 面板通过 `source` 绑定；新任务会走项目自动处理规则。已有任务只更新卡片带了的字段与属性：没带 `status` 保留本地状态，`labels` 里的普通标签整组替换，`属性: 值` 标签与 `properties` 只替换同名属性（`null` 清空），合并规则详见 [automation.md](automation.md)。`board_source.delete` 在数据源仍被面板引用时返回 `in_use`，删除连带该源全部任务。
@@ -136,7 +137,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`、`pub
 }
 ```
 
-失败响应始终包含机器可判断的 `code`、给 Runtime 阅读的 `message` 和是否适合重试的 `retryable`：
+失败响应始终包含机器可判断的 `code`、给 Runtime 阅读的 `message` 和是否适合重试的 `retryable`；能帮调用方当场恢复时另带 `details`（如 `version_conflict` 的当前任务）：
 
 ```json
 {

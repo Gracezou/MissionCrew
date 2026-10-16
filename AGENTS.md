@@ -9,8 +9,9 @@ missioncrew/
 ├── core/             领域模型与持久化:models.py(dataclass 领域对象)、
 │                     store.py(SQLite,领域对象存 JSON)、config.py、seed.py
 ├── collab/           业务引擎:chat.py(聊天协作/主控派发)、workspace.py
-│                     (Agent 工作区装配)、manual.py(写进工作区的完整手册,Prompt
-│                     只留必守规则)、documents/tasks/skills/guidelines 等
+│                     (Agent 工作区装配)、manual.py(写进工作区的手册,Prompt
+│                     只留必守规则)、platform_docs.py(把 docs/ 复制给 Agent 检索)、
+│                     documents/tasks/skills/guidelines 等
 ├── runtime/          Runtime 统一抽象层(业务层只使用 runtime_manager)
 │   ├── base.py       RuntimeProvider 契约、host_isolated_environ()
 │   ├── manager.py    RuntimeManager 控制面 + _BuiltinProvider;唯一对外入口
@@ -33,7 +34,8 @@ missioncrew/
                       是共用的 Markdown 渲染,diagrams.js 按需加载 Mermaid 渲染其中的
                       图表)+ css/ + vendor/(第三方浏览器库原样落库,不走 CDN)
 tests/                pytest;fake_acp_agent.py 是 ACP 协议假服务端
-docs/runtimes.md      Runtime 层的详细设计文档(会话恢复/权限/effort/升级)
+docs/                 详细文档,入口 docs/README.md 逐篇索引;runtimes.md 是 Runtime 层
+                      设计(会话恢复/权限/effort/升级)
 ```
 
 分层规则(有测试钉住):
@@ -46,4 +48,5 @@ docs/runtimes.md      Runtime 层的详细设计文档(会话恢复/权限/effor
 - 数据目录(`MISSIONCREW_HOME`,默认 `~/.missioncrew`)必须可整体搬迁:平台生成的目录链接一律经 `relative_link_target` 写相对路径;声明了 `locate_binary` 的工具视为平台托管安装(如 vendored pi),启动时按当前数据目录重新定位 `binary_path`,不要把数据目录内的绝对路径写进库或文件。
 - 主控权限只经 `Project.controls_platform(role_id)` / `has_orchestrator` 判定,派发权限只经 `Project.can_dispatch(role_id)`,不要直接比较 `orchestrator_role_id`:该字段为空即无主控模式(所有角色都有主控级管理权限,但不能互相派发,只由人类点名启动,不点名的人类消息拒收,多选各自启动,结果只留在频道);新增"仅主控"的动作、API 校验或 Prompt 分支都要走这些入口。
 - 给角色的提示词(公共上下文、本轮输入、注入横幅、`manual.md`、工作区 README、Agent Tool 动作说明与 `resume`、页面对话 instructions)一律用英文;人类可见内容的语言只由身份段的 `Language` 一行约定为简体中文。平台发到频道的通知、错误信息和工具回执 summary 面向人类,保持中文。改提示词标题时同步 `MockAdapter` 的 `_role_from_prompt`/`_trigger_from_prompt`,它们按 `You are role @`、`# Trigger Message` 解析。
+- 平台机制的完整说明只写在 `docs/`(中文,人与 Agent 共用一份):`platform_docs.py` 把 `docs/*.md` 复制到数据目录,经工作区 `platform-docs/` 交给 Agent 按需检索。`manual.md` 与 Prompt 只写 Agent 的行为规则和关键约束,细节指向具体文档,不要再写一份英文副本;新增、删除文档或改变用途时同步更新 `docs/README.md` 索引。
 - 总览分层(均带 ETag,前端 8s 轮询):`/api/overview` 只含全局数据(projects/backends/role_templates,准则/Skill 只留元信息+内容指纹);角色/面板/自动化走 `/api/projects/{id}/overview`;频道与任务走 `/api/projects/{id}/channels|tasks?scope=active|archived|all`(响应含全量口径 counts,任务不含 body,且任务只在看板页拉取)。全文走准则单条端点、`skills/library` 与 `/api/tasks/{id}`。项目整对象回传时,带指纹的精简条目由 `save_project` 按主键回填现有全文,不得清空正文;给总览新增字段前先掂量轮询体积。

@@ -845,6 +845,31 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "version_conflict"
 
+    # 别人(这里是人类)改过任务后冲突:快照当场刷新,错误带回当前任务,按它的版本即可重试
+    from missioncrew.collab.tasks import update_task
+    current = seeded.get_task(task["id"])
+    update_task(seeded, current, snapshot_updated_at=current.updated_at,
+                changes={"summary": "人类补充了范围"})
+    briefed_at = briefed.json()["result"]["task"]["updated_at"]
+    conflict = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-conflict",
+        "arguments": {"id": task["id"], "snapshot_updated_at": briefed_at,
+                      "properties": {"owner": "dev"}},
+    })
+    assert conflict.status_code == 409
+    error = conflict.json()["error"]
+    assert error["code"] == "version_conflict" and "details.task" in error["message"]
+    latest = error["details"]["task"]
+    assert latest["summary"] == "人类补充了范围" and latest["updated_at"] > briefed_at
+    assert "人类补充了范围" in task_file.read_text(encoding="utf-8")
+    retried = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-retry",
+        "arguments": {"id": task["id"], "snapshot_updated_at": latest["updated_at"],
+                      "properties": {"owner": "dev"}},
+    })
+    assert retried.status_code == 200
+    assert "owner: dev" in retried.json()["result"]["task"]["labels"]
+
     other_channel = Channel(
         id="webshop:other", name="其他", project_id="webshop")
     seeded.put_channel(other_channel)
@@ -883,6 +908,36 @@ def test_agent_tool_cli_unknown_command_hints_documents_dir(capsys):
     assert "未知子命令: read-document" in err
     assert "$MISSIONCREW_DOCUMENTS_DIR" in err
     assert "publish-file" in err          # 同时列出可用子命令
+
+
+def test_agent_tool_cli_reads_large_arguments_from_file_or_stdin(
+        tmp_path, monkeypatch, capsys):
+    """整批同步卡片可能超出单个命令行参数的长度上限,call 支持从文件或 stdin 读参数。"""
+    import io
+
+    calls = []
+
+    def fake_request(method, payload=None):
+        calls.append(payload)
+        return 200, {"ok": True, "result": {}}
+
+    monkeypatch.setattr(agent_tool, "_request_json", fake_request)
+    arguments = {"id": "gh", "cards": [{"id": f"#{n}", "title": "x" * 200}
+                                       for n in range(1000)]}
+    source = tmp_path / "args.json"
+    source.write_text(json.dumps(arguments), encoding="utf-8")
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(source)]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(arguments)))
+    assert agent_tool.main(["call", "board_source.save", "--arguments-file", "-"]) == 0
+    assert [call["arguments"] for call in calls] == [arguments, arguments]
+
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(tmp_path / "missing.json")]) == 1
+    assert "无法读取参数文件" in capsys.readouterr().out
+    with pytest.raises(SystemExit):   # 两种来源互斥
+        agent_tool.main(["call", "task.create", "--arguments", "{}",
+                         "--arguments-file", str(source)])
 
 
 def test_agent_tool_cli_encodes_file_and_preserves_structured_error(

@@ -77,8 +77,11 @@ Here the human mentions @claude and @codex together to investigate a slow order 
    #!/usr/bin/env bash
    set -euo pipefail
 
-   gh issue list --repo acme/webshop --state all --limit 100 \
+   LIMIT=1000
+   gh issue list --repo acme/webshop --state all --limit "$LIMIT" \
      --json number,title,body,state,labels,url > issues.json
+   # Tasks missing from a sync are deleted: if the list hits the limit it may be incomplete, so fail instead
+   [ "$(jq length issues.json)" -lt "$LIMIT" ] || { echo "more than $LIMIT issues, raise LIMIT" >&2; exit 1; }
 
    # Only closed issues carry a status; open ones keep their local status (new tasks start in the first column)
    jq '[.[] | {
@@ -89,10 +92,10 @@ Here the human mentions @claude and @codex together to investigate a slow order 
          url: .url
        } + (if .state == "CLOSED" then {status: "已完成"} else {} end)]' issues.json > cards.json
 
-   "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save \
-     --arguments "$(jq -c '{id: "github", name: "GitHub Issues",
-       columns: [{value: "待处理"}, {value: "处理中"}, {value: "待验证"}, {value: "已完成"}],
-       cards: .}' cards.json)"
+   jq -c '{id: "github", name: "GitHub Issues",
+     columns: [{value: "待处理"}, {value: "处理中"}, {value: "待验证"}, {value: "已完成"}],
+     cards: .}' cards.json \
+     | "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call board_source.save --arguments-file -
    ```
 
    </details>
@@ -122,7 +125,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
-Detailed docs (Chinese): [Runtimes](docs/runtimes.md), [Agent Tool API](docs/agent-tool-api.md), [Resources and URLs](docs/resources.md), [Harness workspace boundaries](docs/agent-harness-workspace.md), [Project skills](docs/skills.md), [CLI](docs/cli.md).
+Detailed docs (Chinese) are indexed in [docs/README.md](docs/README.md). The same docs are copied into every agent's workspace, so roles look up platform details there themselves.
 
 ## Page guide
 

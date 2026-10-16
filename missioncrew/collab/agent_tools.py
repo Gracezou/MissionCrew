@@ -54,19 +54,23 @@ class AgentToolError(Exception):
     """可安全、结构化地返回给 Runtime 的动作错误。"""
 
     def __init__(self, code: str, message: str, status_code: int = 400,
-                 *, retryable: bool = False):
+                 *, retryable: bool = False, details: Optional[dict] = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.retryable = retryable
+        self.details = details   # 帮调用方当场恢复的结构化信息,如冲突时的当前版本
 
     def to_dict(self) -> dict:
-        return {
+        error = {
             "code": self.code,
             "message": self.message,
             "retryable": self.retryable,
         }
+        if self.details:
+            error["details"] = self.details
+        return error
 
 
 class DispatchInactiveError(RuntimeError):
@@ -115,17 +119,23 @@ ACTION_DEFINITIONS = {
             "title": "task title", "summary": "one-line summary", "body": "body text",
             "labels": ("label array; plain `text` or advanced `property: value` labels, "
                        "e.g. owner: 张三"),
-            "channel_ids": "optional array of channel ids to bind",
+            "channel_ids": ("optional array of channel ids to bind; omitted binds the current "
+                            "channel"),
             "status": "status text such as 待处理/处理中/已阻塞/已完成; defaults to 待处理",
         },
     },
     "task.update": {
-        "description": "Update a task's requirement fields with optimistic concurrency",
+        "description": ("Update a task's requirement fields with optimistic concurrency; the "
+                        "result's task carries the new updated_at for the next update"),
         "orchestrator_only": False,
         "arguments": {
-            "id": "task id", "snapshot_updated_at": "the update time seen when reading the task",
+            "id": "task id",
+            "snapshot_updated_at": ("the task's updated_at as last read (tasks/ snapshot or a "
+                                    "previous result); on version_conflict, error.details.task "
+                                    "is the current task"),
             "title/summary/body/status/labels/channel_ids": ("fields to update; labels "
-                                                             "replaces the whole label list"),
+                                                             "replaces the whole label list; "
+                                                             "channel_ids [] unbinds all"),
             "properties": ("set individual `property: value` labels without touching the rest, "
                            "e.g. {\"owner\": \"张三\", \"priority\": null}; a value may be a "
                            "string or an array, null clears the property; status wins if "
@@ -133,7 +143,8 @@ ACTION_DEFINITIONS = {
         },
     },
     "task.brief": {
-        "description": "Append a status brief to a Task, optionally updating its status",
+        "description": ("Append a status brief to a Task, optionally updating its status; "
+                        "needs no snapshot_updated_at"),
         "orchestrator_only": False,
         "arguments": {
             "id": "task id", "content": "status brief text",
@@ -267,17 +278,20 @@ ACTION_DEFINITIONS = {
             "id": "short data source id (must not clash with built-in sources)",
             "name": "name", "description": "purpose",
             "columns": ("optional array of status values [{value,color}] (legacy "
-                        "{key,title,color} accepted); defaults to four states"),
+                        "{key,title,color} accepted); defaults to 待处理/处理中/已阻塞/已完成 "
+                        "on creation, omitted on update keeps the existing ones"),
             "cards": ("optional card array, synced as a whole by id: tasks absent from the "
                       "list are deleted. Each card needs id (title too when it creates a task), "
                       "optionally summary, status (status text), labels, properties, "
-                      "updated_at, meta and url (external link). Existing tasks only change "
+                      "updated_at (Unix seconds), meta (array of strings) and url (external "
+                      "link). Existing tasks only change "
                       "what a card carries: omit status to keep the local status (new tasks "
                       "default to the first status value); plain labels in labels replace the "
                       "task's plain labels as a set, `property: value` labels and properties "
                       "({property: value | [values] | null}) replace only those properties, "
                       "null clears. New tasks go through the project's automatic handling "
-                      "rules"),
+                      "rules. Removed tasks are deleted permanently with their briefs, so "
+                      "never save a partial list"),
             "mode": "create/update/upsert; default upsert",
         },
     },
@@ -1006,7 +1020,13 @@ class AgentActionService:
             )
         except ValueError as exc:
             if "重新读取" in str(exc):
-                raise AgentToolError("version_conflict", str(exc), 409) from exc
+                # 刷新快照并带回当前版本,调用方核对后用新的 updated_at 当场重试
+                self._refresh_task_snapshot(project.id, identity)
+                raise AgentToolError(
+                    "version_conflict",
+                    f"{exc}；tasks/ 快照已刷新，error.details.task 是当前版本，"
+                    "核对后用其中的 updated_at 作为 snapshot_updated_at 重试",
+                    409, details={"task": task.to_dict()}) from exc
             if "已归档" in str(exc):
                 raise AgentToolError("task_archived", str(exc), 409) from exc
             raise AgentToolError("invalid_arguments", str(exc), 400) from exc

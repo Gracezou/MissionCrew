@@ -218,6 +218,41 @@ def test_board_source_sync_only_updates_what_cards_carry(seeded):
         "webshop", source_id="gh")] == ["7"]
 
 
+def test_synced_task_shows_original_link_and_rule_trigger_to_agents(seeded, tmp_path):
+    """同步任务的原始链接要进快照和派发消息;规则派发的触发行不能写成自动化脚本。"""
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    project = seeded.get_project("webshop")
+    project.task_auto_rules = [{"query": "bug", "role_ids": ["dev"],
+                                "prompt": "请分析并修复", "enabled": True}]
+    seeded.put_project(project)
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+    url = "https://github.com/acme/webshop/issues/7"
+    tools.execute(identity, "board_source.save", {"id": "gh", "cards": [
+        {"id": "#7", "title": "退款后库存未回滚", "labels": ["bug"], "url": url,
+         "meta": ["@alice"]}]}, None, "sync")
+    chat.wait_idle()
+
+    task = seeded.list_tasks("webshop", source_id="gh")[0]
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{task.id}.md")
+    assert attributes["source"] == "gh" and attributes["external_id"] == "#7"
+    assert attributes["url"] == url and attributes["meta"] == ["@alice"]
+
+    dispatch = next(m for m in seeded.list_messages("general")
+                    if m["author_type"] == "automation")
+    assert f"**原始链接**\n{url}" in dispatch["content"]
+    cfg = chat._assemble(seeded.get_channel("general"), seeded.get_role("webshop", "dev"),
+                         seeded.get_backend("std-1"), dispatch["id"])
+    assert ("# This Turn's Trigger: task dispatched by the project's automatic "
+            "task-handling rule") in cfg.turn_prompt
+
+
 def test_automation_refreshes_custom_board_source_and_board_binds_it(seeded):
     """脚本身份创建/整体刷新自定义数据源,看板绑定后按状态标签分列筛选。"""
     chat = ChatEngine(seeded, max_workers=2)

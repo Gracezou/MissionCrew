@@ -4,7 +4,7 @@ MissionCrew 是本地多 Agent harness：它负责装配角色、Runtime/模型�
 
 ## 两种 `docs` / `documents` 不属于同一层
 
-- 源码仓库的 `docs/` 是 MissionCrew 本身的开发与使用文档，随源码提交。本文件就位于这个目录。
+- 源码仓库的 `docs/` 是 MissionCrew 本身的开发与使用文档，随源码提交。本文件就位于这个目录。执行中的 Agent 通过工作区的 `platform-docs/` 读到它的只读副本，入口是 `README.md` 索引。
 - Agent harness 的 `.missioncrew/documents/` 是某个 MissionCrew 项目的版本化文档入口，供执行中的 Agent 读写。它位于平台数据根，不在业务源码仓内。
 
 因此，源码仓使用 `docs/` 不代表运行时入口也应叫 `docs/`。运行时读写入口的稳定名称是 `documents/`，环境变量是 `MISSIONCREW_DOCUMENTS_DIR`；向频道或 Web 暴露的项目资源前缀是 `MISSIONCREW_PROJECT_URL`，文档入口另有便捷变量 `MISSIONCREW_DOCUMENTS_URL`。
@@ -33,6 +33,7 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 ├── README.md
 ├── manual.md
 ├── project.md
+├── platform-docs/          # MissionCrew 自身文档（仓库 docs/ 的只读副本）
 ├── documents/              # 项目版本化文档库入口
 ├── tasks/                  # 项目任务的 Markdown 视图
 ├── guidelines/             # 已启用准则的项目级共享实时视图
@@ -79,11 +80,15 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 
 `channel-id` 和 `board-id` 使用项目内短 ID，URL 不暴露数据库使用的 `<project>:<id>` 命名空间。`dashboards` 是面板的公开资源类型；Web 读取旧式 `boards`、`dashboard` 或 `panels` 地址时会规范化为它。真实目录只用于 Runtime 工具调用，不能用来替代这些 Web URL。
 
+### `platform-docs/`
+
+`platform-docs/` 链接到数据目录里的 `platform-docs/`，内容是源码仓 `docs/*.md` 的副本，所有项目、所有角色共用。平台每次装配工作区时与源码比对，内容不同才重写，多出的文件删除，所以 Agent 对它的修改会在下一次装配时被还原。`README.md` 是索引，逐篇说明文档内容和适用场景；`manual.md` 只写 Agent 的行为规则，平台机制的完整说明都在这里，Agent 按需检索。
+
 ### `tasks/`
 
-`tasks/` 只存放平台生成的项目 Task 快照，不是协作草稿或报告目录。快照只读；Agent 创建、编辑、追加简报或删除 Task 时必须显式调用 Agent Tool，回合结束不会把文件修改同步回 Task。Task 包含 `title`、`summary`、正文、`labels`（状态是 `status: 文本` 标签）和可选 `channel_ids`。聊天角色新建 Task 使用 `task.create`，修改 Task 使用带 `snapshot_updated_at` 的 `task.update`；工具会立即报告版本冲突。追加状态简报使用 `task.brief`；项目主控删除 Task 使用 `task.delete`，Task 与简报会进入项目回收站。快照 frontmatter 中的 `status_briefs` 是只读历史。协作草稿和报告应通过 `document.publish` 放到文档库下合适的目录。
+`tasks/` 只存放平台生成的项目 Task 快照，不是协作草稿或报告目录。快照只读；Agent 创建、编辑、追加简报或删除 Task 时必须显式调用 Agent Tool，文件修改不会同步回 Task。Task 包含 `title`、`summary`、正文、`labels`（状态是 `status: 文本` 标签）和可选 `channel_ids`；从数据源同步来的任务在快照里另有 `source`、`external_id`、`url`（原始条目链接）和 `meta`。快照在每次装配工作区时刷新，调用角色自己的 `task.*` 动作成功后也会立即刷新。聊天角色新建 Task 使用 `task.create`，修改 Task 使用带 `snapshot_updated_at` 的 `task.update`；工具会立即报告版本冲突。追加状态简报使用 `task.brief`；项目主控删除 Task 使用 `task.delete`，Task 与简报会进入项目回收站。快照 frontmatter 中的 `status_briefs` 是只读历史。协作草稿和报告应通过 `document.publish` 放到文档库下合适的目录。
 
-人类和 Agent 都可以更新 `open`、`in_progress`、`blocked`、`done` 状态。Agent Tool 使用 `snapshot_updated_at` 避免旧版本覆盖较新的内容。每个 Task 至少绑定一个可用 Channel；“处理 Task”就是在这些 Channel 中向项目主控发送消息。
+状态是自由文本，内置看板默认用 `待处理`、`处理中`、`已阻塞`、`已完成`，人类、Agent 和脚本都可以直接修改。Agent Tool 使用 `snapshot_updated_at` 避免旧版本覆盖较新的内容，冲突时错误里带回当前任务。Channel 绑定可选；“处理 Task”就是在绑定的 Channel 中发一条派发消息，没有绑定时用项目的 `general` 频道。
 
 ### `guidelines/` 与 `skills/`
 
@@ -123,10 +128,12 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 | `MISSIONCREW_GUIDELINES_DIR` | 已启用准则 Markdown 目录 |
 | `MISSIONCREW_SKILLS_DIR` | 已启用 Skill 目录 |
 | `MISSIONCREW_TASKS_DIR` | 项目任务 Markdown 目录 |
+| `MISSIONCREW_MANUAL` | Agent 手册 `manual.md` |
+| `MISSIONCREW_PLATFORM_DOCS_DIR` | MissionCrew 自身文档副本 `platform-docs/` |
 | `MISSIONCREW_CHANNEL_HISTORY` | 当前角色可见的频道历史文件；仅聊天执行 |
 | `MISSIONCREW_CHANNEL_ID` | 当前频道 id |
 | `MISSIONCREW_SESSION_KEY` | 当前 channel×role 的 Runtime 会话键 |
-| `MISSIONCREW_ALLOWED_DIRS` | 统一策略解析后的全部授权目录（JSON 数组）：本地代码仓、项目文档库、harness 工作区、准则/Skill 视图、Skill 投放目录、频道上传目录，以及默认策略追加的系统临时目录和 Runtime 自有目录 |
+| `MISSIONCREW_ALLOWED_DIRS` | 统一策略解析后的全部授权目录（JSON 数组）：本地代码仓、项目文档库、harness 工作区、准则/Skill 视图、Skill 投放目录、平台文档副本、频道上传目录，以及默认策略追加的系统临时目录和 Runtime 自有目录 |
 | `MISSIONCREW_READABLE_DIRS` / `MISSIONCREW_WRITABLE_DIRS` | 统一策略解析后的只读 / 可写目录 JSON 数组 |
 | `MISSIONCREW_SKILL_DIRS` | 本次装配的 Skill 目录 JSON 数组 |
 | `MISSIONCREW_RUNTIME_PERMISSIONS` | approval / filesystem / network 权限意图 JSON |

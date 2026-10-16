@@ -48,6 +48,7 @@ from ..core.models import (DEFAULT_MAX_CHAIN_RUNS, INJECTION_FULL_MODES,
                            RuntimePolicy)
 from .project_context import (project_allowed_dirs, project_resource_versions,
                               render_project_context)
+from .tasks import TASK_RULE_AUTHOR
 from ..core.store import Store
 
 MENTION_RE = re.compile(r"@([\w-]+)")
@@ -314,6 +315,9 @@ def _trigger_kind(record: dict, orchestrator_id: str,
             text = f"task dispatched by orchestrator @{author_id}"
         else:
             text = f"message from role @{author_id}"
+    elif kind == "automation" and author_id == TASK_RULE_AUTHOR:
+        # 规则由人在任务看板列头配置,不是项目清单里的自动化脚本
+        text = "task dispatched by the project's automatic task-handling rule"
     elif kind == "automation":
         text = f"message posted by automation script {author_id}"
     else:
@@ -1460,6 +1464,7 @@ class ChatEngine:
                 env["MISSIONCREW_SKILLS_DIR"] = str(workspace.skills)
                 env["MISSIONCREW_TASKS_DIR"] = str(workspace.tasks)
                 env["MISSIONCREW_MANUAL"] = str(workspace.manual)
+                env["MISSIONCREW_PLATFORM_DOCS_DIR"] = str(workspace.platform_docs)
                 manual_path = str(workspace.manual)
                 project_line = project.name + (
                     f" · {' '.join(project.description.split())}" if project.description else "")

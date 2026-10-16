@@ -38,7 +38,7 @@ Runtime
 
 ```bash
 "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call task.create \
-  --arguments '{"title":"补齐接口测试","summary":"覆盖错误返回","channel_ids":["demo:general"],"labels":["api"]}'
+  --arguments '{"title":"补齐接口测试","summary":"覆盖错误返回","channel_ids":["general"],"labels":["api"]}'
 
 "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool publish-file \
   --source reports/result.md \
@@ -115,7 +115,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 - `recycle.list` 返回当前项目全部类型的回收项；`recycle.restore` 和 `recycle.purge` 使用回收项 `id`，均要求项目主控身份。
 - `channel.runs.list` 与 `channel.history` 默认查询 token 绑定的当前 Channel，传 `channel` 可查项目内其他频道；`channel.run.stop` 只接受当前 Channel 查询返回的正整数 `run_id`，不能停止其他频道的运行或当前主控自身的 Run。
 - `task.create`、`task.update`、`task.brief` 成功时结果都带 `task`，即写入后的完整任务（含新的 `updated_at`）；同时立即刷新调用角色工作区里的 `tasks/` 快照，不必等下一轮。
-- `task.update` 必须带 `snapshot_updated_at`，取值是任务当前的 `updated_at`：来自 `tasks/` 快照，或上一次 `task.*` 结果里的 `task`。任务已经被其他执行更新时返回 `version_conflict`，防止旧快照覆盖新状态；此时平台已刷新快照，错误的 `details.task` 就是当前任务，核对变化后用它的 `updated_at` 重试即可。`task.brief` 不需要版本号，只记录进展或只改状态时用它更省事。
+- `task.update` 必须带 `snapshot_updated_at`，取值是任务当前的版本：`tasks/` 快照里的 `snapshot_updated_at` 字段，或上一次 `task.*` 结果里 `task` 的 `updated_at`。任务已经被其他执行更新时返回 `version_conflict`，防止旧快照覆盖新状态；此时平台已刷新快照，错误的 `details.task` 就是当前任务，核对变化后用它的 `updated_at` 重试即可。`task.brief` 不需要版本号，只记录进展或只改状态时用它更省事。
 - `task.create` 和 `task.update` 使用 `title`、`summary`、`body`、`status`、`labels`、`channel_ids`；`status` 是状态文本（落库为 `status: 文本` 标签），标签支持 `属性: 值` 高级形式。Channel 绑定可选：`task.create` 不传 `channel_ids` 时绑定当前频道，`task.update` 传 `[]` 解除全部绑定；派发任务时才要求至少一个频道，没有绑定时用项目的 `general` 频道。`task.update` 的 `labels` 整体替换标签列表；只想改某个属性时用 `properties`（如 `{"owner": "张三", "priority": null}`），值可以是字符串或数组，`null` 清空该属性，其余标签不动；同时给了 `status` 时以 `status` 为准。
 - `task.brief` 追加状态简报，可用 `status` 同时更新状态文本（如 `待处理`、`处理中`、`已阻塞`、`已完成`）。简报是追加记录，不覆盖正文。
 - `task.delete` 把 Task 正文和全部状态简报一起移入项目回收站；恢复后保留原 Task id、字段、简报作者、内容和时间。

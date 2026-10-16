@@ -266,7 +266,7 @@ def render_project_context(project: Project, library: DocumentLibrary,
            "publishing, Tasks, channels, dashboards and data sources, guideline/skill formats, "
            "automation, the recycle bin and config-page collaboration, read the matching manual "
            "section before acting\n"
-           "- `platform-docs/` MissionCrew's own documentation (in Chinese, MISSIONCREW_PLATFORM_DOCS_DIR): "
+           "- `platform-docs/` MissionCrew's own documentation (MISSIONCREW_PLATFORM_DOCS_DIR): "
            "`README.md` there lists every document and what it covers; search it when you need "
            "details of a platform mechanism that the manual does not give\n"
            "- `project.md` project summary; `temp/` temporary directory\n"

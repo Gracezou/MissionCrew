@@ -50,7 +50,7 @@ class AgentWorkspace:
     tasks: Path
     channel_history: Path | None = None
     manual: Path | None = None       # 完整手册,Agent 按需读取
-    platform_docs: Path | None = None   # MissionCrew 自身文档(仓库 docs/ 的副本)
+    platform_docs: Path | None = None   # MissionCrew 自身文档(仓库 docs/en/ 的副本)
 
 
 def _safe_segment(value: str) -> str:
@@ -365,7 +365,7 @@ located outside the business repositories; files here never enter business commi
 
 - `manual.md`: the full MissionCrew manual (platform rules, Agent Tool actions, file system
   boundaries, resource URL rules). Read the matching section before any platform operation.
-- `platform-docs/`: MissionCrew's own documentation (in Chinese, read-only); `{INDEX_NAME}`
+- `platform-docs/`: MissionCrew's own documentation (read-only); `{INDEX_NAME}`
   there lists every document and what it covers. Search it when you need details of a platform
   mechanism that the manual does not give.
 - `documents/`: entry to the project's versioned document library; collaboration drafts, reports

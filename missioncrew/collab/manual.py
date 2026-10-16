@@ -18,7 +18,7 @@ MissionCrew. The prompt keeps only the rules that always apply; read the matchin
 section before you do any of the following: publish documents, work with Tasks, dispatch
 messages, manage channels, dashboards and data sources, guidelines and skills, automation,
 the recycle bin, or config-page collaboration. For the full details of a platform mechanism,
-search `platform-docs/`: MissionCrew's own documentation (in Chinese), indexed by
+search `platform-docs/`: MissionCrew's own documentation, indexed by
 `platform-docs/README.md`.
 
 ## 0. Typical Flow

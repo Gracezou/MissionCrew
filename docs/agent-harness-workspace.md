@@ -4,7 +4,7 @@ MissionCrew 是本地多 Agent harness：它负责装配角色、Runtime/模型�
 
 ## 两种 `docs` / `documents` 不属于同一层
 
-- 源码仓库的 `docs/` 是 MissionCrew 本身的开发与使用文档，随源码提交。本文件就位于这个目录。执行中的 Agent 通过工作区的 `platform-docs/` 读到它的只读副本，入口是 `README.md` 索引。
+- 源码仓库的 `docs/` 是 MissionCrew 本身的开发与使用文档，随源码提交。本文件就位于这个目录。执行中的 Agent 通过工作区的 `platform-docs/` 读到其中英文版（`docs/en/`）的只读副本，入口是 `README.md` 索引。
 - Agent harness 的 `.missioncrew/documents/` 是某个 MissionCrew 项目的版本化文档入口，供执行中的 Agent 读写。它位于平台数据根，不在业务源码仓内。
 
 因此，源码仓使用 `docs/` 不代表运行时入口也应叫 `docs/`。运行时读写入口的稳定名称是 `documents/`，环境变量是 `MISSIONCREW_DOCUMENTS_DIR`；向频道或 Web 暴露的项目资源前缀是 `MISSIONCREW_PROJECT_URL`，文档入口另有便捷变量 `MISSIONCREW_DOCUMENTS_URL`。
@@ -33,7 +33,7 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 ├── README.md
 ├── manual.md
 ├── project.md
-├── platform-docs/          # MissionCrew 自身文档（仓库 docs/ 的只读副本）
+├── platform-docs/          # MissionCrew 自身文档（仓库 docs/en/ 的只读副本）
 ├── documents/              # 项目版本化文档库入口
 ├── tasks/                  # 项目任务的 Markdown 视图
 ├── guidelines/             # 已启用准则的项目级共享实时视图
@@ -82,7 +82,7 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 
 ### `platform-docs/`
 
-`platform-docs/` 链接到数据目录里的 `platform-docs/`，内容是源码仓 `docs/*.md` 的副本，所有项目、所有角色共用。平台每次装配工作区时与源码比对，内容不同才重写，多出的文件删除，所以 Agent 对它的修改会在下一次装配时被还原。`README.md` 是索引，逐篇说明文档内容和适用场景；`manual.md` 只写 Agent 的行为规则，平台机制的完整说明都在这里，Agent 按需检索。
+`platform-docs/` 链接到数据目录里的 `platform-docs/`，内容是源码仓英文文档 `docs/en/*.md` 的副本，所有项目、所有角色共用。平台每次装配工作区时与源码比对，内容不同才重写，多出的文件删除，所以 Agent 对它的修改会在下一次装配时被还原。`README.md` 是索引，逐篇说明文档内容和适用场景；`manual.md` 只写 Agent 的行为规则，平台机制的完整说明都在这里，Agent 按需检索。
 
 ### `tasks/`
 

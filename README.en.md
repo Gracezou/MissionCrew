@@ -52,7 +52,7 @@ Here the human mentions @claude and @codex together to investigate a slow order 
 
    ![Guideline dev-workflow: which role owns analysis, development, review, testing and merge, and what each stage must deliver](docs/images/get-started/guideline.jpg)
 
-3. **Have the orchestrator write skills.** Again one sentence: "turn our local CI into a skill named local-ci that runs ruff, mypy and pytest in order and only succeeds when all three pass", and the orchestrator generates the `SKILL.md` with `skill.save`. If you already have skill packages, upload a ZIP or import a local directory on the Skills page, or simply copy the directory into the drop directory shown on the page; the platform discovers it and versions it with Git (see [Project skills](docs/skills.md)). The `local-ci`, `code-review` and `git-commit` skills in the screenshot back the self-test, review checklist and commit conventions of the workflow.
+3. **Have the orchestrator write skills.** Again one sentence: "turn our local CI into a skill named local-ci that runs ruff, mypy and pytest in order and only succeeds when all three pass", and the orchestrator generates the `SKILL.md` with `skill.save`. If you already have skill packages, upload a ZIP or import a local directory on the Skills page, or simply copy the directory into the drop directory shown on the page; the platform discovers it and versions it with Git (see [Project skills](docs/en/skills.md)). The `local-ci`, `code-review` and `git-commit` skills in the screenshot back the self-test, review checklist and commit conventions of the workflow.
 
    ![Skills page: the full local-ci directory and its SKILL.md preview](docs/images/get-started/skills.jpg)
 
@@ -62,13 +62,13 @@ Here the human mentions @claude and @codex together to investigate a slow order 
 
 ### Scenario 3: automation — pull GitHub issues on a schedule and handle them automatically
 
-**The orchestrator can write the sync script and the board too**: you only say what to sync and how to handle it, then switch on the auto-processing rule on the board with one click. A scheduled script syncs an external list into tasks, and task auto-processing rules dispatch matching new tasks to roles; together they form an unattended pipeline. See [Scheduled automation and task auto-processing](docs/automation.md) (Chinese) for how it works.
+**The orchestrator can write the sync script and the board too**: you only say what to sync and how to handle it, then switch on the auto-processing rule on the board with one click. A scheduled script syncs an external list into tasks, and task auto-processing rules dispatch matching new tasks to roles; together they form an unattended pipeline. See [Scheduled automation and task auto-processing](docs/en/automation.md) for how it works.
 
 1. **Have the orchestrator write the sync script.** Say in a channel "write an automation script that syncs the issues of acme/webshop into a data source named github with gh every 30 minutes, marking closed ones as done", and the orchestrator saves it with `automation.save` and sets the cron; or write it yourself with the ＋ next to **Automation** in the sidebar. The script fetches issues with `gh issue list`, turns them into cards and calls the platform action `board_source.save`. Every run gets a one-time token that only allows the actions on the script's allow-list; the run history shows each run's exit code and output.
 
    ![Automation script syncing GitHub issues every 30 minutes, with the run history below](docs/images/get-started/automation.jpg)
 
-   Syncing merges by issue number: an existing task only changes what its card carries and keeps everything else. So the script sends `status: 已完成` (done) only for closed issues and no status for open ones — new issues land in the first column, and the "in progress / to verify" progress made by the orchestrator and agents is not wiped out by the next sync. See [docs/automation.md](docs/automation.md) (Chinese) for the full merge rules.
+   Syncing merges by issue number: an existing task only changes what its card carries and keeps everything else. So the script sends `status: 已完成` (done) only for closed issues and no status for open ones — new issues land in the first column, and the "in progress / to verify" progress made by the orchestrator and agents is not wiped out by the next sync. See [docs/en/automation.md](docs/en/automation.md) for the full merge rules.
 
    <details>
    <summary>Example sync script</summary>
@@ -125,7 +125,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
-Detailed docs (Chinese) are indexed in [docs/README.md](docs/README.md). The same docs are copied into every agent's workspace, so roles look up platform details there themselves.
+Detailed docs are indexed in [docs/en/README.md](docs/en/README.md) (Chinese versions in [docs/](docs/README.md)). The English docs are copied into every agent's workspace, so roles look up platform details there themselves.
 
 ## Page guide
 
@@ -191,7 +191,7 @@ Conventions:
 
 For Antigravity, install the [official CLI](https://antigravity.google/docs/cli/getting-started/), sign in by running `agy` once, then click **Re-detect** and bind a role to `antigravity`. Headless execution supports automatic approval; interactive approval, enforced read-only access and network denial are unavailable.
 
-Protocol flows, detection and upgrade mechanics, where model lists come from, and how to add a new tool are described in [docs/runtimes.md](docs/runtimes.md).
+Protocol flows, detection and upgrade mechanics, where model lists come from, and how to add a new tool are described in [docs/en/runtimes.md](docs/en/runtimes.md).
 
 ### Using API models (via pi)
 
@@ -207,7 +207,7 @@ Besides local CLIs, MissionCrew can talk directly to **OpenAI / Anthropic compat
 2. **Add a provider.** Under *Global settings → Custom model providers* add an entry: name, protocol, base URL, API key (a literal or a `$ENV_VAR` reference; keys are never sent back to the browser) and the list of model ids.
 3. **Bind a role.** After saving, the models appear in the role editor's model list as `provider/model-id`; give the role runtime `pi` and that model.
 
-Provider configuration is stored in `.missioncrew/pi/agent/models.json` (mode 0600) and sessions in `.missioncrew/pi/sessions`; `~/.pi` is never read or written. See the "pi RPC" and "Custom model providers" sections of [docs/runtimes.md](docs/runtimes.md) for details.
+Provider configuration is stored in `.missioncrew/pi/agent/models.json` (mode 0600) and sessions in `.missioncrew/pi/sessions`; `~/.pi` is never read or written. See the "pi RPC" and "Custom model providers" sections of [docs/en/runtimes.md](docs/en/runtimes.md) for details.
 
 ## License
 

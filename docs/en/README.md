@@ -1,0 +1,18 @@
+# MissionCrew Documentation
+
+This directory holds MissionCrew's detailed documentation. It is written for the people who deploy, use and develop MissionCrew, and for the agents that run tasks inside it: the platform copies these Markdown files unchanged into every agent workspace as `platform-docs/`, and agents look things up here through this index when they need details of a platform mechanism. Every document also has a Chinese version with the same file name in the repository's `docs/` directory. For a quick start and an overview, see the repository [README](https://github.com/zhaozhaozz/MissionCrew/blob/main/README.en.md).
+
+The web UI is in Chinese: where these docs name a button or menu, the Chinese label follows in parentheses. Status values such as `待处理` (to do), `处理中` (in progress), `已阻塞` (blocked) and `已完成` (done) are real data and stay in Chinese.
+
+## Using the platform
+
+- [Scheduled automation and automatic task handling](automation.md): the runtime environment of automation scripts (injected environment variables, the working directory that persists across runs, how a script calls platform actions); card formats and merge rules when `board_source.save` syncs an external list into tasks; where automatic task-handling rules are configured and when they fire; a complete example that syncs GitHub/GitCode issues. Read it when writing a sync script, or when investigating sync results or automatic dispatch.
+- [Agent Tool API](agent-tool-api.md): the single action interface agents and scripts use to change platform state, covering CLI usage, tokens and permissions, each action's arguments and results, and error codes such as `version_conflict`. Read it when you are unsure about an action's arguments or get an error.
+- [Harness workspace boundaries](agent-harness-workspace.md): the read/write semantics of each directory in the agent workspace `.missioncrew/`, the fields and refresh timing of task snapshots, the injected environment variables, and the boundary between the workspace and business repositories. Read it when you are unsure whether a directory is writable or when a snapshot is updated.
+- [Resources and URLs](resources.md): public URL formats and lifecycles of channels, tasks, documents, guidelines, skills, dashboards and other resources. Read it when referencing platform resources in a reply.
+- [Project skills](skills.md): how full-directory project skills are dropped in, imported, enabled or disabled, and versioned. Read it when creating or organizing a skill package.
+
+## Operations and development
+
+- [Command-line tool](cli.md): a quick reference of `mc` subcommands, which go through the same business validation as the web UI and API; suited to scripting and headless environments.
+- [Runtime integration](runtimes.md): which local agent CLIs are supported, how they are detected and upgraded, where model lists come from, and how to integrate a new tool.

@@ -1,6 +1,8 @@
 # MissionCrew 文档
 
-本目录是 MissionCrew 的详细文档，读者既包括部署、使用和开发 MissionCrew 的人，也包括在 MissionCrew 里执行任务的 Agent：平台把这里的 Markdown 原样复制到每个 Agent 工作区的 `platform-docs/`，Agent 需要了解平台机制时按本页的索引检索。快速上手与整体介绍见仓库根目录的 [README](https://github.com/zhaozhaozz/MissionCrew#readme)。
+English version: [en/README.md](en/README.md)
+
+本目录是 MissionCrew 的详细文档，读者既包括部署、使用和开发 MissionCrew 的人，也包括在 MissionCrew 里执行任务的 Agent。每篇文档都有中英两个版本：中文版在本目录，同名英文版在 [en/](en/README.md)。平台把英文版原样复制到每个 Agent 工作区的 `platform-docs/`，Agent 需要了解平台机制时按其中的索引检索。快速上手与整体介绍见仓库根目录的 [README](https://github.com/zhaozhaozz/MissionCrew#readme)。
 
 ## 使用平台
 

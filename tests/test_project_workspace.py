@@ -2426,8 +2426,19 @@ def test_document_viewer_reloads_body_when_file_version_changes(seeded):
     assert "selectedGuideline()?.markdown_fingerprint ?? null" in configs
 
 
+def test_docs_have_matching_chinese_and_english_versions():
+    """docs/ 是中文版、docs/en/ 是同名英文版,两边一一对应;中文索引也逐篇列出。"""
+    chinese = SOURCE_DIR.parent
+    assert SOURCE_DIR == chinese / "en"
+    zh = sorted(path.name for path in chinese.glob("*.md"))
+    en = sorted(path.name for path in SOURCE_DIR.glob("*.md"))
+    assert zh == en and "README.md" in zh
+    index = (chinese / "README.md").read_text(encoding="utf-8")
+    assert all(f"]({name})" in index for name in zh if name != "README.md")
+
+
 def test_platform_docs_mirror_repo_docs_and_restore_edits(seeded):
-    """Agent 读到的平台文档就是仓库 docs/ 的副本:索引逐篇列出,改动与多余文件下次装配还原。"""
+    """Agent 读到的平台文档是仓库 docs/en/ 的副本:索引逐篇列出,改动与多余文件下次装配还原。"""
     chat = ChatEngine(seeded)
 
     def assemble():

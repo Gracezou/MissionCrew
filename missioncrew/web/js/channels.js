@@ -142,6 +142,9 @@ function renderChannelState() {
         <span><b>用途</b>${esc(channel.purpose || "未说明")}</span>
         <span><b>工作目录</b><code>${esc(channel.workdir || "平台内置工作区")}</code></span>
         <span><b>创建者</b>${esc(channel.created_by_role_id ? "@" + channel.created_by_role_id : "human/platform")}</span>
+        ${archived || channelIsContent(channel) ? "" : `<button class="ghost compact" type="button"
+          data-channel-id="${esc(channel.id)}"
+          onclick="openChannelEditDialog(this.dataset.channelId)">编辑频道</button>`}
       </div>`;
     applyChannelHeadState();
     refreshRuntimeIndicators();   // 头部标记刚重建,用最近一次 Runtime 快照点亮
@@ -188,6 +191,39 @@ async function createChannel() {
   fdlg.close();
   await loadOverview(); renderSidebar();
   toast("频道已创建", "success");
+}
+
+// 名称/用途/工作目录;归档频道只读、内容专属频道由平台维护,不提供编辑入口
+function openChannelEditDialog(id) {
+  const channel = projChannels().find(item => item.id === id);
+  if (!channel) return;
+  const repoOpts = (projObj()?.repos || []).filter(r => r.path).map(r =>
+    `<option value="${esc(r.path)}" ${r.path === channel.workdir ? "selected" : ""}>` +
+    `${esc(r.name || r.id)} — ${esc(r.path)}</option>`).join("");
+  openFormDialog(`编辑频道 #${channel.name || channel.id}`, `
+    <label>显示名称</label>
+    <input type="text" id="ec-name" value="${esc(channel.name || "")}">
+    <label>频道用途/任务边界</label>
+    <input type="text" id="ec-purpose" value="${esc(channel.purpose || "")}">
+    <label>工作目录(留空 = 平台内置工作区;从下一轮执行起生效)</label>
+    ${repoOpts ? `<select onchange="document.getElementById('ec-workdir').value=this.value">
+      <option value="">(平台内置工作区)</option>${repoOpts}</select>` : ""}
+    <input type="text" id="ec-workdir" value="${esc(channel.workdir || "")}"
+      placeholder="或直接输入路径 ~/code/myrepo" style="margin-top:6px">`,
+    `<button class="action" data-channel-id="${esc(channel.id)}"
+       onclick="saveChannelEdit(this.dataset.channelId)">保存</button>
+     <button class="ghost" onclick="fdlg.close()">取消</button>`);
+}
+
+async function saveChannelEdit(id) {
+  await api("PATCH", `/api/chat/channels/${encodeURIComponent(id)}`, {
+    name: document.getElementById("ec-name").value.trim(),
+    purpose: document.getElementById("ec-purpose").value.trim(),
+    workdir: document.getElementById("ec-workdir").value.trim(),
+  });
+  fdlg.close();
+  await loadOverview(); renderSidebar();
+  toast("频道已更新", "success");
 }
 
 async function deleteChannel(id) {

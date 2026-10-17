@@ -92,7 +92,7 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 
 ### `guidelines/` 与 `skills/`
 
-`guidelines/` 指向项目级共享实时视图，保存所有已启用准则的完整 Markdown，frontmatter 使用 `name` 和 `description`。准则源文件由普通工作树和独立 bare Git 历史管理；保存、恢复、启停或删除时，平台先更新事实源和项目索引，再以原子文件替换刷新实时视图，最后才返回成功。所有 Channel 角色工作区都链接到同一视图，所以同一 Agent 回合在 `guideline.save` 返回后重新读取即可得到新版，不需要等待下一次装配；删除或停用也会立即从视图消失。公共上下文只提供准则摘要、内容版本和文件路径，Agent 先根据 `description` 判断相关性，需要时再读取全文。
+`guidelines/` 指向项目级共享实时视图，保存所有已启用准则的完整 Markdown，frontmatter 使用 `name` 和 `description`。准则源文件由普通工作树和独立 bare Git 历史管理；保存、恢复、启停或删除时，平台先更新事实源和项目索引，再以原子文件替换刷新实时视图，最后才返回成功。所有 Channel 角色工作区都链接到同一视图，所以同一 Agent 回合在 `guideline.save` 返回后重新读取即可得到新版，不需要等待下一次装配；删除或停用也会立即从视图消失；停用的准则不在视图里，主控用 `guideline.list` 读取（Skill 同理用 `skill.list`）。公共上下文只提供准则摘要、内容版本和文件路径，Agent 先根据 `description` 判断相关性，需要时再读取全文。
 
 `skills/` 同样指向项目级共享实时视图，其中每个已启用 Skill 都链接到项目的完整 Skill 目录，除 `SKILL.md` 外还可包含 `scripts/`、`references/`、`assets/` 等相对文件。Skill 事实源另有独立 bare Git 历史，保存整个包及文件可执行权限；`skill.save`、`skill.delete`、Web 编辑、导入和扫描完成前都会提交内容变化并刷新共享视图，因此动作成功返回后，新建、启停、内容更新和删除都已对所有既有工作区可见。准则和 Skill 不绑定角色或 Runtime，由 Agent 结合当前任务判断是否适用。直接复制到项目 Skill 投放目录的新包会在下一次扫描或执行装配时进入项目索引和版本历史。导入、直接投放和历史恢复规则见 [项目 Skill 完整目录](skills.md)。
 

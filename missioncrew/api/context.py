@@ -95,6 +95,7 @@ class ApiContext:
         ctx = cls(store=store, chat=ChatEngine(store))
         ctx.chat.updating_backends = ctx.updating_backends
         ctx.automations = AutomationService(store, ctx.chat.agent_tools)
+        ctx.chat.agent_tools.bind_automation_trigger(ctx.automations.trigger)
         ctx.automation_scheduler = AutomationScheduler(store, ctx.automations)
         ctx.role_usage_linkage = RoleUsageLinkage(
             store,

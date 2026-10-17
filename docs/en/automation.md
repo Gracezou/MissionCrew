@@ -9,10 +9,10 @@ Combined, items from external systems can flow through fully automatically: **Gi
 
 ## Automation scripts
 
-- **Creation**: the ＋ in the "Automation" (自动化) section of the Web sidebar, or ask the orchestrator in chat to create one with `automation.save`. Fields: `id`, `name`, `description`, `script` (run as an executable when it has a shebang, otherwise passed to bash), `cron` (five-field crontab, empty = manual trigger only), `enabled`, `actions`, `timeout_seconds`.
+- **Creation**: the ＋ in the "Automation" (自动化) section of the Web sidebar, or ask the orchestrator in chat to create one with `automation.save`; before changing a script the orchestrator reads its current text with `automation.list` (with `id`), and afterwards it can test-run it right away with `automation.run`. Fields: `id`, `name`, `description`, `script` (run as an executable when it has a shebang, otherwise passed to bash), `cron` (five-field crontab, empty = manual trigger only), `enabled`, `actions`, `timeout_seconds`.
 - **Scheduling**: all cron triggers go through the unified scheduling entry point; a script is not started again while its previous run is still in progress; triggers missed while the service is down are not run afterwards.
 - **Permissions**: the script's own `actions` allowlist is the source of truth for the actions available to the script identity; the default is `task.create`, `task.update`, `task.brief`, `message.publish`, `document.publish`, `dashboard.save`, `board_source.save`; the audit actor is recorded as `automation:<project>:<script>`.
-- **Run records**: the automation detail page shows each run's trigger type, exit code and stdout/stderr. A non-zero exit code is recorded as a failure.
+- **Run records**: the automation detail page shows each run's trigger type, exit code and stdout/stderr. A non-zero exit code is recorded as a failure. The orchestrator reads the latest runs with `automation.list` and `id` (only the tail of the output is returned) to investigate a failing script.
 
 ### Execution environment
 

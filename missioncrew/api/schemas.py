@@ -93,6 +93,13 @@ class ChannelCreate(BaseModel):
     actor_role_id: Optional[str] = None
 
 
+class ChannelUpdate(BaseModel):
+    # None = 保留;workdir 传空字符串 = 改回平台内置工作区
+    name: Optional[str] = None
+    purpose: Optional[str] = None
+    workdir: Optional[str] = None
+
+
 class ContentChannelInput(BaseModel):
     content_kind: str = Field(pattern=r"^(docs|guidelines|skills|custom)$")
     content_key: str = Field(min_length=1, max_length=1000)

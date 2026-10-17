@@ -254,7 +254,9 @@ _RUN_QUERY_RULE = (
 _MANUAL_RULE = (
     "- The rules for dashboards, board data sources, guideline and skill formats, document "
     "publishing and renaming, automation scripts and the recycle bin are in the corresponding "
-    "manual sections; read them before acting.\n")
+    "manual sections; read them before acting. Dashboards, data sources, automation scripts and "
+    "disabled guidelines/skills are not in your workspace: read the current configuration with "
+    "the matching `*.list` action (pass the id for full content) before changing one.\n")
 
 # 主控级规则(派发纪律、按需查询、预算),只给有主控项目的主控
 CONTROL_RULES_TEMPLATE = """\
@@ -348,7 +350,8 @@ class ChatEngine:
         self._interactions: dict[str, _PendingInteraction] = {}
         self.agent_tools = AgentActionService(
             store, self.post, self.stop_run,
-            history_records=self.channel_history_records)
+            history_records=self.channel_history_records,
+            stop_channel_sessions=self.stop_channel_sessions)
         # 正在更新的 runtime 集合(由 server 注入共享):更新期间不派发执行,
         # 避免 Agent 跑在半更新的二进制上
         self.updating_backends: set[str] = set()

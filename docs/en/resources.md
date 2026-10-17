@@ -52,7 +52,7 @@ For example:
 
 ### Channels
 
-The source of truth for channels and messages is the platform database. A channel stores its purpose, working directory, and archive state; its latest activity time is computed live by the platform from the message table. A channel URL opens the project chat page and selects the corresponding channel.
+The source of truth for channels and messages is the platform database. A channel stores its purpose, working directory, and archive state; its latest activity time is computed live by the platform from the message table. A channel URL opens the project chat page and selects the corresponding channel. The name, purpose and working directory can be changed with "编辑频道" (Edit channel) in the channel header, or by the orchestrator with `channel.update`; a new working directory takes effect from that channel's next run. Archived and page-conversation channels cannot be changed.
 
 Archived channels are outside agent visibility by default. Humans can still view the history when they open an archived channel; before an agent posts a new message to an archived channel, the platform reactivates that channel. The project's internal `general` channel is the reserved default channel, and its resource URL uses the short ID `general`.
 

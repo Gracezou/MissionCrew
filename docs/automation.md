@@ -9,10 +9,10 @@
 
 ## 自动化脚本
 
-- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 仅手动触发）、`enabled`、`actions`、`timeout_seconds`。
+- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建；主控改脚本前用 `automation.list`（带 `id`）读取当前全文，改完可用 `automation.run` 立即试跑。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 仅手动触发）、`enabled`、`actions`、`timeout_seconds`。
 - **调度**：所有 cron 触发都走统一定时入口；同一脚本上一次还没跑完时不会重复启动；停机期间错过的触发不补跑。
 - **权限**：脚本身份的可用动作以自身 `actions` 白名单为事实源，默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`；审计 actor 记为 `automation:<项目>:<脚本>`。
-- **运行记录**：自动化详情页可查看每次运行的触发方式、退出码与 stdout/stderr。退出码非零记为失败。
+- **运行记录**：自动化详情页可查看每次运行的触发方式、退出码与 stdout/stderr。退出码非零记为失败。主控用 `automation.list` 带 `id` 读取最近几次运行（输出只回传末尾），据此排查失败的脚本。
 
 ### 运行环境
 

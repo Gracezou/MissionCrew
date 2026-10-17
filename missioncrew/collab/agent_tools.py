@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import board_sources
+from . import channels as channel_ops
 from .content_channels import content_channel, rebind_content_channel
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls, safe_relative_path)
-from .guidelines import save_guideline
+from .guidelines import save_guideline, sync_guideline_library
 from .recycle_bin import (RecycleConflictError, list_recycle_items,
                           purge_recycle_item, recycle_bin_url,
                           recycle_dashboard, recycle_document,
@@ -33,7 +34,8 @@ from .recycle_bin import (RecycleConflictError, list_recycle_items,
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
                             skill_resource_url, task_resource_url)
-from .skills import save_project_skill, save_project_skill_markdown
+from .skills import (save_project_skill, save_project_skill_markdown,
+                     skill_package, sync_project_skill_library)
 from .workspace import chat_workspace_dir, write_task_files
 from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            BoardDataSource, BoardWidget,
@@ -45,6 +47,8 @@ from ..core.store import Store
 CONTROL_ID_RE = re.compile(r"[\w-]+")
 REQUEST_ID_RE = re.compile(r"[\w-]{1,100}")
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+# automation.list 带 id 时每条运行记录的 stdout/stderr 只回传末尾这么多字符
+AUTOMATION_OUTPUT_TAIL = 4000
 TOKEN_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 TOKEN_RENEWAL_WINDOW_SECONDS = 24 * 60 * 60
 LOGGER = logging.getLogger(__name__)
@@ -156,6 +160,19 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "arguments": {"id": "task id"},
     },
+    "task.archive": {
+        "description": ("Archive a Task: it leaves the task boards and the tasks/ snapshot but "
+                        "keeps its body and briefs; task.restore brings it back"),
+        "orchestrator_only": True,
+        "arguments": {"id": "task id"},
+    },
+    "task.restore": {
+        "description": ("Restore an archived Task to the task boards and the tasks/ snapshot "
+                        "(archived tasks are not in the snapshot; take the id from the human or "
+                        "an earlier result)"),
+        "orchestrator_only": True,
+        "arguments": {"id": "task id"},
+    },
     "document.publish": {
         "description": "Publish a text or binary file to the project's versioned document library",
         "orchestrator_only": False,
@@ -243,6 +260,31 @@ ACTION_DEFINITIONS = {
         "arguments": {"id": "short channel id", "name": "name", "purpose": "purpose",
                       "workdir": "optional project repository directory"},
     },
+    "channel.update": {
+        "description": ("Change a project channel's name, purpose or workdir; archived and "
+                        "page-conversation channels cannot be changed, and a new workdir takes "
+                        "effect from the next run in that channel"),
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "short channel id; defaults to the current channel",
+            "name": "new name", "purpose": "new purpose",
+            "workdir": ("project repository path or a subdirectory of one; an empty string "
+                        "switches back to the platform's built-in workspace"),
+        },
+    },
+    "channel.archive": {
+        "description": ("Archive a project channel: it becomes read-only, drops out of "
+                        "channel.list's default scope and its persistent runtimes are stopped; "
+                        "refused for general, page-conversation channels and channels with "
+                        "active runs (so never the current channel)"),
+        "orchestrator_only": True,
+        "arguments": {"id": "short channel id"},
+    },
+    "channel.restore": {
+        "description": "Restore an archived project channel (find it with channel.list scope=archived)",
+        "orchestrator_only": True,
+        "arguments": {"id": "short channel id"},
+    },
     "dashboard.save": {
         "description": "Create or update a project dashboard (widget grid or task board)",
         "orchestrator_only": True,
@@ -265,6 +307,13 @@ ACTION_DEFINITIONS = {
         "description": "Move a project dashboard to the unified recycle bin",
         "orchestrator_only": True,
         "arguments": {"id": "short dashboard id"},
+    },
+    "dashboard.list": {
+        "description": ("On demand, list project dashboards (dashboards are not in the "
+                        "workspace); pass id to get one dashboard's full configuration (layout, "
+                        "filters, group_by) before changing it with dashboard.save"),
+        "orchestrator_only": True,
+        "arguments": {"id": "optional short dashboard id"},
     },
     "board_source.save": {
         "description": (
@@ -301,6 +350,13 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "arguments": {"id": "short data source id"},
     },
+    "board_source.list": {
+        "description": ("On demand, list custom task data sources with their status values, "
+                        "task counts and the dashboards bound to them; the tasks themselves are "
+                        "in the tasks/ snapshot"),
+        "orchestrator_only": True,
+        "arguments": {},
+    },
     "guideline.save": {
         "description": "Save a complete guideline Markdown file",
         "orchestrator_only": True,
@@ -314,6 +370,13 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "arguments": {"name": "guideline name"},
     },
+    "guideline.list": {
+        "description": ("On demand, list all project guidelines including disabled ones (the "
+                        "workspace guidelines/ view only has enabled ones); pass name to get the "
+                        "full markdown, e.g. to edit or re-enable it with guideline.save"),
+        "orchestrator_only": True,
+        "arguments": {"name": "optional guideline name"},
+    },
     "skill.save": {
         "description": "Save a complete skill Markdown file",
         "orchestrator_only": True,
@@ -324,6 +387,14 @@ ACTION_DEFINITIONS = {
         "description": "Move a complete skill package to the unified recycle bin",
         "orchestrator_only": True,
         "arguments": {"id": "skill id"},
+    },
+    "skill.list": {
+        "description": ("On demand, list all project skills including disabled ones (the "
+                        "workspace skills/ view only has enabled ones); pass id to get the full "
+                        "SKILL.md and the package's file list, e.g. to edit or re-enable it with "
+                        "skill.save"),
+        "orchestrator_only": True,
+        "arguments": {"id": "optional skill id"},
     },
     "automation.save": {
         "description": (
@@ -344,6 +415,24 @@ ACTION_DEFINITIONS = {
     "automation.delete": {
         "description": "Delete a project automation script and its run records",
         "orchestrator_only": True,
+        "arguments": {"id": "short script id"},
+    },
+    "automation.list": {
+        "description": ("On demand, list project automation scripts (schedule, enabled, actions "
+                        "allowlist, last run); pass id to get the full script and its recent "
+                        "runs with the tail of their output, e.g. to fix a failing script"),
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "optional short script id",
+            "runs": "with id: how many recent runs to return; default 5, at most 20",
+        },
+    },
+    "automation.run": {
+        "description": ("Trigger a manual run of an automation script now (also when scheduling "
+                        "is disabled); it runs in the background, so check the result later "
+                        "with automation.list and the id instead of waiting in a loop"),
+        "orchestrator_only": True,
+        "automation_allowed": False,
         "arguments": {"id": "short script id"},
     },
     "recycle.list": {
@@ -392,6 +481,8 @@ ACTION_ARGUMENTS = {
     },
     "task.brief": {"id", "content", "status"},
     "task.delete": {"id"},
+    "task.archive": {"id"},
+    "task.restore": {"id"},
     "document.publish": {
         "path", "content", "content_base64", "overwrite", "message",
     },
@@ -403,23 +494,32 @@ ACTION_ARGUMENTS = {
     "channel.history": {"channel", "limit", "before_id"},
     "channel.list": {"scope"},
     "channel.create": {"id", "name", "purpose", "workdir"},
+    "channel.update": {"id", "name", "purpose", "workdir"},
+    "channel.archive": {"id"},
+    "channel.restore": {"id"},
     "dashboard.save": {"id", "name", "description", "layout", "mode",
                        "kind", "source", "filters", "group_by"},
     "dashboard.delete": {"id"},
+    "dashboard.list": {"id"},
     "board_source.save": {"id", "name", "description", "columns", "cards",
                           "mode"},
     "board_source.delete": {"id"},
+    "board_source.list": set(),
     "guideline.save": {"markdown", "enabled", "original_name"},
     "guideline.delete": {"name"},
+    "guideline.list": {"name"},
     "skill.save": {
         "id", "markdown", "enabled", "name", "description", "instructions",
     },
     "skill.delete": {"id"},
+    "skill.list": {"id"},
     "automation.save": {
         "id", "name", "description", "script", "cron", "enabled", "actions",
         "timeout_seconds",
     },
     "automation.delete": {"id"},
+    "automation.list": {"id", "runs"},
+    "automation.run": {"id"},
     "recycle.list": set(),
     "recycle.restore": {"id"},
     "recycle.purge": {"id"},
@@ -431,7 +531,8 @@ ACTION_ARGUMENTS = {
 CONVERSATION_RECEIPT_ACTIONS = (
     frozenset(ACTION_DEFINITIONS) - {
         "message.publish", "channel.runs.list", "channel.run.stop",
-        "channel.history", "recycle.list",
+        "channel.history", "channel.list", "recycle.list", "dashboard.list",
+        "board_source.list", "guideline.list", "skill.list", "automation.list",
     }
 )
 
@@ -441,13 +542,21 @@ class AgentActionService:
 
     def __init__(self, store: Store, post_message: Callable[..., int],
                  stop_run: Callable[..., dict],
-                 history_records: Optional[Callable[..., list[dict]]] = None):
+                 history_records: Optional[Callable[..., list[dict]]] = None,
+                 stop_channel_sessions: Optional[Callable[[str], int]] = None):
         self.store = store
         self._post_message = post_message
         self._stop_run = stop_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的
         # 消息记录;由聊天引擎提供,保证脱敏口径与工作区历史文件一致
         self._history_records = history_records
+        # 归档频道前停掉其持久 Runtime;None = 没有聊天引擎(测试),无长驻实例
+        self._stop_channel_sessions = stop_channel_sessions or (lambda _channel_id: 0)
+        # 自动化调度器在服务装配时绑定(它自身依赖本服务签发脚本令牌)
+        self._trigger_automation: Optional[Callable[..., int]] = None
+
+    def bind_automation_trigger(self, trigger: Callable[..., int]) -> None:
+        self._trigger_automation = trigger
 
     @staticmethod
     def _hash_token(token: str) -> str:
@@ -834,6 +943,8 @@ class AgentActionService:
             "task.update": self._update_task,
             "task.brief": self._add_task_brief,
             "task.delete": self._delete_task,
+            "task.archive": self._archive_task,
+            "task.restore": self._restore_task,
             "document.publish": self._publish_document,
             "document.rename": self._rename_document,
             "document.delete": self._delete_document,
@@ -843,16 +954,25 @@ class AgentActionService:
             "channel.history": self._channel_history,
             "channel.list": self._list_channels,
             "channel.create": self._create_channel,
+            "channel.update": self._update_channel,
+            "channel.archive": self._archive_channel,
+            "channel.restore": self._restore_channel,
             "dashboard.save": self._save_dashboard,
             "dashboard.delete": self._delete_dashboard,
+            "dashboard.list": self._list_dashboards,
             "board_source.save": self._save_board_source,
             "board_source.delete": self._delete_board_source,
+            "board_source.list": self._list_board_sources,
             "guideline.save": self._save_guideline,
             "guideline.delete": self._delete_guideline,
+            "guideline.list": self._list_guidelines,
             "skill.save": self._save_skill,
             "skill.delete": self._delete_skill,
+            "skill.list": self._list_skills,
             "automation.save": self._save_automation,
             "automation.delete": self._delete_automation,
+            "automation.list": self._list_automations,
+            "automation.run": self._run_automation,
             "recycle.list": self._list_recycle_bin,
             "recycle.restore": self._restore_recycle_item,
             "recycle.purge": self._purge_recycle_item,
@@ -1067,10 +1187,7 @@ class AgentActionService:
 
     def _delete_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
-        task_id = str(arguments.get("id", "")).strip()
-        task = self.store.get_task(task_id)
-        if task is None or task.project_id != project.id:
-            raise AgentToolError("task_not_found", f"任务不存在: {task_id}", 404)
+        task = self._project_task(project, arguments)
         item = recycle_task(
             self.store, project, task, actor=identity.actor)
         self._refresh_task_snapshot(project.id, identity)
@@ -1079,6 +1196,44 @@ class AgentActionService:
             "deleted": True,
             "recycle_item": item,
             "resource_url": recycle_bin_url(project.id),
+        }
+
+
+    def _project_task(self, project: Project, arguments: dict) -> Task:
+        task_id = str(arguments.get("id", "")).strip()
+        task = self.store.get_task(task_id)
+        if task is None or task.project_id != project.id:
+            raise AgentToolError("task_not_found", f"任务不存在: {task_id}", 404)
+        return task
+
+    def _archive_task(self, project: Project, identity: AgentIdentity,
+                      arguments: dict, _context: AgentRunContext) -> dict:
+        from .tasks import archive_task
+
+        task = self._project_task(project, arguments)
+        was_archived = task.archived
+        archive_task(self.store, task, actor=identity.actor)
+        self._refresh_task_snapshot(project.id, identity)
+        url = task_resource_url(project.id, task.id)
+        return {
+            "summary": (f"任务 [{task.title}]({url}) 已是归档状态" if was_archived
+                        else f"已归档任务 [{task.title}]({url})"),
+            "task": task.to_dict(), "resource_url": url,
+        }
+
+    def _restore_task(self, project: Project, identity: AgentIdentity,
+                      arguments: dict, _context: AgentRunContext) -> dict:
+        from .tasks import restore_task
+
+        task = self._project_task(project, arguments)
+        was_archived = task.archived
+        restore_task(self.store, task, actor=identity.actor)
+        self._refresh_task_snapshot(project.id, identity)
+        url = task_resource_url(project.id, task.id)
+        return {
+            "summary": (f"已恢复归档任务 [{task.title}]({url})" if was_archived
+                        else f"任务 [{task.title}]({url}) 未归档，无需恢复"),
+            "task": task.to_dict(), "resource_url": url,
         }
 
     def _refresh_task_snapshot(self, project_id: str,
@@ -1350,6 +1505,73 @@ class AgentActionService:
             "channel": channel.to_dict(), "resource_url": url,
         }
 
+
+    def _update_channel(self, project: Project, identity: AgentIdentity,
+                        arguments: dict, _context: AgentRunContext) -> dict:
+        if not str(arguments.get("id") or "").strip() and not identity.channel_id:
+            raise AgentToolError("invalid_arguments", "需要提供频道 id")
+        channel = self._project_channel(
+            project, arguments.get("id", ""), identity.channel_id)
+        fields: dict = {}
+        for key in ("name", "purpose"):
+            if key in arguments:
+                fields[key] = str(arguments.get(key) or "")
+        if "workdir" in arguments:
+            requested = str(arguments.get("workdir") or "").strip()
+            # 空值 = 改回平台内置工作区;非空必须落在项目代码仓内(与 channel.create 同口径)
+            fields["workdir"] = (self._resolve_channel_workdir(project, requested)
+                                 if requested else None)
+        if not fields:
+            raise AgentToolError(
+                "invalid_arguments", "channel.update 至少需要 name、purpose、workdir 之一")
+        try:
+            changed = channel_ops.update_channel(
+                self.store, channel, actor=identity.actor, **fields)
+        except channel_ops.ChannelChangeError as exc:
+            raise AgentToolError(exc.code, str(exc), 409) from exc
+        url = channel_resource_url(project.id, channel.id)
+        labels = {"name": "名称", "purpose": "用途", "workdir": "工作目录"}
+        if changed:
+            summary = (f"已更新频道 [#{channel.name}]({url})的"
+                       + "、".join(labels[key] for key in changed))
+            if "workdir" in changed:
+                summary += f"(新工作目录 {channel.workdir or '平台内置工作区'}，从下一轮执行起生效)"
+        else:
+            summary = f"频道 [#{channel.name}]({url}) 没有变化"
+        return {"summary": summary, "changed": changed,
+                "channel": channel.to_dict(), "resource_url": url}
+
+    def _archive_channel(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        channel = self._project_channel(project, arguments.get("id", ""))
+        if channel.content_kind:
+            raise AgentToolError(
+                "content_channel", "页面对话频道随内容页存在，不能经 Agent Tool 归档", 409)
+        try:
+            stopped = channel_ops.archive_channel(
+                self.store, channel, actor=identity.actor,
+                stop_sessions=self._stop_channel_sessions)
+        except channel_ops.ChannelChangeError as exc:
+            raise AgentToolError(exc.code, str(exc), 409) from exc
+        url = channel_resource_url(project.id, channel.id)
+        return {
+            "summary": f"已归档频道 [#{channel.name}]({url})",
+            "channel": channel.to_dict(), "stopped_runtimes": stopped,
+            "resource_url": url,
+        }
+
+    def _restore_channel(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        channel = self._project_channel(project, arguments.get("id", ""))
+        restored = channel_ops.restore_channel(
+            self.store, channel, actor=identity.actor)
+        url = channel_resource_url(project.id, channel.id)
+        return {
+            "summary": (f"已恢复归档频道 [#{channel.name}]({url})" if restored
+                        else f"频道 [#{channel.name}]({url}) 未归档，无需恢复"),
+            "channel": channel.to_dict(), "resource_url": url,
+        }
+
     def _save_dashboard(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:
         raw_id = self._control_id(arguments.get("id"))
@@ -1417,6 +1639,38 @@ class AgentActionService:
             self.store, project, board_id, actor=identity.actor)
         return {"summary": f"已将面板 {board.name} 移入项目回收站",
                 "deleted": True, "recycle_item": item}
+
+
+    def _list_dashboards(self, project: Project, _identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        """不带 id 列出摘要;带 id 返回 dashboard.save 可直接改写的完整配置。"""
+        def short_id(board: Board) -> str:
+            return board.id.removeprefix(f"{project.id}:")
+
+        if str(arguments.get("id") or "").strip():
+            raw_id = self._control_id(arguments.get("id"))
+            board = self.store.get_board(f"{project.id}:{raw_id}")
+            if board is None or board.project_id != project.id:
+                raise AgentToolError("not_found", "面板不存在", 404)
+            url = dashboard_resource_url(project.id, board.id)
+            return {"summary": f"面板 [{board.name}]({url}) 的完整配置",
+                    "dashboard": {**board.to_dict(), "id": short_id(board),
+                                  "resource_url": url}}
+        rows = []
+        for board in self.store.list_boards(project.id):
+            row = {"id": short_id(board), "name": board.name,
+                   "description": board.description, "kind": board.kind,
+                   "updated_at": board.updated_at,
+                   "resource_url": dashboard_resource_url(project.id, board.id)}
+            if board.kind == "taskboard":
+                row.update(source=board.source, group_by=board.group_by,
+                           filters=[f.get("title", "") for f in board.filters])
+            else:
+                row["widgets"] = [{"id": w.id, "type": w.type, "title": w.title}
+                                  for w in board.layout]
+            rows.append(row)
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个面板",
+                "dashboards": rows}
 
     def _save_board_source(self, project: Project, identity: AgentIdentity,
                            arguments: dict, _context: AgentRunContext) -> dict:
@@ -1501,6 +1755,24 @@ class AgentActionService:
                             f"(连带 {removed} 个任务)"),
                 "deleted": True}
 
+
+    def _list_board_sources(self, project: Project, _identity: AgentIdentity,
+                            _arguments: dict, _context: AgentRunContext) -> dict:
+        boards = [b for b in self.store.list_boards(project.id) if b.kind == "taskboard"]
+        rows = []
+        for record in self.store.list_board_datasources(project.id):
+            short = record.id.removeprefix(f"{project.id}:")
+            rows.append({
+                "id": short, "name": record.name, "description": record.description,
+                "columns": record.status_values,
+                "task_count": len(self.store.list_tasks(project.id, source_id=short)),
+                "dashboards": [b.id.removeprefix(f"{project.id}:")
+                               for b in boards if b.source == short],
+                "updated_at": record.updated_at,
+            })
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个自定义任务数据源",
+                "sources": rows}
+
     def _save_automation(self, project: Project, identity: AgentIdentity,
                          arguments: dict, _context: AgentRunContext) -> dict:
         from .automations import save_automation
@@ -1545,6 +1817,76 @@ class AgentActionService:
             "deleted": True,
         }
 
+
+    def _project_automation(self, project: Project, arguments: dict):
+        from .automations import normalize_automation_id
+
+        try:
+            full_id = normalize_automation_id(project.id, str(arguments.get("id", "")))
+        except ValueError as exc:
+            raise AgentToolError("invalid_arguments", str(exc)) from exc
+        automation = self.store.get_automation(full_id)
+        if automation is None or automation.project_id != project.id:
+            raise AgentToolError("not_found", "自动化脚本不存在", 404)
+        return automation
+
+    def _list_automations(self, project: Project, _identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        """不带 id 列出摘要;带 id 返回脚本全文与最近运行(输出只留末尾)。"""
+        def summary_row(automation) -> dict:
+            return {
+                "id": automation.id.removeprefix(f"{project.id}:"),
+                "name": automation.name, "description": automation.description,
+                "cron": automation.cron, "enabled": automation.enabled,
+                "actions": automation.actions,
+                "timeout_seconds": automation.timeout_seconds,
+                "last_run_at": automation.last_run_at,
+                "last_status": automation.last_status,
+                "resource_url": automation_resource_url(project.id, automation.id),
+            }
+
+        if str(arguments.get("id") or "").strip():
+            automation = self._project_automation(project, arguments)
+            limit = arguments.get("runs", 5)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+                raise AgentToolError("invalid_arguments", "runs 必须是 1..20 的整数")
+            runs = []
+            for row in self.store.list_automation_runs(automation.id, limit):
+                run = {key: row.get(key) for key in (
+                    "id", "trigger", "status", "exit_code", "error",
+                    "started_at", "finished_at")}
+                for stream in ("stdout", "stderr"):
+                    text = str(row.get(stream) or "")
+                    run[stream] = text[-AUTOMATION_OUTPUT_TAIL:]
+                    run[f"{stream}_truncated"] = len(text) > AUTOMATION_OUTPUT_TAIL
+                runs.append(run)
+            return {"summary": f"自动化脚本 {automation.name} 的配置与最近 {len(runs)} 次运行",
+                    "automation": {**summary_row(automation), "script": automation.script},
+                    "runs": runs}
+        rows = [summary_row(item) for item in self.store.list_automations(project.id)]
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个自动化脚本",
+                "automations": rows}
+
+    def _run_automation(self, project: Project, identity: AgentIdentity,
+                        arguments: dict, _context: AgentRunContext) -> dict:
+        automation = self._project_automation(project, arguments)
+        if self._trigger_automation is None:
+            raise AgentToolError(
+                "unavailable", "自动化调度器未就绪，请稍后重试", 503, retryable=True)
+        try:
+            run_id = self._trigger_automation(automation, trigger="manual")
+        except ValueError as exc:
+            raise AgentToolError("in_use", str(exc), 409) from exc
+        self.store.audit(
+            identity.actor, "automation_run_requested",
+            detail=f"project={project.id} automation={automation.id} run={run_id}")
+        return {
+            "summary": (f"已手动触发自动化脚本 {automation.name}(运行记录 #{run_id})，"
+                        "在后台执行"),
+            "run_id": run_id,
+            "resource_url": automation_resource_url(project.id, automation.id),
+        }
+
     def _save_guideline(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:
         enabled = arguments.get("enabled", True)
@@ -1582,6 +1924,29 @@ class AgentActionService:
             "recycle_item": item,
             "resource_url": guideline_resource_url(project.id, name),
         }
+
+
+    def _list_guidelines(self, project: Project, _identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        sync_guideline_library(self.store, project)
+        name = str(arguments.get("name") or "").strip()
+        if name:
+            for guideline in project.guidelines:
+                if guideline.name == name:
+                    url = guideline_resource_url(project.id, guideline.name)
+                    return {"summary": f"准则 [{guideline.name}]({url}) 全文",
+                            "guideline": {"name": guideline.name,
+                                          "description": guideline.description,
+                                          "enabled": guideline.enabled,
+                                          "markdown": guideline.render_markdown(),
+                                          "resource_url": url}}
+            raise AgentToolError("not_found", f"准则不存在: {name}", 404)
+        rows = [{"name": g.name, "description": g.description, "enabled": g.enabled,
+                 "resource_url": guideline_resource_url(project.id, g.name)}
+                for g in project.guidelines]
+        enabled = sum(1 for row in rows if row["enabled"])
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 篇准则(启用 {enabled} 篇)",
+                "guidelines": rows}
 
     def _save_skill(self, project: Project, identity: AgentIdentity,
                     arguments: dict, _context: AgentRunContext) -> dict:
@@ -1626,6 +1991,29 @@ class AgentActionService:
             "revision": item["revision"],
             "resource_url": skill_resource_url(project.id, skill_id),
         }
+
+
+    def _list_skills(self, project: Project, _identity: AgentIdentity,
+                     arguments: dict, _context: AgentRunContext) -> dict:
+        project, _issues = sync_project_skill_library(self.store, project)
+        skill_id = str(arguments.get("id") or "").strip()
+        if skill_id:
+            skill = next((item for item in project.skills if item.id == skill_id), None)
+            if skill is None:
+                raise AgentToolError("not_found", f"Skill 不存在: {skill_id}", 404)
+            markdown, files = skill_package(project.id, skill.id)
+            url = skill_resource_url(project.id, skill.id)
+            return {"summary": f"Skill [{skill.name or skill.id}]({url}) 的 SKILL.md 与文件清单",
+                    "skill": {"id": skill.id, "name": skill.name,
+                              "description": skill.description, "enabled": skill.enabled,
+                              "markdown": markdown, "files": files, "resource_url": url}}
+        rows = [{"id": item.id, "name": item.name, "description": item.description,
+                 "enabled": item.enabled,
+                 "resource_url": skill_resource_url(project.id, item.id)}
+                for item in project.skills]
+        enabled = sum(1 for row in rows if row["enabled"])
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个 Skill(启用 {enabled} 个)",
+                "skills": rows}
 
     def _list_recycle_bin(self, project: Project, _identity: AgentIdentity,
                           _arguments: dict, _context: AgentRunContext) -> dict:

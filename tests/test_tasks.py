@@ -642,25 +642,30 @@ def test_project_task_list_filters_by_channel(seeded):
         assert listed("channel=webshop:missing")[0] == set()
 
 
-# 频道关联 Task 列表的渲染:装载真实的 tasks.js/channels.js,DOM 只留一个占位节点
+# 频道关联 Task 按钮与弹层的渲染:装载真实的 tasks.js/channels.js,DOM 只留按钮与弹层两个节点
 _CHANNEL_TASKS_SCRIPT = r"""
 const fs = require("fs");
 const vm = require("vm");
-const classes = new Set();
-const box = { hidden: true, innerHTML: "",
-              classList: { toggle: (name, on) => on ? classes.add(name) : classes.delete(name) } };
+const element = () => {
+  const classes = new Set(), attrs = {};
+  return { hidden: true, innerHTML: "", title: "", style: {}, classes, attrs,
+           classList: { toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
+           setAttribute: (name, value) => { attrs[name] = value; },
+           getBoundingClientRect: () => ({ bottom: 40, right: 1180 }) };
+};
+const nodes = { "channel-tasks-btn": element(), "channel-tasks-pop": element() };
 const store = {};
 const context = {
-  document: { getElementById: id => id === "channel-tasks" ? box : null,
-              addEventListener() {} },
-  window: { matchMedia: () => ({ matches: false }) },
+  document: { getElementById: id => nodes[id] || null, addEventListener() {},
+              querySelector: () => null },
+  window: { innerWidth: 1280, innerHeight: 800, addEventListener() {} },
   localStorage: { getItem: key => key in store ? store[key] : null,
                   setItem: (key, value) => { store[key] = String(value); } },
   dlg: { addEventListener() {} },
   esc: value => String(value ?? "").replace(/[&<>"]/g,
     char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]),
   taskActivity: task => Number(task.updated_at || 0),
-  currentChan: "webshop:delivery",
+  currentChan: "webshop:delivery", currentTab: "chat",
 };
 vm.createContext(context);
 for (const name of ["tasks.js", "channels.js"])
@@ -670,18 +675,28 @@ const task = (id, title, status, updated_at) =>
 vm.runInContext(`channelTasks = { channelId: "webshop:delivery", tasks: ${JSON.stringify([
   task("t1", "旧的待处理", "待处理", 1), task("t2", "最新处理中", "处理中", 3),
   task("t3", "已经完成", "已完成", 2), task("t4", "<b>无状态</b>", "", 0)])} }`, context);
-const snapshot = () => ({ hidden: box.hidden, html: box.innerHTML, collapsed: classes.has("collapsed") });
+const snapshot = () => {
+  const [button, pop] = [nodes["channel-tasks-btn"], nodes["channel-tasks-pop"]];
+  return { button: { hidden: button.hidden, html: button.innerHTML, title: button.title,
+                     active: button.classes.has("active"), expanded: button.attrs["aria-expanded"] },
+           pop: { hidden: pop.hidden, html: pop.innerHTML, style: { ...pop.style } } };
+};
 const results = {};
-vm.runInContext("renderChannelTasks()", context); results.open = snapshot();
-vm.runInContext("setChannelTaskScope('all')", context); results.all = snapshot();
-vm.runInContext("toggleChannelTasks()", context); results.folded = snapshot();
+const run = (code, key) => { vm.runInContext(code, context); results[key] = snapshot(); };
+run("renderChannelTasks()", "closed");
+let stopped = false;
+context.clickEvent = { stopPropagation: () => { stopped = true; } };
+run("toggleChannelTasksPopover(clickEvent)", "opened");
+results.stopped = stopped;
+run("setChannelTaskScope('all')", "all");
+run("closeChannelTasksPopover()", "closedAgain");
 results.saved = { ...store };
-vm.runInContext(`currentChan = "general"; renderChannelTasks()`, context); results.other = snapshot();
+run("toggleChannelTasksPopover(); currentChan = 'general'; renderChannelTasks()", "otherChannel");
 process.stdout.write(JSON.stringify(results));
 """
 
 
-def test_channel_task_strip_lists_open_tasks_by_default_and_folds():
+def test_channel_task_button_previews_count_and_pops_up_list():
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required to execute the browser renderers")
@@ -690,22 +705,32 @@ def test_channel_task_strip_lists_open_tasks_by_default_and_folds():
         text=True, capture_output=True, check=True)
     data = json.loads(result.stdout)
 
+    # 标题行按钮只预览未完成数,弹层默认关闭
+    closed = data["closed"]
+    assert not closed["button"]["hidden"] and closed["button"]["html"] == "Task <b>3</b>"
+    assert closed["button"]["title"] == "3 个未完成 · 共 4 个关联 Task"
+    assert closed["button"]["expanded"] == "false" and closed["pop"]["hidden"]
+    # 点击:不冒泡到标题行(那是展开/收起频道信息),弹层贴着按钮右下方打开
+    opened = data["opened"]
+    assert data["stopped"] and opened["button"]["active"] and opened["button"]["expanded"] == "true"
+    assert not opened["pop"]["hidden"]
+    assert opened["pop"]["style"] == {"top": "46px", "right": "100px", "maxHeight": "742px"}
     # 默认只列未完成的:按最近活动排序,状态用看板同款样式徽标,标题转义
-    html = data["open"]["html"]
-    assert not data["open"]["hidden"] and not data["open"]["collapsed"]
-    assert "2 个未完成" not in html and "3 个未完成 · 共 4" in html
+    html = opened["pop"]["html"]
+    assert "3 个未完成 · 共 4" in html
     assert html.index("最新处理中") < html.index("旧的待处理")
     assert '<span class="pill st-in_progress">处理中</span>' in html
     assert '<span class="pill st-open">待处理</span>' in html
     assert "&lt;b&gt;无状态&lt;/b&gt;" in html and ">无状态</span>" in html
-    assert "已经完成" not in html
-    assert "openTask(this.dataset.taskId, false)" in html
-    # 切到全部后已完成的也列出;折叠只加 collapsed 样式,两项偏好都按浏览器记住
-    assert '<span class="pill st-done">已完成</span>' in data["all"]["html"]
-    assert data["folded"]["collapsed"] and not data["all"]["collapsed"]
-    assert data["saved"] == {"mc.channelTaskScope": "all", "mc.channelTasksCollapsed": "1"}
-    # 数据属于别的频道(切换后尚未拉到)时整块隐藏
-    assert data["other"]["hidden"] and data["other"]["html"] == ""
+    assert "已经完成" not in html and "openTask(this.dataset.taskId, false)" in html
+    # 切到全部后已完成的也列出,范围偏好按浏览器记住;关闭后弹层清空
+    assert '<span class="pill st-done">已完成</span>' in data["all"]["pop"]["html"]
+    assert data["saved"] == {"mc.channelTaskScope": "all"}
+    assert data["closedAgain"]["pop"]["hidden"] and data["closedAgain"]["pop"]["html"] == ""
+    assert not data["closedAgain"]["button"]["active"]
+    # 切到没有关联 Task 的频道:按钮隐藏,打开着的弹层随之收起
+    other = data["otherChannel"]
+    assert other["button"]["hidden"] and other["pop"]["hidden"]
 
 
 def test_task_board_exposes_activity_order_and_archive_filter(seeded):

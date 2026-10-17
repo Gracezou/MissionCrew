@@ -300,6 +300,7 @@ const vm = require("vm");
 const context = {
   localStorage: { getItem: () => null },
   document: { addEventListener() {} },
+  window: { addEventListener() {} },
   esc: value => String(value ?? ""),
   currentChan: "", currentTab: "chat",
 };

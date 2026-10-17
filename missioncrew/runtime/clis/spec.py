@@ -58,6 +58,9 @@ class CliSpec:
     configured_models: Optional[Callable[[], list[str]]] = None
     # () -> ("npm"|"self", cmd);覆盖通用升级计划(pi 只写 vendor 目录)
     update_plan: Optional[Callable[[], tuple]] = None
+    # (timeout) -> 最新发布版本,查不到返回空;npm 之外的版本源(traecli
+    # update check),声明后替代 npm registry 比对
+    latest_version: Optional[Callable[[int], str]] = None
     # (command, filesystem) -> command;把统一文件系统权限翻译为原生参数
     apply_permissions: Optional[Callable[..., list[str]]] = None
     # (env, external_dirs) -> env;需要配置式多目录授权的工具注入自有配置

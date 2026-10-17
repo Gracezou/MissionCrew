@@ -754,9 +754,11 @@ def test_all_runtime_commands_apply_directory_policy():
             template, "", "", allowed_dirs=dirs, workdir=workdir)
         for name, template in adapters.ACP_SERVE_COMMANDS.items()
     }
-    for name in ("kimi", "qoder", "trae"):
+    for name in ("kimi", "qoder"):
         assert acp_commands[name].count("--add-dir") == len(dirs)
         assert all(path in acp_commands[name] for path in dirs)
+    # traecli 的额外目录走 ACP session/new|load 的 additionalDirectories
+    assert "--add-dir" not in acp_commands["trae"]
     assert acp_commands["grok_build"][
         acp_commands["grok_build"].index("--cwd") + 1] == workdir
     assert acp_commands["grok_build"][-1] == "stdio"

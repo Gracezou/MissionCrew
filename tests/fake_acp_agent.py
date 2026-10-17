@@ -7,8 +7,11 @@ allow_once),收到应答后把所选 optionId 写进第二个文本块,最后结
 
 argv[1] 控制 session/new 的模型目录形态:缺省 = kimi 形态(configOptions,含
 category=thought_level 的 `thinking` 档位选项,取值随当前模型变化,经
-session/set_config_option 切换模型/档位);"trae" = trae 形态
-(models.availableModels + currentModelId,无 configOptions)。
+session/set_config_option 切换模型/档位);"models_block" = 只有
+models.availableModels + currentModelId、无 configOptions 的形态;"trae" =
+traecli 0.209 形态(configOptions 含 model 与 category=thought_level 的
+`reasoning_effort`,另附「模型/档位」组合 id 的 models 块,并声明会话级
+additionalDirectories,收到的目录回显在回复里)。
 """
 import json
 import sys
@@ -48,6 +51,28 @@ def _config_options(model, thinking):
                      for v in _THINKING_LEVELS[model]]}]
 
 
+# trae 形态的按模型档位:与真实 traecli 一致,没有推理力度的模型不给该选项
+_TRAE_EFFORTS = {"glm-5.3": ["low", "high", "xhigh"], "Doubao_1_6": []}
+
+
+def _trae_config_options(model, effort):
+    model = model or "glm-5.3"
+    options = [
+        {"type": "select", "id": "mode", "category": "mode",
+         "currentValue": "bypass_permissions",
+         "options": [{"value": "default"}, {"value": "bypass_permissions"}]},
+        {"type": "select", "id": "model", "category": "model",
+         "currentValue": model,
+         "options": [{"value": "glm-5.3", "name": "GLM-5.3"},
+                     {"value": "Doubao_1_6", "name": "Doubao-Seed-Code"}]}]
+    if _TRAE_EFFORTS[model]:
+        options.append({
+            "type": "select", "id": "reasoning_effort",
+            "category": "thought_level", "currentValue": effort or "high",
+            "options": [{"value": v} for v in _TRAE_EFFORTS[model]]})
+    return options
+
+
 def _session_new_result(shape, model="", thinking=""):
     if shape == "efforts":  # 真实 grok 的形态:每个模型自报推理力度(高到低)
         return {"sessionId": "s-test",
@@ -69,12 +94,18 @@ def _session_new_result(shape, model="", thinking=""):
                     {"modelId": "fake-mini", "name": "Fake Mini", "_meta": {
                         "supportsReasoningEffort": False}}],
                     "currentModelId": "fake-4.6"}}
-    if shape == "trae":   # 真实 traecli 的形态(实测 + Multica 对齐)
+    if shape == "models_block":   # 旧版 traecli 的形态(实测 + Multica 对齐)
         return {"sessionId": "s-test",
                 "models": {"availableModels": [
                     {"modelId": "GLM-5.2", "name": "GLM-5.2", "description": ""},
                     {"modelId": "Kimi-K2.6", "name": "Kimi K2.6", "description": ""}],
                     "currentModelId": "GLM-5.2"}}
+    if shape == "trae":
+        return {"sessionId": "s-test",
+                "configOptions": _trae_config_options(model, thinking),
+                "models": {"currentModelId": "glm-5.3/high", "availableModels": [
+                    {"modelId": "glm-5.3/low"}, {"modelId": "glm-5.3/high"},
+                    {"modelId": "glm-5.3/xhigh"}, {"modelId": "Doubao_1_6"}]}}
     return {"sessionId": "s-test",
             "configOptions": _config_options(model, thinking)}
 
@@ -86,6 +117,7 @@ def main():
     new_count = 0
     load_count = 0
     load_no_replay = False
+    session_dirs = None
     prompt_count = 0
     pending_terminal = ""
     for line in sys.stdin:
@@ -115,16 +147,21 @@ def main():
                   f" 输出={output.strip()}")
             continue
         if method == "initialize":
+            capabilities = {"loadSession": shape != "noload"}
+            if shape == "trae":
+                capabilities["sessionCapabilities"] = {"additionalDirectories": {}}
             send({"jsonrpc": "2.0", "id": mid, "result": {
                 "protocolVersion": 1,
-                "agentCapabilities": {"loadSession": shape != "noload"},
+                "agentCapabilities": capabilities,
             }})
         elif method == "session/new":
             new_count += 1
+            session_dirs = msg["params"].get("additionalDirectories")
             send({"jsonrpc": "2.0", "id": mid,
                   "result": _session_new_result(shape)})
         elif method == "session/load":
             load_count += 1
+            session_dirs = msg["params"].get("additionalDirectories")
             load_no_replay = bool(
                 (msg["params"].get("_meta") or {}).get("noReplay"))
             if shape == "replay" and not load_no_replay:
@@ -159,6 +196,20 @@ def main():
             # 当前模型的取值,越界返回 -32602(真实 kimi 的报错形态)
             config_id = msg["params"]["configId"]
             value = msg["params"]["value"]
+            if shape == "trae":
+                # 真实 traecli:切模型把档位重置为默认;不支持的档位报 -32602
+                if config_id == "model":
+                    model, thinking = value, ""
+                elif config_id == "reasoning_effort":
+                    if value not in _TRAE_EFFORTS[model or "glm-5.3"]:
+                        send({"jsonrpc": "2.0", "id": mid, "error": {
+                            "code": -32602, "message": "Invalid params",
+                            "data": "Unsupported reasoning effort for selected model"}})
+                        continue
+                    thinking = value
+                send({"jsonrpc": "2.0", "id": mid, "result": {
+                    "configOptions": _trae_config_options(model, thinking)}})
+                continue
             if config_id == "model":
                 model = value
             elif config_id == "thinking":
@@ -289,7 +340,9 @@ def main():
                     opt = resp["result"]["outcome"]["optionId"]
                     break
             chunk(f";权限选择={opt}" + (f";模型={model}" if model else "")
-                  + (f";思考={thinking}" if thinking else ""))
+                  + (f";思考={thinking}" if thinking else "")
+                  + (f";目录={','.join(session_dirs)}"
+                     if session_dirs is not None else ""))
             send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
 
 

@@ -124,11 +124,21 @@ def test_acp_list_models_from_config_options():
     assert models == ["fake/base", "fake/pro"]
 
 
-def test_acp_list_models_from_trae_models_block():
-    """trae 形态:目录在 models.availableModels(无 configOptions)。"""
+def test_acp_list_models_from_models_block():
+    """只有 models.availableModels(无 configOptions)的形态,如旧版 traecli。"""
     from missioncrew.runtime import acp
-    models = acp.list_models([sys.executable, FAKE, "trae"], timeout=15)
+    models = acp.list_models([sys.executable, FAKE, "models_block"], timeout=15)
     assert models == ["GLM-5.2", "Kimi-K2.6"]
+
+
+def test_acp_catalog_prefers_config_options_over_trae_combo_models():
+    """traecli 0.209:models 块是「模型/档位」组合 id,目录以 configOptions 为准;
+    档位由 thought_level 选项逐模型读回,没有该选项的模型不入表。"""
+    models, efforts = acp.list_model_catalog(
+        [sys.executable, FAKE, "trae"], timeout=15)
+
+    assert models == ["glm-5.3", "Doubao_1_6"]
+    assert efforts == {"glm-5.3": ["low", "high", "xhigh"]}
 
 
 def test_acp_catalog_reads_per_model_reasoning_efforts():
@@ -150,11 +160,11 @@ def test_acp_catalog_reads_per_model_reasoning_efforts():
 
 
 def test_acp_catalog_empty_efforts_without_parser():
-    """既无解析回调、也不自报 thought_level 的工具(trae 等)档位表恒为空
+    """既无解析回调、也不自报 thought_level 的工具档位表恒为空
     = 回退静态档位。"""
     from missioncrew.runtime import acp
     models, efforts = acp.list_model_catalog(
-        [sys.executable, FAKE, "trae"], timeout=15)
+        [sys.executable, FAKE, "models_block"], timeout=15)
 
     assert models == ["GLM-5.2", "Kimi-K2.6"] and efforts == {}
 
@@ -237,13 +247,82 @@ def test_acp_effort_without_thought_level_option_warns(tmp_path):
     """既不在命令里、Runtime 也不自报 thought_level 的组合:本轮照常执行,
     但明确上报 effort 未生效,不静默吞掉配置。"""
     events = []
-    backend = Backend(id="trae", name="t", adapter="trae")
-    result = _adapter("trae", "trae").run(
+    backend = Backend(id="qoder", name="q", adapter="qoder")
+    result = _adapter("qoder", "models_block").run(
         _effort_cfg(tmp_path, backend, "high", events))
 
     assert result.success, result.summary
     statuses = "".join(t for k, t in events if k == "status")
     assert "effort=high 未生效" in statuses
+
+
+def test_trae_effort_switches_reasoning_effort_option(tmp_path):
+    backend = Backend(id="trae", name="t", adapter="trae", model="glm-5.3")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "xhigh"))
+
+    assert result.success, result.summary
+    assert "模型=glm-5.3" in result.output and "思考=xhigh" in result.output
+
+
+def test_trae_effort_on_model_without_reasoning_option_fails_the_turn(tmp_path):
+    backend = Backend(id="trae", name="t", adapter="trae", model="Doubao_1_6")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "low"))
+
+    assert not result.success
+    assert "effort=low" in result.output
+    assert "Unsupported reasoning effort" in result.output
+
+
+def test_acp_passes_additional_dirs_only_when_session_capability_declared(tmp_path):
+    """trae 声明 sessionCapabilities.additionalDirectories:工作目录之外的授权
+    目录随 session/new 传入;未声明的工具(kimi 形态)协议里不带。"""
+    workdir = tmp_path / "work"
+    inner = workdir / "docs"
+    shared = tmp_path / "shared"
+    for path in (inner, shared):
+        path.mkdir(parents=True)
+
+    def run(adapter, *extra):
+        cfg = _cfg(workdir, Backend(id=adapter, name=adapter, adapter=adapter))
+        cfg.allowed_dirs = [str(workdir), str(inner), str(shared)]
+        return _adapter(adapter, *extra).run(cfg)
+
+    trae = run("trae", "trae")
+    assert trae.success, trae.summary
+    assert f";目录={shared.resolve()}" in trae.output   # 工作根内的目录不重复授权
+
+    kimi = run("kimi")
+    assert kimi.success, kimi.summary
+    assert "目录=" not in kimi.output
+
+
+def test_trae_changed_dirs_restart_live_session_and_reload_with_new_dirs(tmp_path):
+    """额外目录只在建会话时生效:清单变化要换进程,再 session/load 带上新清单。"""
+    workdir = tmp_path / "work"
+    first_dir, second_dir = tmp_path / "a", tmp_path / "b"
+    for path in (workdir, first_dir, second_dir):
+        path.mkdir()
+    saved = {}
+
+    def run(extra_dir):
+        cfg = _chat_cfg(workdir, saved)
+        cfg.backend = Backend(id="trae", name="t", adapter="trae")
+        cfg.session_id = saved.get("id", "")
+        cfg.allowed_dirs = [str(workdir), str(extra_dir)]
+        return _adapter("trae", "trae").run(cfg)
+
+    try:
+        first = run(first_dir)
+        assert first.success, first.summary
+        assert "new=1;load=0" in first.output
+        assert f";目录={first_dir.resolve()}" in first.output
+
+        second = run(second_dir)
+        assert second.success, second.summary
+        assert "new=0;load=1" in second.output
+        assert f";目录={second_dir.resolve()}" in second.output
+    finally:
+        acp.close_sessions()
 
 
 def test_acp_one_shot_execution_appears_in_runtime_status(tmp_path):

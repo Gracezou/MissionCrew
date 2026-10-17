@@ -9,6 +9,8 @@ JSON-RPC 服务挂在 stdio 上(换行分隔的 JSON-RPC 2.0)。流程:
     推理力度(effort)若不在 serve 命令里,则按 ACP 标准的会话配置项在会话内
     切换:session/new|load 应答的 configOptions 中 category=thought_level 的
     选项(kimi 的 `thinking`)即档位,每轮 prompt 前 set_config_option 对齐;
+    项目额外目录若不在 serve 命令里,则随 session/new|load 的
+    additionalDirectories 传入(agent 声明了 sessionCapabilities.additionalDirectories);
     agent 反向发来的 session/request_permission 必须应答(选它提供的安全
     选项),否则 agent 会阻塞到内部超时,任务假死。
 """
@@ -585,7 +587,13 @@ class _AcpClient:
             except queue.Empty:
                 raise AcpError(f"{method} 超时")
             if "error" in msg:
-                detail = msg["error"].get("message", msg["error"]) if isinstance(msg["error"], dict) else msg["error"]
+                error = msg["error"]
+                detail = error.get("message", error) if isinstance(error, dict) else error
+                # traecli 的 message 只有通用的 "Invalid params",具体原因在
+                # 字符串 data 里(如 Unsupported reasoning effort for selected model)
+                data = error.get("data") if isinstance(error, dict) else None
+                if isinstance(data, str) and data and data not in str(detail):
+                    detail = f"{detail}: {data}"
                 raise AcpError(f"{method} 失败: {detail}")
             return msg.get("result") or {}
         finally:
@@ -653,8 +661,10 @@ def _session_lock(session_key: str) -> threading.Lock:
         return _SESSION_LOCKS.setdefault(session_key, threading.Lock())
 
 
-def _client_signature(cmd: list[str], workdir: str, env: dict) -> tuple:
-    # ACP serve 进程启动后不能更新环境；项目目录权限已渲染进 cmd，其余平台
+def _client_signature(cmd: list[str], workdir: str, env: dict,
+                      additional_dirs: tuple[str, ...] = ()) -> tuple:
+    # ACP serve 进程启动后不能更新环境；项目目录权限渲染进 cmd 或经协议的
+    # additionalDirectories 传入(只在建会话时生效,变化同样要换进程)，其余平台
     # 环境只比较稳定的 MISSIONCREW_*。旧调用方可能仍传逐轮 run id；它由
     # Agent Tool 的 run-scoped token 取代，不能因此打断长驻会话。
     platform_env = tuple(sorted(
@@ -662,7 +672,7 @@ def _client_signature(cmd: list[str], workdir: str, env: dict) -> tuple:
         if key.startswith("MISSIONCREW_")
         and key != "MISSIONCREW_AGENT_RUN_ID"
     ))
-    return tuple(cmd), workdir, platform_env
+    return tuple(cmd), workdir, platform_env, tuple(additional_dirs)
 
 
 def _drop_live_session(session_key: str, expected: Optional[_LiveSession] = None) -> None:
@@ -823,21 +833,33 @@ def _thought_level_option(result: dict) -> tuple[str, list[str]]:
 def _new_or_load_session(client: _AcpClient, workdir: str,
                          requested_session_id: str,
                          initialize_result: dict,
-                         load_meta: Optional[dict] = None) -> tuple[str, bool]:
+                         load_meta: Optional[dict] = None,
+                         additional_dirs: Optional[list[str]] = None
+                         ) -> tuple[str, bool]:
     """返回 (会话 id, 是否成功恢复)。不支持/无法 load 时创建新会话。
 
     顺带记下应答里的推理力度配置项 id(client.thought_level_option),供
     每轮 prompt 前按 effort 切换档位。
     """
     capabilities = initialize_result.get("agentCapabilities") or {}
-    can_load = bool(isinstance(capabilities, dict)
-                    and capabilities.get("loadSession") is True)
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    can_load = capabilities.get("loadSession") is True
+    # 会话级额外目录:agent 声明 sessionCapabilities.additionalDirectories(空对象
+    # 即支持)时随 session/new|load 传入,load 时以本次传入的清单为准(traecli
+    # 实测);未声明的工具不在协议里传,只靠 serve 命令行参数授权。
+    session_caps = capabilities.get("sessionCapabilities")
+    extra_dirs = ({"additionalDirectories": list(additional_dirs)}
+                  if additional_dirs and isinstance(session_caps, dict)
+                  and session_caps.get("additionalDirectories") is not None
+                  else {})
     if requested_session_id and can_load:
         try:
             params = {
                 "sessionId": requested_session_id,
                 "cwd": workdir,
                 "mcpServers": [],
+                **extra_dirs,
             }
             if load_meta:
                 params["_meta"] = dict(load_meta)
@@ -850,7 +872,8 @@ def _new_or_load_session(client: _AcpClient, workdir: str,
     elif requested_session_id:
         client.emit("status", "ACP Runtime 未声明 session/load，将用最近对话新建会话。\n")
 
-    result = client.request("session/new", {"cwd": workdir, "mcpServers": []})
+    result = client.request("session/new", {"cwd": workdir, "mcpServers": [],
+                                            **extra_dirs})
     session_id = result.get("sessionId") or result.get("session_id") or ""
     if not session_id:
         raise AcpError("session/new 未返回 sessionId")
@@ -928,7 +951,8 @@ def _run_one_shot(cmd: list[str], prompt: str, workdir: str, env: dict,
                   emit: Optional[Callable[[str, str], None]],
                   task_id: str = "", stage_name: str = "",
                   project_id: str = "", role_id: str = "",
-                  effort: str = "") -> tuple[bool, str]:
+                  effort: str = "",
+                  additional_dirs: Optional[list[str]] = None) -> tuple[bool, str]:
     try:
         client = _AcpClient(cmd, workdir, env, timeout, emit=emit)
     except OSError as e:
@@ -938,7 +962,9 @@ def _run_one_shot(cmd: list[str], prompt: str, workdir: str, env: dict,
             runtime_id, client, task_id, stage_name, project_id, role_id, model)
     try:
         initialize_result = _initialize(client)
-        session_id, _ = _new_or_load_session(client, workdir, "", initialize_result)
+        session_id, _ = _new_or_load_session(
+            client, workdir, "", initialize_result,
+            additional_dirs=additional_dirs)
         return True, _prompt_turn(client, session_id, prompt, model, effort)
     except AcpError as e:
         return False, str(e)
@@ -962,7 +988,8 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                cancelled: Optional[Callable[[], bool]] = None,
                load_session_meta: Optional[dict] = None,
                trigger_message_id: int = 0,
-               effort: str = "") -> tuple[bool, str]:
+               effort: str = "",
+               additional_dirs: Optional[list[str]] = None) -> tuple[bool, str]:
     """完成一轮 ACP prompt，并按 channel×role 复用长驻原生会话。
 
     无 ``session_key`` 时保持一次性调用。长驻进程不存在（包括服务重启）时，
@@ -971,16 +998,20 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
 
     ``effort`` 是要经会话配置项(thought_level)切换的推理力度;serve 命令里
     已带档位的工具(grok/copilot)不要再传,它们改档位靠命令签名变化重启进程。
+
+    ``additional_dirs`` 是工作目录之外的项目授权目录;agent 声明了会话级
+    additionalDirectories 能力时经协议传入,否则忽略(由 serve 命令行授权)。
     """
     if cancelled and cancelled():
         return False, "执行已停止"
     if not session_key:
         return _run_one_shot(
             cmd, prompt, workdir, env, model, timeout, runtime_id, emit,
-            task_id, stage_name, project_id, role_id, effort=effort)
+            task_id, stage_name, project_id, role_id, effort=effort,
+            additional_dirs=additional_dirs)
 
     _cleanup_idle_sessions()
-    signature = _client_signature(cmd, workdir, env)
+    signature = _client_signature(cmd, workdir, env, tuple(additional_dirs or ()))
     with _session_lock(session_key):
         if cancelled and cancelled():
             return False, "执行已停止"
@@ -1002,7 +1033,7 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                     initialize_result = _initialize(client)
                     runtime_session_id, recovered = _new_or_load_session(
                         client, workdir, session_id, initialize_result,
-                        load_session_meta)
+                        load_session_meta, additional_dirs)
                 except Exception:
                     client.close()
                     raise
@@ -1091,10 +1122,12 @@ def list_model_catalog(
         parse_efforts=None) -> tuple[list[str], dict[str, list[str]]]:
     """一次性会话同时取回模型目录与每个模型支持的推理力度。
 
-    模型目录兼容两种形态:kimi 等返回 configOptions(category=model 的 select
-    选项);部分实现返回 models 块——trae 用 {availableModels:[{modelId,...}]}
-    (对齐 Multica parseACPSessionNewModels,兼容 snake_case 与旧的
-    {available:[...]} 及裸数组)。查不到返回空目录与空档位表。
+    模型目录兼容两种形态:kimi/trae 等返回 configOptions(category=model 的 select
+    选项);部分实现只返回 models 块 {availableModels:[{modelId,...}]}(对齐
+    Multica parseACPSessionNewModels,兼容 snake_case 与旧的 {available:[...]}
+    及裸数组)。两者都有时以 configOptions 为准:trae 的 models 块把模型与档位
+    拼成 "glm-5.3/high" 这类组合 id,不是可单独选择的模型。查不到返回空目录与
+    空档位表。
 
     按模型的推理力度有两条路:
     - ACP 标准的会话配置项:configOptions 里有 category=thought_level 的选项

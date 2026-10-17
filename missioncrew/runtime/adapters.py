@@ -343,9 +343,16 @@ def is_newer(latest: str, installed: str) -> bool:
 
 
 def fetch_latest_version(adapter: str, timeout: int = 8) -> str:
-    """查询工具的最新发布版本(目前支持 npm registry);查不到返回空。"""
+    """查询工具的最新发布版本;查不到返回空。
+
+    工具声明了 latest_version 钩子(自带的更新检查子命令)时用它,否则查
+    npm registry。
+    """
     import urllib.parse
     import urllib.request
+    cli_spec = _clis.BY_ADAPTER.get(adapter)
+    if cli_spec and cli_spec.latest_version:
+        return cli_spec.latest_version(timeout)
     pkg = (UPDATE_SPECS.get(adapter) or {}).get("npm")
     if not pkg:
         return ""
@@ -712,11 +719,11 @@ class AcpAdapter:
         if not template:
             return RunResult(False, f"适配器 {self.adapter_name} 未配置 ACP serve 命令")
         workdir = str(Path(cfg.workdir).expanduser().resolve())
+        extra_dirs = _additional_allowed_dirs(workdir, cfg.allowed_dirs)
         cmd = render_command(
             template, "", cfg.backend.model,
             cfg.env.get("MISSIONCREW_DOCUMENTS_DIR", ""), cfg.effort,
-            allowed_dirs=_additional_allowed_dirs(workdir, cfg.allowed_dirs),
-            workdir=workdir,
+            allowed_dirs=extra_dirs, workdir=workdir,
         )
         if self.command is None:
             cmd = _apply_permission_policy(cmd, self.adapter_name, cfg)
@@ -752,6 +759,9 @@ class AcpAdapter:
             load_session_meta=_load_session_meta(self.adapter_name),
             trigger_message_id=cfg.trigger_message_id,
             effort=protocol_effort,
+            # 额外目录同时交给协议层:声明了会话级 additionalDirectories 的
+            # 工具(trae)经 session/new|load 授权,其余工具已在 serve 命令里
+            additional_dirs=extra_dirs,
         )
         try:
             _diagnostic_log_path(cfg, self.adapter_name).write_text(text)

@@ -22,7 +22,7 @@ Runtime 指本机安装的 Agent CLI(代码中的 `Backend`)。它是**全局资
 | `kimi` | `kimi` | ACP stdio | `kimi upgrade`(不做最新版比对) |
 | `kiro-cli` | `kiro` | ACP stdio | 不支持自动更新 |
 | `qodercli` | `qoder` | ACP stdio | 不支持自动更新 |
-| `traecli` | `trae` | ACP stdio | `traecli update`(不做最新版比对) |
+| `traecli` | `trae` | ACP stdio | `traecli update`(最新版经 `traecli update check` 比对) |
 
 每个工具在检测表中还带默认能力位、档位与单次成本估算，注册时自动填充；这些属性挂在工具级，用于展示与使用量估算，**不按模型细分**——同一工具下换模型不改变档位与配额扣减。项目角色固定绑定 Runtime/模型，Task 不再进行阶段路由。
 
@@ -178,7 +178,7 @@ Codex 的 workspace-write 沙箱还会把每个可写根下的 `.git`、`.agents
 
 每个工具的静态声明（检测可执行名、命令模板、能力、模型清单、effort 兜底档位、升级渠道、ACP 特例）按工具拆在 `runtime/clis/` 子包里，一个工具一个模块（`clis/grok.py`、`clis/kimi.py`…）；`adapters.py` 把声明汇总成 `DEFAULT_COMMANDS`、`ACP_SERVE_COMMANDS`、`KNOWN_CLIS`、`KNOWN_MODELS`、`EFFORT_SUPPORT`、`UPDATE_SPECS` 这些注册表。新增工具时加一个声明模块并追加进 `clis.SPECS` 即可，不需要动执行器；执行行为仍由统一的 `CliAdapter`/`AcpAdapter` 承担，有原生 provider 的工具（claude/codex/pi）执行与 effort 档位在各自 provider 类里。
 
-工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`locate_binary`/`configured_models`/`update_plan`（pi 的 vendored 安装三件套；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
+工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`locate_binary`/`configured_models`/`update_plan`（pi 的 vendored 安装三件套；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）、`latest_version`（npm 之外的最新版来源，如 trae 解析 `traecli update check`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
 
 模板占位符(`render_command`):
 
@@ -193,7 +193,7 @@ Codex 的 workspace-write 沙箱还会把每个可写根下的 `.git`、`.agents
 
 ### ACP stdio(`AcpAdapter`,Grok / kimi / kiro / qoder / trae)
 
-这类 CLI 不接受"命令行传 prompt"的调用方式,而是作为 JSON-RPC 2.0 服务挂在 stdio 上(换行分隔)。固定 serve 命令在 `ACP_SERVE_COMMANDS` 中定义；Grok 以 `grok agent stdio` 启动，并用 `--cwd` 固定项目工作目录；Kimi、Qoder、Trae 会在启动 ACP 服务前逐个传入项目额外目录，Kiro 使用其 trust-all-tools 模式并由 ACP 权限请求应答完成外部访问。协议流程(`acp.py`):
+这类 CLI 不接受"命令行传 prompt"的调用方式,而是作为 JSON-RPC 2.0 服务挂在 stdio 上(换行分隔)。固定 serve 命令在 `ACP_SERVE_COMMANDS` 中定义；Grok 以 `grok agent stdio` 启动，并用 `--cwd` 固定项目工作目录；Kimi、Qoder 会在启动 ACP 服务前逐个传入项目额外目录；Trae 在 `initialize` 声明了 `sessionCapabilities.additionalDirectories`，额外目录改随 `session/new`/`session/load` 的 `additionalDirectories` 传入（traecli 0.209 起顶层 `--add-dir` 对 `acp serve` 不生效），清单只在建会话时生效，变化时长驻进程按新签名重启并重新 load；Kiro 使用其 trust-all-tools 模式并由 ACP 权限请求应答完成外部访问。协议流程(`acp.py`):
 
 ```text
 initialize → session/new|session/load → [session/set_model] → session/prompt
@@ -248,7 +248,7 @@ Agent Tool 公共区块列出当前角色的动作 scope，并注入 `MISSIONCRE
    - codex:默认通过 `codex app-server` 的 `model/list` 分页读取当前账号可用目录；协议启动失败时退回 `codex debug models --bundled`；
    - antigravity:`agy models` 返回制表符分隔的模型 slug 与显示名，平台只保留 slug；执行使用 `--model`，空值沿用 CLI 默认；
    - opencode:`opencode models`(行式 `provider/model` 目录,过滤日志噪声行);
-   - ACP 工具:一次性会话,从 `session/new` 响应解析模型目录——kimi 形态是 `configOptions` 中 `category=model` 的 select 选项;trae 形态是 `models.availableModels`(`{modelId,...}` 列表,含 `currentModelId`,与 Multica 的解析对齐),同时兼容 `available_models`/`available` 与裸数组。Grok 不读取本地凭据的过期时间；首次探测为空或只返回已知的单模型兜底 `grok-4.5` 时,独立重启 CLI 再探测一次,第二次结果无论是否仍为 4.5 都直接采用,不会无限重试;
+   - ACP 工具:一次性会话,从 `session/new` 响应解析模型目录——kimi/trae 形态是 `configOptions` 中 `category=model` 的 select 选项;只给 `models.availableModels` 的形态(`{modelId,...}` 列表,含 `currentModelId`,与 Multica 的解析对齐,如旧版 traecli)同时兼容 `available_models`/`available` 与裸数组;两者都有时以 `configOptions` 为准——traecli 0.209 的 models 块是 `glm-5.3/high` 这类「模型/档位」组合 id,不是可单独选择的模型。Grok 不读取本地凭据的过期时间；首次探测为空或只返回已知的单模型兜底 `grok-4.5` 时,独立重启 CLI 再探测一次,第二次结果无论是否仍为 4.5 都直接采用,不会无限重试;
    - claude:CLI 无枚举命令(`claude` 无 `models` 子命令,`--model` 传错值也不枚举),返回静态目录 `CLAUDE_MODEL_CATALOG`——只列 `--model` 接受的具体型号,按系列与新旧排列;稳定别名在工具自带清单里,不重复出现在这一组;
    - mock:返回工具自带清单。
 
@@ -275,18 +275,19 @@ Agent Tool 公共区块列出当前角色的动作 scope，并注入 `MISSIONCRE
 - grok:ACP serve 命令上的 `grok agent --reasoning-effort`,静态兜底档位 low/medium/high/xhigh,实际档位按模型动态发现(见下);
 - copilot:ACP serve 命令上的 `--effort`,档位 none/minimal/low/medium/high/xhigh/max(模型目录不自报按模型档位,不支持的模型由 copilot 自行忽略);
 - kimi:没有命令行档位,走 ACP 标准的会话配置项——`session/new`/`session/load` 应答的 `configOptions` 里 category=`thought_level` 的 `thinking` 选项,每轮 prompt 前经 `session/set_config_option` 在存活会话内切换,改档位不重启长驻进程;静态兜底档位 low/high/max(K3),实际档位按模型动态发现(K2.7 系列只有 on/high,见下);越界档位 kimi 报错(`-32602 Unknown thinking value`)并作为本轮失败回流到频道;
+- trae:同 kimi 走会话配置项,选项 id 为 `reasoning_effort`;不声明静态兜底档位,档位全部按模型发现(多数模型 low/high/xhigh,GLM-5.2 只有 high/xhigh;Doubao-Seed-Code、MiniMax、MiMo 等模型没有该选项,下拉禁用),模型留空(CLI 默认)时不提供 effort;越界档位 trae 报 `-32602 Unsupported reasoning effort for selected model`,作为本轮失败回流到频道;
 - antigravity:原生 `--effort`，档位 low/medium/high；
 - pi:映射为 thinking level(`--thinking`/`set_thinking_level`),档位 off/minimal/low/medium/high/xhigh;
 - mock:low/medium/high,仅供测试/演示走通链路;
 - 其余工具不支持:角色编辑器的 effort 下拉禁用,API 对非空 effort 直接 400。
 
-effort 与模型一样属于角色定义时固定的执行组合：空值 = CLI 默认，总是合法；打印模式执行时经内置命令模板的 `{effort}` 占位符注入，为空时连同紧邻标志一起移除。ACP 工具二选一:serve 命令模板带 `{effort}` 的(grok/copilot)随命令注入,协议层不再重复设置;模板不带的(kimi)由 `AcpAdapter.run` 交给 `acp.run_prompt(effort=…)`,协议层在会话自报了 thought_level 配置项时切换档位,没自报则上报「effort 未生效」状态而不是静默吞掉。
+effort 与模型一样属于角色定义时固定的执行组合：空值 = CLI 默认，总是合法；打印模式执行时经内置命令模板的 `{effort}` 占位符注入，为空时连同紧邻标志一起移除。ACP 工具二选一:serve 命令模板带 `{effort}` 的(grok/copilot)随命令注入,协议层不再重复设置;模板不带的(kimi/trae)由 `AcpAdapter.run` 交给 `acp.run_prompt(effort=…)`,协议层在会话自报了 thought_level 配置项时切换档位,没自报则上报「effort 未生效」状态而不是静默吞掉。
 
 ### 按模型动态发现档位
 
 同一个工具的不同模型支持的档位并不一样：grok-4.6 有 low/medium/high/xhigh，grok-4.5 只有 low/medium/high。因此档位不能只按 adapter 记死。
 
-ACP 工具自报按模型档位有两条路,`acp.list_model_catalog()` 都把它和模型目录**在同一次探测里**一起取回——档位表是模型目录的副产品，不额外起进程:grok 在 `session/new` 响应的 `models.availableModels[]._meta` 里自报 `supportsReasoningEffort` 与 `reasoningEfforts`(厂商私有扩展,由 `clis/grok.py` 的 `parse_model_efforts` 钩子解析);kimi 用 ACP 标准的 `configOptions`,但 `session/new` 只给**当前模型**的 `thinking` 取值,而取值随模型变化(K3/K3-256k 为 low/high/max,K2.7 系列为 on/high),所以协议层在同一探测会话里逐模型 `session/set_config_option(model)` 并从应答的 `configOptions` 读回该模型的档位,不需要工具钩子。往上依次是 `adapters.list_runtime_model_catalog()`（按 `EFFORT_ORDER` 规范成低到高，grok 自己按高到低返回）、`RuntimeManager.list_model_catalog()`，最后由 `ApiContext.discovered_catalog()` 连同模型目录一起缓存 10 分钟。
+ACP 工具自报按模型档位有两条路,`acp.list_model_catalog()` 都把它和模型目录**在同一次探测里**一起取回——档位表是模型目录的副产品，不额外起进程:grok 在 `session/new` 响应的 `models.availableModels[]._meta` 里自报 `supportsReasoningEffort` 与 `reasoningEfforts`(厂商私有扩展,由 `clis/grok.py` 的 `parse_model_efforts` 钩子解析);kimi 用 ACP 标准的 `configOptions`,但 `session/new` 只给**当前模型**的 `thinking` 取值,而取值随模型变化(K3/K3-256k 为 low/high/max,K2.7 系列为 on/high),所以协议层在同一探测会话里逐模型 `session/set_config_option(model)` 并从应答的 `configOptions` 读回该模型的档位,不需要工具钩子;trae 的 `reasoning_effort` 同理,没有该选项的模型不入表。往上依次是 `adapters.list_runtime_model_catalog()`（按 `EFFORT_ORDER` 规范成低到高，grok 自己按高到低返回）、`RuntimeManager.list_model_catalog()`，最后由 `ApiContext.discovered_catalog()` 连同模型目录一起缓存 10 分钟。
 
 `RuntimeManager.effort_options(backend, model, model_efforts)` 决定最终清单：给定模型在自报表里有档位就用它，否则经 `provider_for()` 回退到该 Backend 的 provider 声明的静态档位。模型留空（CLI 默认模型）也走回退，因为此时并不知道 CLI 最终选哪个模型。自报表由调用方传入（API 用缓存，CLI 现查），这个函数本身不探测 runtime。
 
@@ -294,7 +295,7 @@ ACP 工具自报按模型档位有两条路,`acp.list_model_catalog()` 都把它
 
 这一层校验是必需的，因为 **`grok agent` 不校验档位**：与 codex（app-server 报错并回流到频道）不同，grok 对越界档位不报错，而是静默回落到该模型默认档位（xhigh + grok-4.5 实测落到 high）。放过去用户在频道里看不到任何提示，只能在保存角色时按所选模型拦住。
 
-grok/copilot 的 effort 进的是 ACP serve 命令，改档位会改变 `acp.py` 的 client signature，长驻会话按新命令重启进程，不会沿用旧档位。kimi 的档位不在命令里,每轮 prompt 前 `set_config_option` 覆盖,存活会话直接切换;与模型一样,effort 改回空值(CLI 默认)时不再下发,会话沿用上次设置的档位直到进程回收。
+grok/copilot 的 effort 进的是 ACP serve 命令，改档位会改变 `acp.py` 的 client signature，长驻会话按新命令重启进程，不会沿用旧档位。kimi/trae 的档位不在命令里,每轮 prompt 前 `set_config_option` 覆盖,存活会话直接切换;与模型一样,effort 改回空值(CLI 默认)时不再下发,会话沿用上次设置的档位直到进程回收。
 
 ## 升级
 
@@ -303,7 +304,7 @@ grok/copilot 的 effort 进的是 ACP serve 命令，改档位会改变 `acp.py`
 - **npm 托管优先**:二进制 realpath 落在 `node_modules/` 下才认定为 npm 托管,此时检查(查询 npm registry `latest`)与更新(`npm install -g <pkg>@latest`)走同一渠道,避免自更新器把新版本装到别处、npm 里的旧副本继续占着 PATH;
 - **非 npm 安装**用工具自带的更新子命令(`claude update`、`opencode upgrade` 等),自更新器了解自己的安装方式;
 - kimi 的当前 Kimi Code 原生版与 npm 版均从 `@moonshot-ai/kimi-code` 查询最新版,不使用旧 Python `kimi-cli` 的 PyPI 版本;原生安装执行 `kimi upgrade --yes`,跳过服务端无交互 stdin 时的确认提示,npm 安装仍按上面的 npm 托管规则更新。
-- copilot 常由 VS Code 扩展托管,非 npm 安装时不提供更新;trae 只提供自更新按钮、不做最新版比对。
+- copilot 常由 VS Code 扩展托管,非 npm 安装时不提供更新;trae 是原生安装器安装:最新版经 `CliSpec.latest_version` 钩子解析 `traecli update check` 的文本输出,更新执行 `traecli update`(无确认提示)。
 
 约束:更新命令是固定白名单,不拼接用户输入;同一 runtime 的更新持锁互斥(并发请求 409);更新期间该 runtime 不派发聊天执行,避免 Agent 跑在半更新的二进制上;版本比较只认语义版本数字段。
 

@@ -49,7 +49,7 @@ Prompt 要求 Agent 只读写“本次可读写目录”列出的路径及其子
 
 ### `documents/`
 
-`documents/` 是指向项目文档工作树的符号链接。Agent 可以读取 Markdown 或其他项目资料；聊天角色发布或替换文件时应使用 `document.publish` Agent Tool 动作，移动或重命名文件时使用 `document.rename`，以便在当前回合得到路径、冲突和权限错误，并产生带角色身份的审计。主控可用 `document.delete` 删除文件，删除本身也会形成 Git 版本。执行结束后扫描直接编辑内容只作为旧会话兼容。该文档库的 Git 历史不属于业务代码仓。人类从 Web 文档页上传的文本或二进制文件也进入同一工作树和版本历史，不会复制到业务源码目录。
+`documents/` 是指向项目文档工作树的符号链接。Agent 可以读取 Markdown 或其他项目资料；聊天角色发布或替换文件时应使用 `document.publish` Agent Tool 动作，移动或重命名文件时使用 `document.rename`，以便在当前回合得到路径、冲突和权限错误，并产生带角色身份的审计。主控可用 `document.delete` 删除文件，删除本身也会形成 Git 版本。执行结束后扫描直接编辑内容只作为旧会话兼容。该文档库的 Git 历史不属于业务代码仓，也不在工作区里；Agent 用 `document.history` 列出版本、读取旧版本内容（准则与 Skill 对应 `guideline.history` / `skill.history`）。人类从 Web 文档页上传的文本或二进制文件也进入同一工作树和版本历史，不会复制到业务源码目录。
 
 文档目录不是独立资源。`a/b/c.md` 的相对路径会在 Web 中形成 `a/b` 目录和其中的 `c.md`；发布或重命名文件时自动创建目标父目录。空目录不进入文件清单和 Git 历史，因此没有单独的目录创建、移动、重命名或删除动作。
 

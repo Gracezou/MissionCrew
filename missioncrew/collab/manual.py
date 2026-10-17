@@ -122,6 +122,10 @@ An orchestrator's turn:
 - `document.rename`: pass `source` and a `target` that does not exist yet; directories are implied
   by relative document paths, and there are no separate actions to create, move or delete them.
 - `document.delete` (orchestrator only): moves the document to the project recycle bin.
+- `document.history`: the version history is not in `documents/`; without `revision` it lists a
+  document's versions newest first (also after renames or deletion), and with `revision` it
+  returns that version's content (`content_base64` for non-UTF-8 files). To roll a document
+  back, read the old version and publish it again with `overwrite: true`.
 - Formal project documents, collaboration drafts, reports and verification records are all
   published to `documents/` through the document library; never write them into `tasks/`.
 
@@ -268,7 +272,10 @@ An orchestrator's turn:
   or change guidelines and skills only with `guideline.save` / `skill.save`. These views only
   hold enabled entries: `guideline.list` / `skill.list` (orchestrator only) list every entry
   including disabled ones, and with `name` / `id` return the full markdown (for a skill also its
-  file list) to edit, or to re-enable by saving it again with `enabled: true`. If the call is
+  file list) to edit, or to re-enable by saving it again with `enabled: true`.
+  `guideline.history` / `skill.history` (orchestrator only) list an entry's versions and, with
+  `revision`, return that version's full markdown (for a skill also its file list, and one
+  file's content with `file`); to roll back, save the old content again. If the call is
   refused, publish the draft to the document library with `document.publish`, link it in your
   final reply and state that the guideline or skill is not saved yet, so a human (or the
   orchestrator) can save it.

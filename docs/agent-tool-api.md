@@ -64,14 +64,15 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 | `task.delete` / `task.archive` / `task.restore` | 禁止 | 允许 |
 | `document.publish` | 允许 | 允许 |
 | `document.rename` | 允许 | 允许 |
+| `document.history` | 允许 | 允许 |
 | `document.delete` | 禁止 | 允许 |
 | `message.publish` | 禁止 | 允许 |
 | `channel.runs.list` / `channel.run.stop` / `channel.history` | 禁止 | 允许 |
 | `channel.create` / `channel.update` / `channel.archive` / `channel.restore` | 禁止 | 允许 |
 | `dashboard.list` / `dashboard.save` / `dashboard.delete` | 禁止 | 允许 |
 | `board_source.list` / `board_source.save` / `board_source.delete` | 禁止 | 允许 |
-| `guideline.list` / `guideline.save` / `guideline.delete` | 禁止 | 允许 |
-| `skill.list` / `skill.save` / `skill.delete` | 禁止 | 允许 |
+| `guideline.list` / `guideline.history` / `guideline.save` / `guideline.delete` | 禁止 | 允许 |
+| `skill.list` / `skill.history` / `skill.save` / `skill.delete` | 禁止 | 允许 |
 | `automation.list` / `automation.save` / `automation.run` / `automation.delete` | 禁止 | 允许 |
 | `recycle.list` / `recycle.restore` / `recycle.purge` | 禁止 | 允许 |
 
@@ -122,6 +123,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 - `board_source.save` 创建或更新自定义任务数据源（`columns` 声明状态取值，`cards` 按 id 整体同步为该源的任务：新增、更新、删除本次未出现的），供 `dashboard.save` 的 taskboard 面板通过 `source` 绑定；新任务会走项目自动处理规则。已有任务只更新卡片带了的字段与属性：没带 `status` 保留本地状态，`labels` 里的普通标签整组替换，`属性: 值` 标签与 `properties` 只替换同名属性（`null` 清空），合并规则详见 [automation.md](automation.md)。`board_source.delete` 在数据源仍被面板引用时返回 `in_use`，删除连带该源全部任务。
 - `automation.save` 按短 id 新建或按字段合并更新脚本：`script` 是脚本全文（有 shebang 按可执行文件运行，否则用 bash），`cron` 是五段 crontab（空字符串 = 仅手动触发），`actions` 是脚本令牌的动作白名单，`timeout_seconds` 是单次运行超时。`automation.delete` 删除脚本并撤销其令牌、清除运行记录。`automation.run` 立即在后台手动触发一次（停用定时的脚本也可以），返回 `run_id`；同一脚本上一次还没跑完时返回 `in_use`。
 - 不在 Agent 工作区里的配置用只读的 `*.list` 动作按需读取，改之前先读：`dashboard.list`（带 `id` 返回完整 layout/filters/group_by）、`board_source.list`（状态取值、任务数、绑定的面板）、`automation.list`（带 `id` 返回脚本全文与最近 `runs` 次运行，默认 5、最多 20，每次运行的 stdout/stderr 只回传末尾 4000 字符并标注是否截断）、`guideline.list` / `skill.list`（含停用条目；带 `name` / `id` 返回完整 Markdown，Skill 另带包内文件清单，可原样交回 `guideline.save` / `skill.save` 修改或重新启用）。
+- 文档、准则与 Skill 的 Git 历史保存在 Agent 工作区之外的独立版本库里，用只读的 `*.history` 读取：`document.history`（`path`）、`guideline.history`（`name`）、`skill.history`（`id`）。不带 `revision` 时按新到旧列出版本（`revision`、`created_at`、`actor`、`message`，默认 20 条、`limit` 最多 100；文档历史跟随重命名，已删除的文档也能查）；带 `revision` 时返回该版本内容：文档为 `content`（非 UTF-8 文件为 `content_base64`），准则为完整 `markdown`，Skill 为 `SKILL.md` 与文件清单，另传 `file` 读取包内单个文件。单个版本超过 5 MB 返回 `file_too_large`。没有单独的恢复动作：回滚就是读出旧版本再用对应的 `*.publish` / `*.save` 保存，形成新版本、历史保持完整。
 - `channel.update` 修改频道名称、用途或工作目录（不传 `id` 时默认当前频道）；工作目录规则与 `channel.create` 相同，传空字符串改回平台内置工作区，新目录从该频道下一轮执行起生效。`channel.archive` 把频道归档为只读并停止其持久 Runtime，`general`、页面对话频道和仍有活动运行的频道（包括当前频道）会被拒绝（`general_channel`、`content_channel`、`in_use`）；`channel.restore` 取消归档。已归档或页面对话频道不能修改（`channel_archived`、`content_channel`）。Web 端频道头部的「编辑频道」与 `PATCH /api/chat/channels/{id}` 共用同一套规则。
 - `task.archive` 把 Task 从看板和 `tasks/` 快照中收起，保留正文与简报；`task.restore` 恢复归档 Task。
 - 频道、面板、准则和 Skill 的 ID、项目归属、工作目录和 Markdown 属性都在统一动作实现中校验。

@@ -25,7 +25,8 @@ from . import channels as channel_ops
 from .content_channels import content_channel, rebind_content_channel
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls, safe_relative_path)
-from .guidelines import save_guideline, sync_guideline_library
+from .guidelines import (guideline_history, read_guideline_version, save_guideline,
+                         sync_guideline_library)
 from .recycle_bin import (RecycleConflictError, list_recycle_items,
                           purge_recycle_item, recycle_bin_url,
                           recycle_dashboard, recycle_document,
@@ -34,8 +35,9 @@ from .recycle_bin import (RecycleConflictError, list_recycle_items,
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
                             skill_resource_url, task_resource_url)
-from .skills import (save_project_skill, save_project_skill_markdown,
-                     skill_package, sync_project_skill_library)
+from .skill_versions import skill_version_library
+from .skills import (read_skill_version, save_project_skill, save_project_skill_markdown,
+                     skill_history, skill_package, sync_project_skill_library)
 from .workspace import chat_workspace_dir, write_task_files
 from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            BoardDataSource, BoardWidget,
@@ -49,6 +51,8 @@ REQUEST_ID_RE = re.compile(r"[\w-]{1,100}")
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 # automation.list 带 id 时每条运行记录的 stdout/stderr 只回传末尾这么多字符
 AUTOMATION_OUTPUT_TAIL = 4000
+# *.history 读取单个历史版本的上限;更大的文件请人类在 Web 端下载
+MAX_HISTORY_READ_BYTES = 5 * 1024 * 1024
 TOKEN_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 TOKEN_RENEWAL_WINDOW_SECONDS = 24 * 60 * 60
 LOGGER = logging.getLogger(__name__)
@@ -196,6 +200,18 @@ ACTION_DEFINITIONS = {
                         "keeping its Git history"),
         "orchestrator_only": True,
         "arguments": {"path": "path in the document library"},
+    },
+    "document.history": {
+        "description": ("Read a document's version history (the history is not in the "
+                        "workspace): without revision, list its versions newest first (also for "
+                        "renamed or deleted documents); with revision, return that version's "
+                        "content (content, or content_base64 for non-UTF-8 files)"),
+        "orchestrator_only": False,
+        "arguments": {
+            "path": "path in the document library",
+            "revision": "optional revision from the version list",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
     },
     "message.publish": {
         "description": (
@@ -370,6 +386,17 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "arguments": {"name": "guideline name"},
     },
+    "guideline.history": {
+        "description": ("Read a guideline's version history: without revision, list its "
+                        "versions newest first; with revision, return that version's full "
+                        "markdown"),
+        "orchestrator_only": True,
+        "arguments": {
+            "name": "guideline name",
+            "revision": "optional revision from the version list",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
+    },
     "guideline.list": {
         "description": ("On demand, list all project guidelines including disabled ones (the "
                         "workspace guidelines/ view only has enabled ones); pass name to get the "
@@ -387,6 +414,18 @@ ACTION_DEFINITIONS = {
         "description": "Move a complete skill package to the unified recycle bin",
         "orchestrator_only": True,
         "arguments": {"id": "skill id"},
+    },
+    "skill.history": {
+        "description": ("Read a skill package's version history: without revision, list its "
+                        "versions newest first; with revision, return that version's SKILL.md "
+                        "and file list, and with file also that file's content"),
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "skill id",
+            "revision": "optional revision from the version list",
+            "file": "with revision: optional path inside the package, e.g. scripts/run.sh",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
     },
     "skill.list": {
         "description": ("On demand, list all project skills including disabled ones (the "
@@ -488,6 +527,7 @@ ACTION_ARGUMENTS = {
     },
     "document.rename": {"source", "target"},
     "document.delete": {"path"},
+    "document.history": {"path", "revision", "limit"},
     "message.publish": {"channel", "content", "mentions"},
     "channel.runs.list": {"channel"},
     "channel.run.stop": {"run_id"},
@@ -508,11 +548,13 @@ ACTION_ARGUMENTS = {
     "guideline.save": {"markdown", "enabled", "original_name"},
     "guideline.delete": {"name"},
     "guideline.list": {"name"},
+    "guideline.history": {"name", "revision", "limit"},
     "skill.save": {
         "id", "markdown", "enabled", "name", "description", "instructions",
     },
     "skill.delete": {"id"},
     "skill.list": {"id"},
+    "skill.history": {"id", "revision", "file", "limit"},
     "automation.save": {
         "id", "name", "description", "script", "cron", "enabled", "actions",
         "timeout_seconds",
@@ -533,6 +575,7 @@ CONVERSATION_RECEIPT_ACTIONS = (
         "message.publish", "channel.runs.list", "channel.run.stop",
         "channel.history", "channel.list", "recycle.list", "dashboard.list",
         "board_source.list", "guideline.list", "skill.list", "automation.list",
+        "document.history", "guideline.history", "skill.history",
     }
 )
 
@@ -948,6 +991,7 @@ class AgentActionService:
             "document.publish": self._publish_document,
             "document.rename": self._rename_document,
             "document.delete": self._delete_document,
+            "document.history": self._document_history,
             "message.publish": self._publish_message,
             "channel.runs.list": self._list_channel_runs,
             "channel.run.stop": self._stop_channel_run,
@@ -966,9 +1010,11 @@ class AgentActionService:
             "guideline.save": self._save_guideline,
             "guideline.delete": self._delete_guideline,
             "guideline.list": self._list_guidelines,
+            "guideline.history": self._guideline_history,
             "skill.save": self._save_skill,
             "skill.delete": self._delete_skill,
             "skill.list": self._list_skills,
+            "skill.history": self._skill_history,
             "automation.save": self._save_automation,
             "automation.delete": self._delete_automation,
             "automation.list": self._list_automations,
@@ -2014,6 +2060,101 @@ class AgentActionService:
         enabled = sum(1 for row in rows if row["enabled"])
         return {"summary": f"项目 {project.id} 共 {len(rows)} 个 Skill(启用 {enabled} 个)",
                 "skills": rows}
+
+
+    @staticmethod
+    def _history_limit(arguments: dict) -> int:
+        limit = arguments.get("limit", 20)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise AgentToolError("invalid_arguments", "limit 必须是 1..100 的整数")
+        return limit
+
+    @staticmethod
+    def _history_content(data: bytes) -> dict:
+        """历史版本正文:UTF-8 文本原样返回,否则给 base64(与 document.publish 对称)。"""
+        if len(data) > MAX_HISTORY_READ_BYTES:
+            raise AgentToolError(
+                "file_too_large",
+                f"该版本超过 {MAX_HISTORY_READ_BYTES // 1024 // 1024} MB，请在 Web 端下载", 413)
+        try:
+            return {"content": data.decode("utf-8")}
+        except UnicodeDecodeError:
+            return {"content_base64": base64.b64encode(data).decode("ascii")}
+
+    def _document_history(self, project: Project, _identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        path = str(arguments.get("path") or "").strip()
+        if not path:
+            raise AgentToolError("invalid_arguments", "需要提供 path")
+        library = library_for(project.id)
+        url = document_resource_url(project.id, path)
+        revision = str(arguments.get("revision") or "").strip()
+        if revision:
+            try:
+                data = library.read_history_bytes(path, revision)
+            except FileNotFoundError as exc:
+                raise AgentToolError("not_found", str(exc), 404) from exc
+            return {"summary": f"文档 {path} 在版本 {revision[:10]} 的内容",
+                    "path": path, "revision": revision, "resource_url": url,
+                    **self._history_content(data)}
+        versions = library.history(path, self._history_limit(arguments))
+        if not versions:
+            raise AgentToolError("not_found", f"文档没有历史版本: {path}", 404)
+        return {"summary": f"文档 {path} 最近 {len(versions)} 个版本",
+                "path": path, "versions": versions, "resource_url": url}
+
+    def _guideline_history(self, project: Project, _identity: AgentIdentity,
+                           arguments: dict, _context: AgentRunContext) -> dict:
+        name = str(arguments.get("name") or "").strip()
+        if not name:
+            raise AgentToolError("invalid_arguments", "需要提供 name")
+        sync_guideline_library(self.store, project)
+        url = guideline_resource_url(project.id, name)
+        revision = str(arguments.get("revision") or "").strip()
+        try:
+            if revision:
+                version = read_guideline_version(self.store, project, name, revision)
+                return {"summary": f"准则 {name} 在版本 {revision[:10]} 的全文",
+                        "name": name, "resource_url": url,
+                        "version": {key: version[key] for key in (
+                            "revision", "created_at", "actor", "message")},
+                        "markdown": version["markdown"]}
+            versions = guideline_history(
+                self.store, project, name, self._history_limit(arguments))
+        except FileNotFoundError as exc:
+            raise AgentToolError("not_found", str(exc), 404) from exc
+        return {"summary": f"准则 {name} 最近 {len(versions)} 个版本",
+                "name": name, "versions": versions, "resource_url": url}
+
+    def _skill_history(self, project: Project, _identity: AgentIdentity,
+                       arguments: dict, _context: AgentRunContext) -> dict:
+        skill_id = self._control_id(arguments.get("id"))
+        url = skill_resource_url(project.id, skill_id)
+        revision = str(arguments.get("revision") or "").strip()
+        file = str(arguments.get("file") or "").strip()
+        if file and not revision:
+            raise AgentToolError("invalid_arguments", "file 需要和 revision 一起提供")
+        try:
+            if revision:
+                package = read_skill_version(self.store, project, skill_id, revision)
+                result = {"summary": f"Skill {skill_id} 在版本 {revision[:10]} 的内容",
+                          "id": skill_id, "revision": package["revision"],
+                          "markdown": package["markdown"], "files": package["files"],
+                          "resource_url": url}
+                if file:
+                    if file not in package["files"]:
+                        raise AgentToolError(
+                            "not_found", f"该版本的 Skill 包里没有文件: {file}", 404)
+                    data = skill_version_library(project.id).read_bytes(
+                        skill_id, file, package["revision"])
+                    result.update(file=file, **self._history_content(data))
+                return result
+            versions = skill_history(
+                self.store, project, skill_id, self._history_limit(arguments))
+        except FileNotFoundError as exc:
+            raise AgentToolError("not_found", str(exc), 404) from exc
+        return {"summary": f"Skill {skill_id} 最近 {len(versions)} 个版本",
+                "id": skill_id, "versions": versions, "resource_url": url}
 
     def _list_recycle_bin(self, project: Project, _identity: AgentIdentity,
                           _arguments: dict, _context: AgentRunContext) -> dict:

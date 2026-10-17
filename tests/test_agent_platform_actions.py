@@ -288,3 +288,81 @@ def test_channel_patch_api_shares_agent_rules(seeded):
         assert client.post("/api/chat/channels/general/archive").status_code == 409
         assert client.patch("/api/chat/channels/webshop:nope",
                             json={"name": "y"}).status_code == 404
+
+
+def test_document_history_lists_versions_and_reads_old_content(seeded):
+    """普通角色也能读文档历史(与 document.publish 同权),只读不留回执。"""
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat, "dev")
+    for content in ("# v1\n", "# v2\n"):
+        _call(chat, identity, run_id, "document.publish",
+              {"path": "specs/plan.md", "content": content, "overwrite": True})
+    _call(chat, identity, run_id, "document.publish",
+          {"path": "bin/blob.dat", "content_base64": "AP8=", "overwrite": True})
+
+    listed = _call(chat, identity, run_id, "document.history", {"path": "specs/plan.md"})
+    versions = listed["versions"]
+    assert len(versions) == 2 and versions[0]["created_at"] >= versions[1]["created_at"]
+    old = _call(chat, identity, run_id, "document.history",
+                {"path": "specs/plan.md", "revision": versions[-1]["revision"]})
+    assert old["content"] == "# v1\n"
+    blob_rev = _call(chat, identity, run_id, "document.history",
+                     {"path": "bin/blob.dat"})["versions"][0]["revision"]
+    blob = _call(chat, identity, run_id, "document.history",
+                 {"path": "bin/blob.dat", "revision": blob_rev})
+    assert blob["content_base64"] == "AP8=" and "content" not in blob
+    assert not _receipts(seeded, "document.history")
+
+    for arguments, code in (({"path": "nope.md"}, "not_found"),
+                            ({"path": "specs/plan.md", "limit": 0}, "invalid_arguments"),
+                            ({"path": "specs/plan.md", "revision": "0" * 40}, "not_found")):
+        with pytest.raises(AgentToolError) as error:
+            _call(chat, identity, run_id, "document.history", arguments)
+        assert error.value.code == code, arguments
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    assert "guideline.history" not in actions and "skill.history" not in actions
+
+
+def test_guideline_and_skill_history_read_old_versions(seeded):
+    project = seeded.get_project("webshop")
+    for body in ("旧规则。", "新规则。"):
+        save_guideline(seeded, seeded.get_project("webshop"),
+                       f"---\nname: 评审规范\ndescription: 评审要求\n---\n\n{body}\n",
+                       enabled=True, actor="human")
+    for body in ("第一版。", "第二版。"):
+        save_project_skill_markdown(
+            seeded, seeded.get_project("webshop"), "release-notes",
+            f"---\nname: 发布说明\ndescription: 写发布说明\n---\n\n{body}\n",
+            enabled=True, actor="human")
+    assert project.id == "webshop"
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat)
+
+    guideline_versions = _call(chat, identity, run_id, "guideline.history",
+                               {"name": "评审规范"})["versions"]
+    assert len(guideline_versions) >= 2
+    old_guideline = _call(chat, identity, run_id, "guideline.history",
+                          {"name": "评审规范", "revision": guideline_versions[-1]["revision"]})
+    assert "旧规则。" in old_guideline["markdown"]
+    assert old_guideline["markdown"].startswith("---\n")
+
+    skill_versions = _call(chat, identity, run_id, "skill.history",
+                           {"id": "release-notes"})["versions"]
+    assert len(skill_versions) >= 2
+    old_rev = skill_versions[-1]["revision"]
+    old_skill = _call(chat, identity, run_id, "skill.history",
+                      {"id": "release-notes", "revision": old_rev})
+    assert "第一版。" in old_skill["markdown"] and old_skill["files"] == ["SKILL.md"]
+    with_file = _call(chat, identity, run_id, "skill.history",
+                      {"id": "release-notes", "revision": old_rev, "file": "SKILL.md"})
+    assert "第一版。" in with_file["content"]
+
+    for action, arguments, code in (
+            ("guideline.history", {"name": "不存在"}, "not_found"),
+            ("skill.history", {"id": "release-notes", "file": "SKILL.md"}, "invalid_arguments"),
+            ("skill.history", {"id": "release-notes", "revision": old_rev,
+                               "file": "missing.md"}, "not_found")):
+        with pytest.raises(AgentToolError) as error:
+            _call(chat, identity, run_id, action, arguments)
+        assert error.value.code == code, (action, arguments)
+    assert not _receipts(seeded, "guideline.history") and not _receipts(seeded, "skill.history")

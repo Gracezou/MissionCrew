@@ -138,7 +138,7 @@ def test_agent_tool_api_returns_structured_results_and_permission_errors(seeded)
     capabilities = client.get("/api/agent/v1/actions", headers=headers)
     assert capabilities.status_code == 200
     assert set(capabilities.json()["result"]["actions"]) == {
-        "document.publish", "document.rename",
+        "document.publish", "document.rename", "document.history",
         "task.brief", "task.create", "task.update"}
 
     published = client.post("/api/agent/v1/actions", headers=headers, json={

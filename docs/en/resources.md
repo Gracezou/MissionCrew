@@ -28,7 +28,7 @@ Each resource type below has corresponding Agent Tool actions (see [Agent Tool A
 | Resource | Canonical URL | Stable identifier | What the Web opens |
 | --- | --- | --- | --- |
 | Channel | `/resources/<project>/channels/<channel-id>` | Short channel ID within the project | The corresponding chat channel |
-| Task | `/resources/<project>/tasks/<task-id>` | Global task ID | The built-in task board with the task's details |
+| Task | `/resources/<project>/tasks/<task-id>` | Global task ID | Opened directly: the built-in task board with the task's details; clicking a task link of the current project inside a page: a details pop-up over that page |
 | Custom dashboard | `/resources/<project>/dashboards/<board-id>` | Short dashboard ID within the project | The corresponding custom dashboard |
 | Built-in task board | `/resources/<project>/dashboards/tasks` | Reserved identifier `tasks` (a frontend routing convention; the backend currently does not prevent creating a custom dashboard with the same ID, so avoid using that ID) | The project task board |
 | Guideline | `/resources/<project>/guidelines/<name>` | `name` in the Markdown frontmatter | The corresponding guideline edit/preview page |
@@ -68,7 +68,7 @@ Main APIs:
 
 ### Tasks
 
-A task is an issue-like collaboration entry point, and its source of truth is the platform database. It contains a title, a summary, a body, a status, labels, one or more channel bindings, and multiple append-only status briefs. A task URL opens the built-in task board and expands the task's details.
+A task is an issue-like collaboration entry point, and its source of truth is the platform database. It contains a title, a summary, a body, a status, labels, one or more channel bindings, and multiple append-only status briefs. Visiting a task URL directly opens the built-in task board and expands the task's details; clicking a task link of the current project in chat, documents, or other pages only pops up the details dialog over the current page without switching pages (Ctrl/⌘-click still opens the full board in a new tab), while task links of other projects navigate as usual.
 
 The agent harness also provides Markdown snapshots in `.missioncrew/tasks/`. Agents modify the source of truth with `task.create`, `task.update`, and `task.brief`, and the project orchestrator deletes with `task.delete`; humans use the same set of Web/API fields. On deletion, the task and its status briefs go into the project recycle bin together, and after a restore it keeps the original task id. When a task is processed, the platform does not start a separate execution engine; instead it sends an ordinary message in each bound channel: to the project orchestrator by default, or to the specified role when the message carries a structured mention or matches an automatic handling rule, and the existing channel collaboration flow takes over.
 

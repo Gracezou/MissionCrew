@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -508,6 +511,70 @@ def test_legacy_board_source_cards_and_filters_migrate(store):
         "status: 待处理", "status: 已完成 & bug"]
     # 迁移可重入:再次打开不重复建任务
     assert len(Store(store.path).list_tasks("demo", source_id="gitcode")) == 1
+
+
+WEB_JS = Path(__file__).resolve().parents[1] / "missioncrew" / "web" / "js"
+
+# 在 node 里装载 markdown.js 与 router.js,替换掉 openTask/applyRoute 等页面依赖,
+# 只观察资源链接点击走了"弹窗"还是"路由跳转"
+_RESOURCE_LINK_SCRIPT = r"""
+const fs = require("fs");
+const vm = require("vm");
+const calls = [];
+const context = {
+  location: { origin: "http://localhost", pathname: "/resources/webshop/channels/general" },
+  window: { addEventListener() {} },
+  localStorage: { getItem: () => null },
+  history: { pushState: (_, __, url) => calls.push(["push", url]) },
+  toast: message => calls.push(["toast", message]),
+  overview: { projects: [{ id: "webshop" }, { id: "other" }] },
+  currentProject: "webshop",
+  currentTab: "chat",
+};
+vm.createContext(context);
+for (const name of ["markdown.js", "router.js"])
+  vm.runInContext(fs.readFileSync(process.argv[1] + "/" + name, "utf8"), context);
+context.applyRoute = async () => calls.push(["route"]);
+context.openTask = async (id, updateRoute) => calls.push(["task", id, updateRoute]);
+const cases = JSON.parse(fs.readFileSync(0, "utf8"));
+const results = cases.map(([tab, href, modifier]) => {
+  calls.length = 0;
+  context.currentTab = tab;
+  let prevented = false;
+  const event = { ctrlKey: modifier, metaKey: false, shiftKey: false, altKey: false,
+                  preventDefault: () => { prevented = true; } };
+  const returned = context.openMissionCrewResourceLink(event, href);
+  return { returned, prevented, calls: calls.slice() };
+});
+process.stdout.write(JSON.stringify(results));
+"""
+
+
+def test_task_resource_link_pops_up_details_without_leaving_page():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser router")
+    cases = [
+        ("chat", "/resources/webshop/tasks/T-7", False),
+        ("board", "/resources/webshop/tasks/T-7", False),
+        ("chat", "/resources/other/tasks/T-9", False),
+        ("chat", "/resources/webshop/channels/dev", False),
+        ("chat", "/resources/webshop/tasks/T-7", True),
+    ]
+    result = subprocess.run(
+        [node, "-e", _RESOURCE_LINK_SCRIPT, str(WEB_JS)],
+        input=json.dumps(cases), text=True, capture_output=True, check=True)
+    in_chat, on_board, other_project, channel, modified = json.loads(result.stdout)
+
+    # 本项目 Task:原地弹出详情,不 pushState、不走路由;只有看板页才把 Task 写进 URL
+    assert in_chat == {"returned": False, "prevented": True,
+                       "calls": [["task", "T-7", False]]}
+    assert on_board["calls"] == [["task", "T-7", True]]
+    # 其他项目的 Task 与非 Task 资源照旧跳转
+    assert other_project["calls"] == [["push", "/resources/other/tasks/T-9"], ["route"]]
+    assert channel["calls"] == [["push", "/resources/webshop/channels/dev"], ["route"]]
+    # 带修饰键交还浏览器默认行为(新标签页打开完整页面)
+    assert modified == {"returned": True, "prevented": False, "calls": []}
 
 
 def test_task_board_exposes_activity_order_and_archive_filter(seeded):

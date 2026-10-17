@@ -245,10 +245,19 @@ async function applyRoute() {
 }
 
 function openMissionCrewResourceLink(event, target) {
+  // 带修饰键的点击交还浏览器(新标签页/新窗口打开完整页面)
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return true;
   event.preventDefault();
   const resource = missionCrewResourceReference(target);
   if (!resource || !overview.projects.some(project => project.id === resource.projectId)) {
     toast("找不到 MissionCrew 资源", "error");
+    return false;
+  }
+  // 本项目的 Task 链接在当前页面上直接弹出详情，不切到任务看板；
+  // 只有在看板页上才把 Task 写进 URL，与点看板卡片一致
+  const [taskId] = resource.segments;
+  if (resource.type === "tasks" && taskId && resource.projectId === currentProject) {
+    openTask(taskId, currentTab === "board").catch(() => {});
     return false;
   }
   history.pushState(null, "", resource.url);

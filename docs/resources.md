@@ -28,7 +28,7 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 | 资源 | 规范 URL | 稳定标识 | Web 打开结果 |
 | --- | --- | --- | --- |
 | 频道 | `/resources/<project>/channels/<channel-id>` | 项目内频道短 ID | 对应聊天频道 |
-| Task | `/resources/<project>/tasks/<task-id>` | 全局 Task ID | 内置 Task 看板及详情 |
+| Task | `/resources/<project>/tasks/<task-id>` | 全局 Task ID | 直接打开时进入内置 Task 看板并展开详情；页面内点击本项目的 Task 链接在当前页弹出详情 |
 | 自定义面板 | `/resources/<project>/dashboards/<board-id>` | 项目内面板短 ID | 对应自定义面板 |
 | 内置任务看板 | `/resources/<project>/dashboards/tasks` | 保留标识 `tasks`（由前端路由约定；后端目前不阻止创建同名自定义面板，应避免使用该 ID） | 项目任务看板 |
 | 准则 | `/resources/<project>/guidelines/<name>` | Markdown frontmatter 的 `name` | 对应准则编辑/预览页 |
@@ -68,7 +68,7 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 ### Task
 
-Task 是类似 Issue 的协作入口，事实源是平台数据库。它包含标题、简介、正文、状态、标签、一个或多个 Channel 绑定，以及多条追加式状态简报。Task URL 打开内置任务看板并展开详情。
+Task 是类似 Issue 的协作入口，事实源是平台数据库。它包含标题、简介、正文、状态、标签、一个或多个 Channel 绑定，以及多条追加式状态简报。直接访问 Task URL 会打开内置任务看板并展开详情；在聊天、文档等页面里点击本项目的 Task 链接只在当前页弹出详情窗口，不切换页面（按住 Ctrl/⌘ 点击仍在新标签页打开完整看板），其他项目的 Task 链接照常跳转。
 
 Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 `task.create`、`task.update` 和 `task.brief` 修改事实源，项目主控使用 `task.delete` 删除；人类使用同一组 Web/API 字段。删除时 Task 与状态简报一起进入项目回收站，恢复后仍使用原 Task id。处理 Task 时，平台不启动独立执行引擎，而是在每个绑定 Channel 中发送普通消息：默认发给项目主控，带结构化提及或命中自动处理规则时发给指定角色，由既有 Channel 协作流程接管。
 

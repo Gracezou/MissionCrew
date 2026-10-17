@@ -18,6 +18,18 @@ def latest_version(timeout: int = 8) -> str:
     return match.group(1) if match else ""
 
 
+def parse_prompt_usage(response: dict) -> dict:
+    """session/prompt 响应 `_meta._trae/tokenUsage.sessionTotal` 是会话累计用量
+    (字段同 ACP 标准 usage);本轮用量与上下文由协议层从标准字段取。"""
+    from ..acp import ACP_USAGE_FIELDS
+    from ..native import usage_section
+    meta = response.get("_meta") if isinstance(response, dict) else None
+    info = meta.get("_trae/tokenUsage") if isinstance(meta, dict) else None
+    if not isinstance(info, dict):
+        return {}
+    return {"total": usage_section(info.get("sessionTotal"), ACP_USAGE_FIELDS)}
+
+
 SPEC = CliSpec(
     adapter="trae",
     binary="traecli",
@@ -37,4 +49,5 @@ SPEC = CliSpec(
     # 也列出档位
     update={"self_update": ["traecli", "update"]},
     latest_version=latest_version,
+    parse_prompt_usage=parse_prompt_usage,
 )

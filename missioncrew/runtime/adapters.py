@@ -695,6 +695,12 @@ def _load_session_meta(adapter_name: str) -> Optional[dict]:
     return dict(spec.load_session_meta) if spec and spec.load_session_meta else None
 
 
+def _prompt_usage_parser(adapter_name: str):
+    """工具声明的 ACP 私有用量解析钩子(grok 的 _meta.usage 等);None = 只认标准字段。"""
+    spec = _clis.BY_ADAPTER.get(adapter_name)
+    return spec.parse_prompt_usage if spec else None
+
+
 def supports_account_usage(adapter: str) -> bool:
     """该 adapter 是否声明了账户限额探测钩子。"""
     return account_usage_probe(adapter) is not None
@@ -762,6 +768,7 @@ class AcpAdapter:
             # 额外目录同时交给协议层:声明了会话级 additionalDirectories 的
             # 工具(trae)经 session/new|load 授权,其余工具已在 serve 命令里
             additional_dirs=extra_dirs,
+            parse_usage=_prompt_usage_parser(self.adapter_name),
         )
         try:
             _diagnostic_log_path(cfg, self.adapter_name).write_text(text)

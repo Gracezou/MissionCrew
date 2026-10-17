@@ -52,6 +52,10 @@ class CliSpec:
     # ACP session/new models 块 -> {模型: 档位};解析厂商私有扩展
     # (如 grok 的 _meta.reasoningEfforts),协议层不认识这些字段
     parse_model_efforts: Optional[Callable[..., dict[str, list[str]]]] = None
+    # ACP session/prompt 响应 -> usage/v1 片段{turn,total,context_used,
+    # context_window,cost_usd,duration_ms};解析厂商私有用量扩展(grok 的
+    # _meta.usage、trae 的会话累计),标准 usage/usage_update 由协议层处理
+    parse_prompt_usage: Optional[Callable[[dict], dict]] = None
     # () -> 可执行路径;不经 PATH 检测的安装方式(pi vendored)
     locate_binary: Optional[Callable[[], str]] = None
     # () -> 工具自带模型清单;清单需动态读取时替代静态 models(pi models.json)

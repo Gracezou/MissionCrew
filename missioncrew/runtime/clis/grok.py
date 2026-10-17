@@ -41,6 +41,34 @@ def parse_model_efforts(block: object) -> dict[str, list[str]]:
     return efforts
 
 
+# PromptResponse._meta.usage 的字段(xAI 私有扩展;grok 不填 ACP 标准 usage):
+# 本轮用量,inputTokens 含缓存读;costUsdTicks 每美元 10^10 ticks(grok CLI 内置文档)
+_USAGE_FIELDS = {"input": "inputTokens", "cache_read": "cachedReadTokens",
+                 "cache_write": "cacheCreationTokens", "output": "outputTokens",
+                 "reasoning": "reasoningTokens", "total": "totalTokens"}
+_USD_TICKS = 1e10
+
+
+def parse_prompt_usage(response: dict) -> dict:
+    """从 session/prompt 响应的 `_meta` 取本轮用量、费用与耗时(xAI 私有扩展)。
+
+    `_meta.totalTokens` 是回合结束时的上下文占用(随每条通知递增),与本轮
+    多次模型请求的合计 usage.totalTokens 不同。
+    """
+    from ..native import usage_section
+    meta = response.get("_meta") if isinstance(response, dict) else None
+    usage = meta.get("usage") if isinstance(meta, dict) else None
+    if not isinstance(usage, dict):
+        return {}
+    ticks = usage.get("costUsdTicks")
+    return {
+        "turn": usage_section(usage, _USAGE_FIELDS),
+        "context_used": meta.get("totalTokens"),
+        "cost_usd": ticks / _USD_TICKS if isinstance(ticks, (int, float)) else None,
+        "duration_ms": usage.get("apiDurationMs"),
+    }
+
+
 def account_usage_probe(backend, timeout: int = 15):
     from ..usage import probe_grok_usage
     return probe_grok_usage(backend, [backend.binary_path or "grok"], timeout)
@@ -82,5 +110,6 @@ SPEC = CliSpec(
     load_session_meta={"noReplay": True},
     discover_models=discover_models,
     parse_model_efforts=parse_model_efforts,
+    parse_prompt_usage=parse_prompt_usage,
     account_usage_probe=account_usage_probe,
 )

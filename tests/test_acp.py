@@ -1,4 +1,5 @@
 """ACP stdio 协议:客户端流程、权限自动决策、适配器路由。"""
+import json
 import queue
 import sys
 import threading
@@ -806,4 +807,102 @@ def test_idle_cleanup_spares_clients_with_live_terminals(tmp_path):
     finally:
         with acp._LIVE_SESSIONS_GUARD:
             acp._LIVE_SESSIONS.pop(key, None)
+        client.close()
+
+
+def _usage_events(events):
+    return [json.loads(text) for kind, text in events if kind == "usage"]
+
+
+def test_trae_turn_emits_unified_usage_event(tmp_path):
+    """标准 usage(本轮)+ usage_update(上下文)+ 私有 _meta 会话累计归一成 usage/v1。"""
+    events = []
+    backend = Backend(id="trae", name="t", adapter="trae", model="glm-5.3")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "", events))
+
+    assert result.success, result.summary
+    [usage] = _usage_events(events)
+    assert usage["schema"] == "usage/v1"
+    assert usage["turn"] == {"input": 27082, "cache_read": 13504, "cache_write": 0,
+                             "output": 35, "reasoning": 0, "total": 27117}
+    assert usage["total"] == {"input": 40666, "cache_read": 27008,
+                              "output": 54, "total": 40720}
+    # 上下文占用取 usage_update.used,而不是一轮两次请求的合计 27117
+    assert (usage["context_used"], usage["context_window"]) == (13564, 190000)
+    assert usage["raw"]["usage_update"] == {"used": 13564, "size": 190000}
+    assert "stopReason" not in usage["raw"]["responses"][0]
+
+
+def test_acp_without_usage_reports_no_usage_event(tmp_path):
+    """kimi 形态的响应不带用量:不发空的 usage 事件。"""
+    events = []
+    backend = Backend(id="kimi", name="k", adapter="kimi")
+    result = _adapter("kimi").run(_effort_cfg(tmp_path, backend, "", events))
+
+    assert result.success, result.summary
+    assert _usage_events(events) == []
+
+
+def test_turn_usage_sums_continuation_prompts_and_prefers_standard_cost():
+    first = {"stopReason": "end_turn",
+             "usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}}
+    second = {"stopReason": "end_turn",
+              "usage": {"inputTokens": 200, "outputTokens": 20, "totalTokens": 220}}
+    context = {"sessionUpdate": "usage_update", "used": 230, "size": 1000,
+               "cost": {"amount": 0.5, "currency": "USD"}}
+    vendor = lambda response: {"cost_usd": 0.01, "duration_ms": 40}
+
+    usage = acp._turn_usage([first, second], context, vendor)
+
+    assert usage["turn"] == {"input": 300, "output": 30, "total": 330}
+    assert (usage["context_used"], usage["context_window"]) == (230, 1000)
+    assert usage["cost_usd"] == 0.5          # 标准会话累计费用优先
+    assert usage["duration_ms"] == 80        # 续接 prompt 的耗时逐项相加
+
+
+def test_turn_usage_ignores_non_usd_cost_and_failing_vendor_hook():
+    def broken(response):
+        raise KeyError("boom")
+
+    usage = acp._turn_usage(
+        [{"usage": {"inputTokens": 5, "outputTokens": 1, "totalTokens": 6}}],
+        {"used": 6, "size": 100, "cost": {"amount": 3, "currency": "EUR"}}, broken)
+
+    assert usage["turn"]["total"] == 6 and "cost_usd" not in usage
+    assert acp._turn_usage([{"stopReason": "end_turn"}], {}, None) == {}
+
+
+def test_grok_prompt_usage_reads_xai_meta():
+    """grok 不填标准 usage,本轮用量、费用与耗时在 _meta(真实响应截取)。"""
+    from missioncrew.runtime.clis import grok
+    response = {"stopReason": "end_turn", "_meta": {
+        "totalTokens": 22886, "modelId": "grok-4.7",
+        "usage": {"inputTokens": 22774, "outputTokens": 103, "totalTokens": 22877,
+                  "cachedReadTokens": 2176, "cacheCreationTokens": 0,
+                  "reasoningTokens": 102, "modelCalls": 1, "apiDurationMs": 3258,
+                  "costUsdTicks": 145866800}}}
+
+    usage = acp._turn_usage([response], {}, grok.parse_prompt_usage)
+
+    assert usage["turn"] == {"input": 22774, "cache_read": 2176, "cache_write": 0,
+                             "output": 103, "reasoning": 102, "total": 22877}
+    assert usage["context_used"] == 22886 and "context_window" not in usage
+    assert usage["cost_usd"] == pytest.approx(0.01458668)
+    assert usage["duration_ms"] == 3258
+    assert grok.parse_prompt_usage({"stopReason": "end_turn"}) == {}
+
+
+def test_usage_update_outside_turn_is_recorded_not_woken(tmp_path):
+    """回合外的 usage_update 只更新上下文状态,不进自唤醒缓冲。"""
+    client = acp._AcpClient(["cat"], str(tmp_path), {}, timeout=5)
+    try:
+        client.end_turn()
+        client._handle({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "s", "update": {"sessionUpdate": "usage_update",
+                                         "used": 10, "size": 100}}})
+        assert client.context_usage["used"] == 10
+        assert client._wake_events == [] and client._wake_chunks == []
+        client.begin_turn(5, None)
+        assert client.context_usage == {}
+    finally:
         client.close()

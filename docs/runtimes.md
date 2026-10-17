@@ -170,7 +170,7 @@ Codex 的 workspace-write 沙箱还会把每个可写根下的 `.git`、`.agents
 
 聊天中的每条 Runtime 过程事件都渲染为可折叠项，包括输入、思考、命令、工具结果、日志、用量和交互请求。每个运行卡采用单项展开：首次载入时只展开最新事件；收到新的事件 id 时自动收起上一项并展开新项；用户手动展开任一旧项时会收起同卡片中的其他项。相同事件的流式内容追加不会被误判为新项。普通文本事件在 SQLite 中按 8000 字符物理分段，读取 API 会重组相邻同类分段后再展示，避免长 diff、路径或日志行从任意字符中间形成新的折叠项；权限、提问、用量和后端 Agent 等结构化 JSON 事件始终逐条保留。
 
-用量事件在 Runtime 层就统一成 `usage/v1` 结构：provider 用各自的字段表把上报映射为 `turn`（本轮）与 `total`（累计）两个区段，区段内固定字段 `input`/`cache_read`/`cache_write`/`output`/`reasoning`/`total`，另可带 `context_window`、`cost_usd`、`tool_uses`、`duration_ms`，`raw` 原样保留上报内容。Codex 取自 `thread/tokenUsage/updated`（last→turn、total→total、modelContextWindow→context_window），pi 取自 `message_end` 的 assistant usage（含 cost.total），Claude 主回合取自 `result`（Anthropic 字段加 total_cost_usd/duration_ms，raw 只留用量相关键），Claude 后台 Agent 的 total_tokens/tool_uses/duration_ms 随 `backend_agent` 事件携带。前端只按这一种结构排版（区段分行、k/M 压缩、上下文占用条、原始上报折叠），没有 `schema` 标记的历史事件原样显示 JSON；新增 Runtime 只需在其 provider 内给出字段表。
+用量事件在 Runtime 层就统一成 `usage/v1` 结构：provider 用各自的字段表把上报映射为 `turn`（本轮）与 `total`（累计）两个区段，区段内固定字段 `input`/`cache_read`/`cache_write`/`output`/`reasoning`/`total`，另可带 `context_window`、`context_used`（当前上下文占用；一轮多次模型请求时本轮合计会远大于实际占用，前端上下文条优先用它）、`cost_usd`、`tool_uses`、`duration_ms`，`raw` 原样保留上报内容。Codex 取自 `thread/tokenUsage/updated`（last→turn、total→total、modelContextWindow→context_window），pi 取自 `message_end` 的 assistant usage（含 cost.total），Claude 主回合取自 `result`（Anthropic 字段加 total_cost_usd/duration_ms，raw 只留用量相关键），Claude 后台 Agent 的 total_tokens/tool_uses/duration_ms 随 `backend_agent` 事件携带；ACP 工具由协议层在回合结束时发一条，标准字段取自 `session/prompt` 响应的 `usage`（本轮，同一轮的续接 prompt 逐项相加）与最近一次 `usage_update`（used→context_used、size→context_window、USD 的会话累计 cost→cost_usd），厂商私有扩展经 `parse_prompt_usage` 钩子只补缺：grok 的 `_meta.usage`（本轮用量、`costUsdTicks` 按每美元 10¹⁰ ticks 换算、`apiDurationMs`，`_meta.totalTokens` 为上下文占用），trae 的 `_meta._trae/tokenUsage.sessionTotal`（累计）；kimi 不上报用量，不发事件。前端只按这一种结构排版（区段分行、k/M 压缩、上下文占用条、原始上报折叠），没有 `schema` 标记的历史事件原样显示 JSON；新增 Runtime 只需在其 provider 内给出字段表。
 
 ### 打印模式 CLI(`CliAdapter`)
 
@@ -178,7 +178,7 @@ Codex 的 workspace-write 沙箱还会把每个可写根下的 `.git`、`.agents
 
 每个工具的静态声明（检测可执行名、命令模板、能力、模型清单、effort 兜底档位、升级渠道、ACP 特例）按工具拆在 `runtime/clis/` 子包里，一个工具一个模块（`clis/grok.py`、`clis/kimi.py`…）；`adapters.py` 把声明汇总成 `DEFAULT_COMMANDS`、`ACP_SERVE_COMMANDS`、`KNOWN_CLIS`、`KNOWN_MODELS`、`EFFORT_SUPPORT`、`UPDATE_SPECS` 这些注册表。新增工具时加一个声明模块并追加进 `clis.SPECS` 即可，不需要动执行器；执行行为仍由统一的 `CliAdapter`/`AcpAdapter` 承担，有原生 provider 的工具（claude/codex/pi）执行与 effort 档位在各自 provider 类里。
 
-工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`locate_binary`/`configured_models`/`update_plan`（pi 的 vendored 安装三件套；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）、`latest_version`（npm 之外的最新版来源，如 trae 解析 `traecli update check`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
+工具特有行为通过 `CliSpec` 的可选钩子随声明走，`adapters.py` 只做分发：`session_args`（各 CLI 的 create/resume 参数语法）、`apply_permissions`（统一文件系统权限到原生参数的翻译，如 codex 的 `--sandbox` 档位、claude/codebuddy 的只读→plan 模式）、`prepare_env`（opencode 的 `OPENCODE_CONFIG_CONTENT` 目录授权注入）、`parse_model_efforts`（grok 的 `_meta.reasoningEfforts` 厂商扩展解析，ACP 协议层只透传 models 块）、`parse_prompt_usage`（`session/prompt` 响应里的厂商私有用量，如 grok 的 `_meta.usage`、trae 的会话累计）、`locate_binary`/`configured_models`/`update_plan`（pi 的 vendored 安装三件套；声明了 `locate_binary` 的工具视为平台托管安装，服务启动时按当前数据目录重新定位 `binary_path`，数据目录搬迁后不必手工改库）、`account_usage_probe`（grok/kimi 的账户限额探测入口，实现仍在 `usage.py`）、`latest_version`（npm 之外的最新版来源，如 trae 解析 `traecli update check`）。仍留在执行器层的工具相关代码只剩流式输出解析（claude stream-json、codex stderr 进度、opencode/cursor 结构化输出提取）——它们与 `CliAdapter` 的读循环耦合，需要设计独立的解析器接口后再拆。
 
 模板占位符(`render_command`):
 
@@ -200,6 +200,7 @@ initialize → session/new|session/load → [session/set_model] → session/prom
 ```
 
 - 回复文本来自 `session/update` 通知中的 `agent_message_chunk`,拼接为最终输出;
+- 用量:`usage_update` 通知只记录最新的上下文状态(回合外到达也不进自唤醒缓冲),回合结束时与 `session/prompt` 响应的 `usage` 一起归一成一条 `usage/v1` 事件(见「用量事件」);
 - `session/load` 应答前的通知属于历史回放（Kimi 不一定带 `isReplay` 标记），只用于 Runtime 恢复上下文，不写进当前运行的正文、思考、工具或后台唤醒事件；收到 load 成功/失败应答后按协议消息顺序恢复实时通知，写入失败/超时也解除隔离。显式 `isReplay` 通知始终过滤；
 - Agent 反向发来的 `session/request_permission` 必须应答,否则 Agent 阻塞到内部超时、任务假死。平台无头运行,自动从 Agent 提供的选项里挑安全项:单次允许 > 会话允许 > 单次拒绝;都没有时返回协议错误(不能回 cancelled,那会取消整轮);
 - 其余未知的 agent→client 请求返回空结果,避免阻塞;

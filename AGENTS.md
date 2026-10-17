@@ -42,10 +42,10 @@ docs/                 详细文档,中文版在 docs/、英文版在 docs/en/(�
 分层规则(有测试钉住):
 
 - 业务层(api/collab/core)不得直接 import `runtime.adapters` 或原生执行器,只经 `runtime_manager`;见 `test_application_layers_do_not_import_raw_runtime_executors`。
-- 工具相关知识进 `runtime/clis/<tool>.py`:静态事实写 `CliSpec` 字段,工具特有行为写可选钩子(`session_args`、`apply_permissions`、`prepare_env`、`parse_model_efforts`、`locate_binary`、`update_plan`、`account_usage_probe` 等);`adapters.py` 只做汇总与分发,新增工具 = 加声明模块 + 追加进 `clis.SPECS`,不动执行器。
+- 工具相关知识进 `runtime/clis/<tool>.py`:静态事实写 `CliSpec` 字段,工具特有行为写可选钩子(`session_args`、`apply_permissions`、`prepare_env`、`parse_model_efforts`、`parse_prompt_usage`、`locate_binary`、`update_plan`、`latest_version`、`account_usage_probe` 等);`adapters.py` 只做汇总与分发,新增工具 = 加声明模块 + 追加进 `clis.SPECS`,不动执行器。
 - claude/codex/pi/antigravity 走各自原生 provider 类,执行与 effort 档位声明都在 provider 里;`clis/` 里对应文件只负责检测、模型发现、回退模板与升级渠道。
 - 钩子体内如需 adapters 工具函数,用函数内延迟导入,避免 clis↔adapters 环形依赖。
-- 过程事件 `usage` 由各 provider 在源头用自己的字段表映射成 `native.build_usage` 的 `usage/v1`(turn/total 区段 + context_window/cost_usd/tool_uses/duration_ms,raw 保留上报);前端只按这一结构排版,不得出现工具私有字段名(有测试钉住),新增 Runtime 只改 provider。
+- 过程事件 `usage` 由各 provider 在源头用自己的字段表映射成 `native.build_usage` 的 `usage/v1`(turn/total 区段 + context_window/context_used/cost_usd/tool_uses/duration_ms,raw 保留上报);前端只按这一结构排版,不得出现工具私有字段名(有测试钉住),新增 Runtime 只改 provider;ACP 工具的标准 usage/usage_update 由 `acp.py` 归一,厂商私有用量走 `parse_prompt_usage` 钩子。
 - 数据目录(`MISSIONCREW_HOME`,默认 `~/.missioncrew`)必须可整体搬迁:平台生成的目录链接一律经 `relative_link_target` 写相对路径;声明了 `locate_binary` 的工具视为平台托管安装(如 vendored pi),启动时按当前数据目录重新定位 `binary_path`,不要把数据目录内的绝对路径写进库或文件。
 - 主控权限只经 `Project.controls_platform(role_id)` / `has_orchestrator` 判定,派发权限只经 `Project.can_dispatch(role_id)`,不要直接比较 `orchestrator_role_id`:该字段为空即无主控模式(所有角色都有主控级管理权限,但不能互相派发,只由人类点名启动,不点名的人类消息拒收,多选各自启动,结果只留在频道);新增"仅主控"的动作、API 校验或 Prompt 分支都要走这些入口。
 - 给角色的提示词(公共上下文、本轮输入、注入横幅、`manual.md`、工作区 README、Agent Tool 动作说明与 `resume`、页面对话 instructions)一律用英文;人类可见内容的语言只由身份段的 `Language` 一行约定为简体中文。平台发到频道的通知、错误信息和工具回执 summary 面向人类,保持中文。改提示词标题时同步 `MockAdapter` 的 `_role_from_prompt`/`_trigger_from_prompt`,它们按 `You are role @`、`# Trigger Message` 解析。

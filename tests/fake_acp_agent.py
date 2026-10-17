@@ -11,7 +11,8 @@ session/set_config_option 切换模型/档位);"models_block" = 只有
 models.availableModels + currentModelId、无 configOptions 的形态;"trae" =
 traecli 0.209 形态(configOptions 含 model 与 category=thought_level 的
 `reasoning_effort`,另附「模型/档位」组合 id 的 models 块,并声明会话级
-additionalDirectories,收到的目录回显在回复里)。
+additionalDirectories,收到的目录回显在回复里;回合内发 usage_update,响应带
+标准 usage 与私有 _meta 会话累计)。
 """
 import json
 import sys
@@ -343,7 +344,21 @@ def main():
                   + (f";思考={thinking}" if thinking else "")
                   + (f";目录={','.join(session_dirs)}"
                      if session_dirs is not None else ""))
-            send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+            result = {"stopReason": "end_turn"}
+            if shape == "trae":
+                # 真实 traecli 的用量形态:标准 usage_update(上下文)+ 响应 usage
+                # (本轮,两次模型请求的合计)+ 私有 _meta 会话累计
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "s-test",
+                    "update": {"sessionUpdate": "usage_update",
+                               "used": 13564, "size": 190000}}})
+                result["usage"] = {"totalTokens": 27117, "inputTokens": 27082,
+                                   "outputTokens": 35, "thoughtTokens": 0,
+                                   "cachedReadTokens": 13504, "cachedWriteTokens": 0}
+                result["_meta"] = {"_trae/tokenUsage": {"sessionTotal": {
+                    "totalTokens": 40720, "inputTokens": 40666, "outputTokens": 54,
+                    "cachedReadTokens": 27008}}}
+            send({"jsonrpc": "2.0", "id": mid, "result": result})
 
 
 if __name__ == "__main__":

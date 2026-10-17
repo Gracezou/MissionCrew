@@ -493,21 +493,14 @@ class Store:
         self._delete("backends", id)
 
     def _unlink_channel_from_tasks(self, channel: Channel) -> None:
-        """移除 Task 对频道的引用，并在需要时绑定同项目的可用频道。"""
-        available = [item for item in self.list_channels(channel.project_id)
-                     if item.id != channel.id and not item.archived]
-        fallback = next(
-            (item for item in available if item.is_general),
-            available[0] if available else None,
-        )
+        """移除 Task 对频道的引用。频道绑定可选:解绑后为空就保持为空,不改绑到
+        其他频道(派发时才回退到 general)。"""
         for task in self.list_tasks():
             if task.project_id != channel.project_id \
                     or channel.id not in task.channel_ids:
                 continue
             task.channel_ids = [
                 item for item in task.channel_ids if item != channel.id]
-            if not task.channel_ids and fallback is not None:
-                task.channel_ids = [fallback.id]
             self.put_task(task)
 
     def delete_channel(self, id: str) -> None:
@@ -870,12 +863,9 @@ class Store:
         if c.is_general:
             c.archived = False
             c.archived_at = 0.0
+        # 只存频道本身:Task 的频道绑定只由显式操作写入(创建/编辑/派发),
+        # 保存任何频道都不会把未绑定的 Task(如数据源同步来的)挂到它上面
         self._put("channels", c.id, c.to_dict())
-        if not c.archived:
-            for task in self.list_tasks():
-                if task.project_id == c.project_id and not task.channel_ids:
-                    task.channel_ids = [c.id]
-                    self.put_task(task)
 
     def get_channel(self, id: str) -> Optional[Channel]:
         d = self._get("channels", id)

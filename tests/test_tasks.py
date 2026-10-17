@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from missioncrew.api import create_app
+from missioncrew.collab import board_sources
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.tasks import create_task, dispatch_task, update_task
 from missioncrew.collab.workspace import write_task_files
@@ -575,6 +576,43 @@ def test_task_resource_link_pops_up_details_without_leaving_page():
     assert channel["calls"] == [["push", "/resources/webshop/channels/dev"], ["route"]]
     # 带修饰键交还浏览器默认行为(新标签页打开完整页面)
     assert modified == {"returned": True, "prevented": False, "calls": []}
+
+
+def test_saving_channels_never_binds_unbound_tasks(seeded):
+    # 数据源同步来的任务没有频道;之后新建、修改、归档/恢复任何频道都不能把它挂上去
+    board_sources.sync_source_tasks(
+        seeded, "webshop", "gh", board_sources.validate_source_cards(
+            [{"id": "gh-1", "title": "#1 同步来的 Issue", "updated_at": 1.0}]))
+    synced = seeded.list_tasks("webshop", source_id="gh")[0]
+    unbound = create_task(seeded, "webshop", title="人工解绑的任务")
+    update_task(seeded, unbound, snapshot_updated_at=unbound.updated_at,
+                changes={"channel_ids": []})
+    assert synced.channel_ids == [] and seeded.get_task(unbound.id).channel_ids == []
+
+    seeded.put_channel(Channel(id="webshop:review", name="review", project_id="webshop"))
+    with TestClient(create_app()) as client:
+        assert client.post("/api/chat/channels", json={
+            "id": "release", "project_id": "webshop"}).status_code == 200
+        assert client.patch("/api/chat/channels/webshop:review",
+                            json={"purpose": "检视"}).status_code == 200
+        assert client.post("/api/chat/channels/webshop:review/archive").status_code == 200
+        assert client.post("/api/chat/channels/webshop:review/restore").status_code == 200
+
+    assert seeded.get_task(synced.id).channel_ids == []
+    assert seeded.get_task(unbound.id).channel_ids == []
+
+
+def test_deleting_channel_unbinds_tasks_without_rebinding(seeded):
+    seeded.put_channel(Channel(id="webshop:release", name="发版", project_id="webshop"))
+    both = create_task(seeded, "webshop", title="两个频道",
+                       channel_ids=["general", "webshop:release"])
+    only = create_task(seeded, "webshop", title="只绑发版",
+                       channel_ids=["webshop:release"])
+
+    seeded.delete_channel("webshop:release")
+
+    assert seeded.get_task(both.id).channel_ids == ["general"]
+    assert seeded.get_task(only.id).channel_ids == []   # 不改绑到 general,派发时再回退
 
 
 def test_project_task_list_filters_by_channel(seeded):

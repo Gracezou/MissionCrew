@@ -354,6 +354,7 @@ function switchTab(tab) {
   document.getElementById("sec-guides").classList.toggle("active", tab === "guidelines");
   document.getElementById("sec-skills").classList.toggle("active", tab === "skills");
   document.getElementById("sec-automations").classList.toggle("active", tab === "automations");
+  if (tab === "chat") void refreshChannelTasks();
   if (tab === "proj") renderProjSettings();
   if (tab === "custom") renderCustomBoards(true);
   if (tab === "docs") renderDocuments();
@@ -383,8 +384,10 @@ async function loadProjectScope() {
     fetch(`/api/projects/${encodeURIComponent(project)}/overview`)
       .then(r => r.ok ? r.json() : null),
     refreshChannels(),
-    // 任务列表只在任务看板打开时参与轮询,其余页面不拉取
+    // 任务列表只在任务看板打开时参与轮询,其余页面不拉取;
+    // 聊天页只拉当前频道绑定的 Task(服务端按频道过滤)
     currentTab === "board" ? refreshTasks() : null,
+    currentTab === "chat" ? refreshChannelTasks() : null,
   ]);
   if (!scope || project !== currentProject) return;
   overview.roles = scope.roles;

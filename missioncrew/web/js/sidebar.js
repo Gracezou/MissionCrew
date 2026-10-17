@@ -407,7 +407,7 @@ function selectChannel(id, jump = true) {
   updateChatRunControls([]);
   document.getElementById("msgs").innerHTML = "";
   if (jump && currentTab !== "chat") switchTab("chat");
-  renderSidebar(); pollMessages();
+  renderSidebar(); pollMessages(); void refreshChannelTasks();
   syncUrl();
 }
 

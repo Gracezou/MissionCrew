@@ -68,13 +68,14 @@ Main APIs:
 
 ### Tasks
 
-A task is an issue-like collaboration entry point, and its source of truth is the platform database. It contains a title, a summary, a body, a status, labels, one or more channel bindings, and multiple append-only status briefs. Visiting a task URL directly opens the built-in task board and expands the task's details; clicking a task link of the current project in chat, documents, or other pages only pops up the details dialog over the current page without switching pages (Ctrl/⌘-click still opens the full board in a new tab), while task links of other projects navigate as usual.
+A task is an issue-like collaboration entry point, and its source of truth is the platform database. It contains a title, a summary, a body, a status, labels, one or more channel bindings, and multiple append-only status briefs. Visiting a task URL directly opens the built-in task board and expands the task's details; clicking a task link of the current project in chat, documents, or other pages only pops up the details dialog over the current page without switching pages (Ctrl/⌘-click still opens the full board in a new tab), while task links of other projects navigate as usual. The chat page lists the unarchived tasks bound to the current channel below the channel header (status and title, only unfinished ones by default; it can switch to all or be folded), and clicking one also pops up its details; the strip is hidden when the channel has no bound tasks.
 
 The agent harness also provides Markdown snapshots in `.missioncrew/tasks/`. Agents modify the source of truth with `task.create`, `task.update`, and `task.brief`, and the project orchestrator deletes with `task.delete`; humans use the same set of Web/API fields. On deletion, the task and its status briefs go into the project recycle bin together, and after a restore it keeps the original task id. When a task is processed, the platform does not start a separate execution engine; instead it sends an ordinary message in each bound channel: to the project orchestrator by default, or to the specified role when the message carries a structured mention or matches an automatic handling rule, and the existing channel collaboration flow takes over.
 
 Main APIs:
 
 - `POST /api/tasks`
+- `GET /api/projects/<project-id>/tasks?scope=active|archived|all[&channel=<channel-id>]` (the list omits bodies; `channel` keeps only the tasks bound to that channel)
 - `GET /api/tasks/<task-id>`
 - `PATCH /api/tasks/<task-id>`
 - `DELETE /api/tasks/<task-id>` (moves the task to the project recycle bin)

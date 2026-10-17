@@ -149,6 +149,7 @@ function renderChannelState() {
     applyChannelHeadState();
     refreshRuntimeIndicators();   // 头部标记刚重建,用最近一次 Runtime 快照点亮
   }
+  renderChannelTasks();
   const banner = document.getElementById("channel-archive-banner");
   banner.hidden = !archived;
   document.getElementById("composer").classList.toggle("channel-archived", archived);
@@ -159,6 +160,87 @@ function renderChannelState() {
   document.getElementById("clear-context-btn").disabled = archived;
   document.getElementById("stop-chat-btn").disabled = archived;
   document.querySelectorAll("#role-bar button").forEach(button => { button.disabled = archived; });
+}
+
+/* ---- 频道关联 Task ----
+   频道头下方列出绑定当前频道的未归档 Task(状态 + 标题),默认只看未完成的,点击原地
+   弹出详情。数据由服务端按频道过滤后拉取,与看板的任务列表互不影响;选中频道、切到
+   聊天页时立即拉取,之后随总览 8s 轮询刷新。频道没有任何关联 Task 时整块隐藏。 */
+const CHANNEL_TASK_SCOPES = new Set(["open", "all"]);
+let channelTaskScope = localStorage.getItem("mc.channelTaskScope") || "open";
+if (!CHANNEL_TASK_SCOPES.has(channelTaskScope)) channelTaskScope = "open";
+let channelTasks = { channelId: null, tasks: [] };
+let channelTasksSignature = "";
+
+async function refreshChannelTasks() {
+  const project = currentProject, channelId = currentChan;
+  if (!project || !channelId) return;
+  const r = await fetch(`/api/projects/${encodeURIComponent(project)}/tasks` +
+    `?scope=active&channel=${encodeURIComponent(channelId)}`);
+  if (!r.ok) return;
+  const data = await r.json();
+  if (project !== currentProject || channelId !== currentChan) return;   // 已切换:丢弃
+  channelTasks = { channelId, tasks: data.tasks };
+  renderChannelTasks();
+}
+
+// 折叠偏好按浏览器记住;未设置时与频道头一致:窄屏默认收起、桌面默认展开
+function channelTasksCollapsed() {
+  const saved = localStorage.getItem("mc.channelTasksCollapsed");
+  if (saved !== null) return saved === "1";
+  return window.matchMedia("(max-width: 820px)").matches;
+}
+
+function toggleChannelTasks() {
+  localStorage.setItem("mc.channelTasksCollapsed", channelTasksCollapsed() ? "0" : "1");
+  renderChannelTasks();
+}
+
+function setChannelTaskScope(value) {
+  if (!CHANNEL_TASK_SCOPES.has(value)) return;
+  channelTaskScope = value;
+  localStorage.setItem("mc.channelTaskScope", value);
+  renderChannelTasks();
+}
+
+function renderChannelTasks() {
+  const box = document.getElementById("channel-tasks");
+  const tasks = (channelTasks.channelId === currentChan ? channelTasks.tasks : [])
+    .slice().sort((left, right) => taskActivity(right) - taskActivity(left)
+      || String(left.id).localeCompare(String(right.id)));
+  const open = tasks.filter(task => taskStatus(task) !== "已完成");
+  const shown = channelTaskScope === "open" ? open : tasks;
+  const collapsed = channelTasksCollapsed();
+  // 总览轮询会反复调用:内容没变就不重建,保留列表滚动位置与焦点
+  const signature = JSON.stringify([currentChan, collapsed, channelTaskScope, tasks.length,
+    shown.map(task => [task.id, task.title, task.summary, taskStatus(task)])]);
+  if (signature === channelTasksSignature) return;
+  channelTasksSignature = signature;
+  box.hidden = !tasks.length;
+  box.classList.toggle("collapsed", collapsed);
+  if (!tasks.length) { box.innerHTML = ""; return; }
+  const scopeButton = (value, label) => `<button type="button" role="radio"
+    aria-checked="${channelTaskScope === value}" class="${channelTaskScope === value ? "selected" : ""}"
+    onclick="setChannelTaskScope('${value}')">${label}</button>`;
+  box.innerHTML = `
+    <div class="channel-tasks-head">
+      <button class="channel-tasks-toggle" type="button" onclick="toggleChannelTasks()"
+        aria-expanded="${!collapsed}" aria-controls="channel-task-list" title="展开/收起关联 Task">
+        <span class="channel-tasks-caret" aria-hidden="true">▾</span>
+        <b>Task</b><span class="channel-tasks-count">${open.length} 个未完成 · 共 ${tasks.length}</span>
+      </button>
+      <span class="channel-tasks-scope" role="radiogroup" aria-label="显示范围">
+        ${scopeButton("open", "未完成")}${scopeButton("all", "全部")}
+      </span>
+    </div>
+    <ul class="channel-task-list" id="channel-task-list">
+      ${shown.map(task => `<li><button type="button" class="channel-task"
+          data-task-id="${esc(task.id)}" onclick="openTask(this.dataset.taskId, false)"
+          title="${esc(task.summary || task.title)}">
+          ${statusPillHtml(taskStatus(task)) || '<span class="pill">无状态</span>'}
+          <span class="channel-task-title">${esc(task.title)}</span></button></li>`).join("")
+        || '<li class="empty">没有未完成的 Task</li>'}
+    </ul>`;
 }
 
 function openChannelDialog() {

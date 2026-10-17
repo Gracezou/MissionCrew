@@ -1,6 +1,8 @@
 """Issue 化 Task 端点：编辑、状态简报与 Channel 派发。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Request
 
 from ..collab.recycle_bin import recycle_task
@@ -54,13 +56,16 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.get("/api/projects/{project_id}/tasks")
     def project_tasks(project_id: str, request: Request,
-                      scope: str = "active"):
+                      scope: str = "active", channel: Optional[str] = None):
         """按项目 + 归档态取任务列表(不带 body,详情走 /api/tasks/{id});
-        counts 按内置数据源全量统计,与看板筛选菜单口径一致。"""
+        counts 按内置数据源全量统计,与看板筛选菜单口径一致。
+        带 channel 时只取绑定该频道的任务(频道页的关联 Task 列表),counts 同口径。"""
         ctx.must_project(project_id)
         if scope not in LIST_SCOPES:
             raise HTTPException(400, "scope 只能是 active/archived/all")
         tasks = store.list_tasks(project_id)
+        if channel:
+            tasks = [t for t in tasks if channel in t.channel_ids]
         builtin = [t for t in tasks
                    if (t.source_id or BUILTIN_SOURCE_ID) == BUILTIN_SOURCE_ID]
         counts = {"all": len(builtin),

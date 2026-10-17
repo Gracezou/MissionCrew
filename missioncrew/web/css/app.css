@@ -407,6 +407,35 @@
   .channel-title-row:hover .channel-head-toggle { color: var(--accent); }
   .channel-head:not(.collapsed) .channel-head-toggle { transform: rotate(180deg); }
   .channel-head.collapsed .channel-meta { display: none; }
+  /* 频道关联 Task:频道头下方一条可折叠列表,条目多时在固定高度内滚动 */
+  .channel-tasks { flex: none; padding: 6px 24px 8px; border-bottom: 1px solid var(--line);
+                   background: var(--card); font-size: 12.5px; }
+  .channel-tasks[hidden] { display: none; }
+  .channel-tasks-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .channel-tasks-toggle { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 0;
+                          border: none; background: transparent; color: var(--text); font: inherit;
+                          cursor: pointer; }
+  .channel-tasks-toggle:hover, .channel-tasks-toggle:hover .channel-tasks-count { color: var(--accent); }
+  .channel-tasks-caret { display: inline-block; color: var(--muted); transition: transform .15s; }
+  .channel-tasks.collapsed .channel-tasks-caret { transform: rotate(-90deg); }
+  .channel-tasks-count { color: var(--muted); white-space: nowrap; }
+  .channel-tasks-scope { display: inline-flex; margin-left: auto; border: 1px solid var(--line);
+                         border-radius: 6px; overflow: hidden; }
+  .channel-tasks-scope button { padding: 1px 9px; border: none; background: transparent;
+                                color: var(--muted); font-size: 11.5px; cursor: pointer; }
+  .channel-tasks-scope button + button { border-left: 1px solid var(--line); }
+  .channel-tasks-scope button.selected { background: var(--accent-soft); color: var(--accent); }
+  .channel-tasks.collapsed .channel-tasks-scope,
+  .channel-tasks.collapsed .channel-task-list { display: none; }
+  .channel-task-list { max-height: 148px; margin: 4px 0 0; padding: 0; overflow-y: auto;
+                       list-style: none; }
+  .channel-task-list .empty { padding: 4px 0; }
+  .channel-task { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+                  padding: 3px 6px; border: none; border-radius: 6px; background: transparent;
+                  color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+  .channel-task:hover { background: var(--card-2); }
+  .channel-task .pill { flex: none; margin: 0; }
+  .channel-task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   #composer { flex: none; border-top: 1px solid var(--line); padding: 12px 24px 14px;
               background: var(--card); }
@@ -1417,6 +1446,7 @@
     .channel-title-row { gap: 8px; }
     .channel-title-row h2 { font-size: 15px; }
     .channel-meta { flex-direction: column; gap: 4px; margin-top: 8px; }
+    .channel-tasks { padding: 4px 12px 6px; }
     #msgs { padding: 14px 12px 8px; }
     #composer { padding: 10px 12px 12px; }
     .run-card { margin-left: 20px; }

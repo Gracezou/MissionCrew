@@ -422,6 +422,8 @@
                        border-radius: 10px; background: var(--card); box-shadow: var(--shadow-md);
                        overflow: hidden; font-size: 12.5px; }
   .channel-tasks-pop[hidden] { display: none; }
+  /* 只让列表收缩滚动:筛选条 overflow:hidden 使其最小高度为 0,不固定会被长列表挤没 */
+  .channel-tasks-pop-head, .channel-tasks-scope { flex: none; }
   .channel-tasks-pop-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 6px 12px; }
   .channel-tasks-count { color: var(--muted); white-space: nowrap; }
   .channel-tasks-close { margin-left: auto; width: 24px; height: 24px; padding: 0; border: none;

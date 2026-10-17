@@ -1,7 +1,8 @@
 /* ---- 频道(当前项目) ---- */
 function channelSidebarItem(channel) {
   const general = channelIsGeneral(channel);
-  const managed = general;
+  // 归档频道只读、内容专属频道由平台维护,不能编辑;general 只能编辑,不能归档或删除
+  const editable = !channel.archived && !channelIsContent(channel);
   const status = channel.archived ? `<span class="channel-state">已归档</span>` : "";
   // 频道内有排队/执行/等待用户的运行时亮起；轮询到新状态后就地更新，不必重绘侧栏
   const runCount = channelRunningCount(channel);
@@ -11,17 +12,19 @@ function channelSidebarItem(channel) {
     // 后台命令(跨 turn 存活、不阻塞对话)另用沙漏标记,由 Runtime 状态轮询点亮
     + `<span class="channel-background-marker" data-channel-id="${esc(channel.id)}"
     role="img" hidden>⏳</span>`;
-  const actions = managed ? "" : `<span class="channel-item-actions">
+  const actions = !editable && general ? "" : `<span class="channel-item-actions">
     <button class="channel-more" type="button" aria-label="频道操作" title="频道操作"
       onclick="toggleChannelActions(event,this)">•••</button>
     <span class="channel-actions-menu" hidden onclick="event.stopPropagation()">
-      ${channel.archived
+      ${editable ? `<button type="button" data-channel-id="${esc(channel.id)}"
+          onclick="openChannelEditDialog(this.dataset.channelId)">编辑频道</button>` : ""}
+      ${general ? "" : channel.archived
         ? `<button type="button" data-channel-id="${esc(channel.id)}"
              onclick="restoreChannel(this.dataset.channelId)">恢复频道</button>`
         : `<button type="button" data-channel-id="${esc(channel.id)}"
              onclick="archiveChannel(this.dataset.channelId)">归档频道</button>`}
-      <button class="danger-text" type="button" data-channel-id="${esc(channel.id)}"
-        onclick="deleteChannel(this.dataset.channelId)">删除频道</button>
+      ${general ? "" : `<button class="danger-text" type="button" data-channel-id="${esc(channel.id)}"
+        onclick="deleteChannel(this.dataset.channelId)">删除频道</button>`}
     </span>
   </span>`;
   return `<div class="side-item channel-item ${channel.archived ? "archived" : ""} ${
@@ -142,9 +145,6 @@ function renderChannelState() {
         <span><b>用途</b>${esc(channel.purpose || "未说明")}</span>
         <span><b>工作目录</b><code>${esc(channel.workdir || "平台内置工作区")}</code></span>
         <span><b>创建者</b>${esc(channel.created_by_role_id ? "@" + channel.created_by_role_id : "human/platform")}</span>
-        ${archived || channelIsContent(channel) ? "" : `<button class="ghost compact" type="button"
-          data-channel-id="${esc(channel.id)}"
-          onclick="openChannelEditDialog(this.dataset.channelId)">编辑频道</button>`}
       </div>`;
     applyChannelHeadState();
     refreshRuntimeIndicators();   // 头部标记刚重建,用最近一次 Runtime 快照点亮
@@ -275,10 +275,11 @@ async function createChannel() {
   toast("频道已创建", "success");
 }
 
-// 名称/用途/工作目录;归档频道只读、内容专属频道由平台维护,不提供编辑入口
+// 名称/用途/工作目录;入口在侧栏频道的「•••」菜单(归档与内容专属频道不提供)
 function openChannelEditDialog(id) {
   const channel = projChannels().find(item => item.id === id);
   if (!channel) return;
+  document.querySelectorAll(".channel-actions-menu").forEach(item => { item.hidden = true; });
   const repoOpts = (projObj()?.repos || []).filter(r => r.path).map(r =>
     `<option value="${esc(r.path)}" ${r.path === channel.workdir ? "selected" : ""}>` +
     `${esc(r.name || r.id)} — ${esc(r.path)}</option>`).join("");

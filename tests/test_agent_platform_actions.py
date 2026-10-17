@@ -1,6 +1,9 @@
 """Agent Tool 维护平台配置:频道生命周期、Task 归档、配置读取与自动化试跑。"""
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -288,6 +291,54 @@ def test_channel_patch_api_shares_agent_rules(seeded):
         assert client.post("/api/chat/channels/general/archive").status_code == 409
         assert client.patch("/api/chat/channels/webshop:nope",
                             json={"name": "y"}).status_code == 404
+
+
+# 侧栏频道条目的「•••」菜单:装载真实的 ui.js 判定函数与 channels.js,按频道类型取菜单项
+_CHANNEL_MENU_SCRIPT = r"""
+const fs = require("fs");
+const vm = require("vm");
+const context = {
+  localStorage: { getItem: () => null },
+  document: { addEventListener() {} },
+  esc: value => String(value ?? ""),
+  currentChan: "", currentTab: "chat",
+};
+vm.createContext(context);
+const ui = fs.readFileSync(process.argv[1] + "/ui.js", "utf8");
+for (const name of ["channelIsGeneral", "channelIsContent"])
+  vm.runInContext(ui.match(new RegExp(`const ${name} = .*`))[0].replace("const", "var"), context);
+vm.runInContext(fs.readFileSync(process.argv[1] + "/channels.js", "utf8"), context);
+const channels = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(channels.map(channel => {
+  const html = context.channelSidebarItem(channel);
+  return [...html.matchAll(/onclick="(\w+)\(this\.dataset\.channelId\)">([^<]+)</g)]
+    .map(match => [match[1], match[2]]);
+})));
+"""
+
+
+def test_sidebar_channel_menu_offers_edit_where_allowed():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser renderers")
+    channels = [
+        {"id": "webshop:topic", "name": "topic"},
+        {"id": "general", "name": "大厅"},
+        {"id": "webshop:old", "name": "old", "archived": True},
+        {"id": "webshop:docs-x", "name": "x", "content_kind": "docs", "content_key": "x.md"},
+    ]
+    result = subprocess.run(
+        [node, "-e", _CHANNEL_MENU_SCRIPT,
+         str(Path(__file__).resolve().parents[1] / "missioncrew" / "web" / "js")],
+        input=json.dumps(channels), text=True, capture_output=True, check=True)
+    topic, general, archived, content = json.loads(result.stdout)
+
+    assert topic == [["openChannelEditDialog", "编辑频道"],
+                     ["archiveChannel", "归档频道"], ["deleteChannel", "删除频道"]]
+    # general 不能归档/删除,菜单只剩编辑;归档与内容专属频道不能编辑
+    assert general == [["openChannelEditDialog", "编辑频道"]]
+    assert archived == [["restoreChannel", "恢复频道"], ["deleteChannel", "删除频道"]]
+    assert content == [["archiveChannel", "归档频道"], ["deleteChannel", "删除频道"]]
 
 
 def test_document_history_lists_versions_and_reads_old_content(seeded):

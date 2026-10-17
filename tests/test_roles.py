@@ -557,7 +557,7 @@ def test_channel_sidebar_exposes_filter_archive_restore_and_delete(client):
     for function in ("archiveChannel", "restoreChannel", "deleteChannel",
                      "renderChannelFilter", "renderChannelState"):
         assert f"function {function}" in channels
-    assert "const managed = general;" in channels
+    # general 菜单只能编辑、不能归档/删除:见 test_sidebar_channel_menu_offers_edit_where_allowed
     assert "永久清空对话" in channels and "内容专属频道" in channels
     assert all(label in channels for label in ("用途", "工作目录", "创建者"))
     assert ".channel-filter-menu" in css and ".channel-actions-menu" in css

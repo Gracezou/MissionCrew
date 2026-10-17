@@ -301,10 +301,17 @@ An orchestrator's turn:
 
 - `automation.save` creates or updates a project automation script: script is the full script
   text (run as an executable when it has a shebang, otherwise with bash), cron is a five-field
-  crontab (empty string = manual trigger only), and actions is the allowlist of actions the
-  script token may call. Scripts are triggered by the platform's unified scheduler and can call
-  platform actions through the `missioncrew.agent_tool` CLI at runtime (refreshing dashboard data
-  on a schedule, syncing external systems into Tasks, posting inspection reports to channels, etc.).
+  crontab (empty string = no schedule), webhook true also accepts deliveries from external
+  systems (GitHub, GitCode, ...) on the platform's dedicated webhook port, and actions is the
+  allowlist of actions the script token may call. Scripts are triggered by cron, webhook
+  deliveries or manually, and can call platform actions through the `missioncrew.agent_tool` CLI
+  at runtime (refreshing dashboard data on a schedule, syncing external systems into Tasks,
+  posting inspection reports to channels, etc.).
+- A webhook's signing secret is shown only to humans on the automation page and never to you:
+  after enabling it, give the human the `webhook_path` from the result and ask them to configure
+  the external system with the secret from that page. A script reads what triggered it from
+  `MISSIONCREW_TRIGGER` and the webhook event from `MISSIONCREW_WEBHOOK_EVENT_FILE`, and filters
+  the events it cares about itself.
 - Scripts are not in your workspace: `automation.list` lists them, and with `id` returns the full
   script and its recent runs (status, exit code, the tail of stdout/stderr), so read it before
   changing or fixing a script. `automation.run` starts a manual run in the background (scripts
@@ -312,7 +319,8 @@ An orchestrator's turn:
   in a loop.
 - Before writing a script, read `platform-docs/automation.md`: it covers the environment
   variables the platform injects, the working directory that persists across runs, how a script
-  calls actions and a complete sync example.
+  calls actions, webhook triggers (event file, verification, queueing) and a complete sync
+  example.
 - A sync script must exit non-zero when fetching the external list fails instead of saving a
   partial list, because tasks missing from `board_source.save` are deleted; keep card ids stable
   across runs (for example, the issue number).

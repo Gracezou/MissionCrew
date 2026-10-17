@@ -2,17 +2,17 @@
 
 Two mechanisms combine into one automation pipeline:
 
-1. **Automation scripts (Automation)**: a script is triggered on a crontab schedule (or manually), the platform issues a one-time Agent Tool token for that run, and the script uses it to call platform actions such as creating tasks, syncing data sources, posting messages and publishing documents; this is the "scripts update MissionCrew" capability.
+1. **Automation scripts (Automation)**: a script is triggered on a crontab schedule, by a webhook delivery from an external system, or manually, the platform issues a one-time Agent Tool token for that run, and the script uses it to call platform actions such as creating tasks, syncing data sources, posting messages and publishing documents; this is the "scripts update MissionCrew" capability.
 2. **Automatic task-handling rules (task auto rules)**: when the labels of a newly created task match a rule's label expression, the platform automatically dispatches the task into a channel for a role to handle, exactly the same way as the manual "Hand off to orchestrator" (交给主控处理) action.
 
-Combined, items from external systems can flow through fully automatically: **GitHub/GitCode issues, PRs, alerts → synced into tasks by a scheduled script → a rule matches → automatically dispatched to a role → the agent handles it in the channel → results written back through `task.brief`/`task.update`**. Humans only follow progress in the channel and step in when needed.
+Combined, items from external systems can flow through fully automatically: **GitHub/GitCode issues, PRs, alerts → synced into tasks by a script triggered on a schedule or by a webhook → a rule matches → automatically dispatched to a role → the agent handles it in the channel → results written back through `task.brief`/`task.update`**. Humans only follow progress in the channel and step in when needed.
 
 ## Automation scripts
 
-- **Creation**: the ＋ in the "Automation" (自动化) section of the Web sidebar, or ask the orchestrator in chat to create one with `automation.save`; before changing a script the orchestrator reads its current text with `automation.list` (with `id`), and afterwards it can test-run it right away with `automation.run`. Fields: `id`, `name`, `description`, `script` (run as an executable when it has a shebang, otherwise passed to bash), `cron` (five-field crontab, empty = manual trigger only), `enabled`, `actions`, `timeout_seconds`.
-- **Scheduling**: all cron triggers go through the unified scheduling entry point; a script is not started again while its previous run is still in progress; triggers missed while the service is down are not run afterwards.
+- **Creation**: the ＋ in the "Automation" (自动化) section of the Web sidebar, or ask the orchestrator in chat to create one with `automation.save`; before changing a script the orchestrator reads its current text with `automation.list` (with `id`), and afterwards it can test-run it right away with `automation.run`. Fields: `id`, `name`, `description`, `script` (run as an executable when it has a shebang, otherwise passed to bash), `cron` (five-field crontab, empty = no schedule), `enabled` (controls scheduled triggering only), `webhook` (whether webhook deliveries are accepted; can be on together with cron, see "Webhook triggers" below), `actions`, `timeout_seconds`. Manual triggering is always available.
+- **Scheduling**: all cron triggers go through the unified scheduling entry point; a script runs only once at a time: while its previous run is still in progress, scheduled and manual triggers are skipped and webhook deliveries are queued; scheduled triggers missed while the service is down are not run afterwards.
 - **Permissions**: the script's own `actions` allowlist is the source of truth for the actions available to the script identity; the default is `task.create`, `task.update`, `task.brief`, `message.publish`, `document.publish`, `dashboard.save`, `board_source.save`; the audit actor is recorded as `automation:<project>:<script>`.
-- **Run records**: the automation detail page shows each run's trigger type, exit code and stdout/stderr. A non-zero exit code is recorded as a failure. The orchestrator reads the latest runs with `automation.list` and `id` (only the tail of the output is returned) to investigate a failing script.
+- **Run records**: the automation detail page shows each run's trigger type (scheduled / Webhook / manual; webhook runs also record the source, event name and delivery id), exit code and stdout/stderr. A non-zero exit code is recorded as a failure. Only the latest 200 run records are kept per script. The orchestrator reads the latest runs with `automation.list` and `id` (only the tail of the output is returned) to investigate a failing script.
 
 ### Execution environment
 
@@ -26,6 +26,9 @@ Combined, items from external systems can flow through fully automatically: **Gi
   | `MISSIONCREW_AGENT_TOKEN_FILE` | The one-time token file of this run (`.agent-tool-token` in the working directory); the CLI reads it itself, so the script does not need to read it and must not print it |
   | `MISSIONCREW_PROJECT_ID` | Project id |
   | `MISSIONCREW_AUTOMATION_ID` | Script id, in the format `<project-id>:<script-short-id>` |
+  | `MISSIONCREW_TRIGGER` | What triggered this run: `cron`, `webhook` or `manual` (a human clicking "Run now" (立即运行) on the page, or the orchestrator's `automation.run`) |
+  | `MISSIONCREW_WEBHOOK_EVENT_FILE` | Webhook runs only: path of this run's event file; the format is described under "Webhook triggers" below |
+  | `MISSIONCREW_WEBHOOK_PROVIDER` / `MISSIONCREW_WEBHOOK_EVENT` / `MISSIONCREW_WEBHOOK_DELIVERY` | Webhook runs only: the source (`github`, `gitcode`, `gitlab` or empty), the event name (such as `issues` or `Issue Hook`) and the delivery id, so the script can branch on the event directly |
 
 - **Token and timeout**: the token is revoked as soon as the run ends, and also when the run is killed for exceeding its timeout; a script that runs longer than `timeout_seconds` is terminated and recorded as timed out.
 - **Calling platform actions**:
@@ -39,6 +42,58 @@ Combined, items from external systems can flow through fully automatically: **Gi
   ```
 
   The CLI exits with code 0 on success; when the platform returns an error, the connection fails or the arguments are invalid, it exits with a non-zero code and prints the error JSON to stdout. Put `set -euo pipefail` at the top of bash scripts, so that a failure at any step makes the run fail and leaves a record.
+
+## Webhook triggers
+
+A script with `webhook` turned on can be triggered by events pushed from an external system (GitHub, GitCode, GitLab or your own service): it runs as soon as an event arrives instead of waiting for the next scheduled run, and the same script can keep a cron schedule as a periodic fallback.
+
+- **Dedicated port**: `mc serve` opens a separate port that only receives webhooks, `8322` by default (change it with `--webhook-port` or the environment variable `MISSIONCREW_WEBHOOK_PORT`; `0` turns it off). It listens on the same address as `--host` unless `--webhook-host` or `MISSIONCREW_WEBHOOK_HOST` says otherwise. The port has exactly one route, `POST /hooks/<project-id>/<script-short-id>`: every other path returns 404 and every other method 405, and it serves no pages, API or static files. The main service has no authentication, so when an external system needs to reach MissionCrew, forward only the webhook port (port forwarding, a tunnel or a reverse proxy) and never expose the main service port. If the port is already in use, the main service still starts, and the "Webhook" section of the automation detail page shows why it is not listening.
+- **URL and secret**: once turned on, the "Webhook" section of the automation detail page shows the delivery URL and the secret, which can be copied or regenerated (regenerating invalidates the old secret immediately, so the external system must be updated). The secret is generated the first time the webhook is turned on and kept when it is turned off. It is shown only on that page and is absent from overview data and Agent Tool results: after the orchestrator turns on the webhook with `automation.save`, it should tell a human the delivery path, and the human takes the secret from the page to configure the external system.
+- **Verification**: every delivery must carry one of the following, otherwise it gets 401. When a signature header is present, only the signature counts.
+
+  | Method | Request header | Used by |
+  | --- | --- | --- |
+  | HMAC-SHA256 signature (over the raw body) | `X-Hub-Signature-256: sha256=<hex>` | GitHub (set Secret to the secret), Gitea and your own services |
+  | HMAC-SHA256 signature | `X-GitCode-Signature-256: sha256=<hex or base64>` | GitCode signing-secret mode |
+  | Token | `X-GitCode-Token`, `X-Gitlab-Token` or `Authorization: Bearer <secret>` | GitCode password mode, GitLab's Secret token, your own services |
+
+- **Requests and responses**: JSON bodies and GitHub's form format (`payload=<json>`) are supported, up to 25 MiB (larger bodies get 413); a body declared as JSON that fails to parse gets 400. An accepted delivery immediately gets `202 {"ok": true, "run_id": <run record id>}` and the script runs in the background; GitHub's `ping` event is answered by the platform itself with `200 {"ok": true, "pong": true}` without running the script. If the script does not exist, belongs to another project or has no webhook turned on, the answer is always 404 without saying why.
+- **Queueing**: deliveries that arrive while the script is running are queued in arrival order and get `202 {"ok": true, "queued": true}`; at most 20 can wait per script, after which 503 is returned. When the current run ends the next one starts, using the script's latest definition: if the webhook is turned off or the script is deleted meanwhile, the queued events are dropped and audited. The queue lives only in memory and is lost when the service restarts, so a sync that must not miss events needs a periodic full sync on cron as a fallback.
+- **Event file**: in a webhook run the event is written to `.webhook-event.json` in the working directory (the path is `MISSIONCREW_WEBHOOK_EVENT_FILE`) and deleted when the run ends:
+
+  ```json
+  {
+    "provider": "github",
+    "event": "issues",
+    "delivery": "<delivery id>",
+    "received_at": 1760000000.0,
+    "content_type": "application/json",
+    "headers": {"user-agent": "GitHub-Hookshot/...", "x-github-event": "issues"},
+    "payload": {"action": "opened", "issue": {"number": 42}},
+    "body": null
+  }
+  ```
+
+  `provider` is recognized from the event-name header (`X-GitHub-Event`, `X-GitCode-Event`, `X-Gitlab-Event`) and is an empty string when none is present; `headers` holds the request headers with lowercase keys, minus the secret-bearing `Authorization`, `X-GitCode-Token` and `X-Gitlab-Token`; `payload` is the parsed JSON, or `null` when the body is not JSON, in which case the raw text is in `body`.
+- **Filtering is up to the script**: the platform does not filter by event type, repository or action; the script reads the event and simply `exit 0`s for deliveries it does not care about. Such runs still leave a record, which helps to see which events arrived.
+
+Example: sync right away when an issue is opened, closed or reopened, ignore other events, and fall back to cron every 30 minutes. Note that `board_source.save` is a whole-set sync, so a webhook run must also fetch the full list before saving; saving only the single issue from the event would delete all the other tasks.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$MISSIONCREW_TRIGGER" = webhook ]; then
+  [ "$MISSIONCREW_WEBHOOK_EVENT" = issues ] || { echo "ignoring event $MISSIONCREW_WEBHOOK_EVENT"; exit 0; }
+  action=$(jq -r '.payload.action' "$MISSIONCREW_WEBHOOK_EVENT_FILE")
+  case "$action" in
+    opened|closed|reopened) ;;
+    *) echo "ignoring issues.$action"; exit 0 ;;
+  esac
+fi
+
+# Scheduled, manual and matching webhook runs share the same full sync; see the end-to-end example below
+```
 
 ## Syncing external lists into tasks (data sources)
 
@@ -87,7 +142,7 @@ Rules are stored on the project; each one = **label expression + handling instru
 
 ## End-to-end example: automatically handling GitCode/GitHub issues
 
-1. **Sync script**: create an automation script with cron `*/30 * * * *` that uses the `gitcode`/`gh` CLI to fetch the repository's issue list, converts it into cards, and calls `board_source.save`. Use the issue number as the card id, write the issue's labels and assignees as `labels` (e.g. `bug`, `owner: xxx`), and write the link as `url`. Include `status: 已完成` only for closed issues and no `status` for open issues, so that the handling progress written back by agents is always kept.
+1. **Sync script**: create an automation script with cron `*/30 * * * *` (to sync as soon as an issue changes, also turn on the webhook and filter events as described above) that uses the `gitcode`/`gh` CLI to fetch the repository's issue list, converts it into cards, and calls `board_source.save`. Use the issue number as the card id, write the issue's labels and assignees as `labels` (e.g. `bug`, `owner: xxx`), and write the link as `url`. Include `status: 已完成` only for closed issues and no `status` for open issues, so that the handling progress written back by agents is always kept.
 
    ```bash
    #!/usr/bin/env bash

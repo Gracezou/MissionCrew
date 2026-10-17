@@ -38,6 +38,7 @@ from .resource_urls import (automation_resource_url, channel_resource_url,
 from .skill_versions import skill_version_library
 from .skills import (read_skill_version, save_project_skill, save_project_skill_markdown,
                      skill_history, skill_package, sync_project_skill_library)
+from .webhooks import webhook_path
 from .workspace import chat_workspace_dir, write_task_files
 from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            BoardDataSource, BoardWidget,
@@ -437,16 +438,21 @@ ACTION_DEFINITIONS = {
     },
     "automation.save": {
         "description": (
-            "Create or update a project automation script; the unified scheduler triggers it "
-            "by cron or manually, and it calls platform actions with its own token"
+            "Create or update a project automation script; it is triggered by cron, by webhook "
+            "deliveries on the platform's dedicated webhook port, or manually, and it calls "
+            "platform actions with its own token"
         ),
         "orchestrator_only": True,
         "arguments": {
             "id": "short script id", "name": "name", "description": "purpose",
             "script": ("full script text (run as an executable when it has a shebang, "
                        "otherwise with bash)"),
-            "cron": "five-field crontab; an empty string means manual trigger only",
-            "enabled": "whether scheduled triggering is enabled",
+            "cron": "five-field crontab; an empty string means no schedule",
+            "enabled": "whether scheduled (cron) triggering is enabled",
+            "webhook": ("true accepts webhook deliveries (can be combined with cron); the "
+                        "result gives webhook_path, and the signing secret is shown only to "
+                        "humans on the automation page, so ask a human to configure the "
+                        "external system"),
             "actions": "allowlist array of actions it may call; omit it to keep the current value",
             "timeout_seconds": "timeout of a single run in seconds",
         },
@@ -556,7 +562,7 @@ ACTION_ARGUMENTS = {
     "skill.list": {"id"},
     "skill.history": {"id", "revision", "file", "limit"},
     "automation.save": {
-        "id", "name", "description", "script", "cron", "enabled", "actions",
+        "id", "name", "description", "script", "cron", "enabled", "webhook", "actions",
         "timeout_seconds",
     },
     "automation.delete": {"id"},
@@ -1832,6 +1838,7 @@ class AgentActionService:
                 script=arguments.get("script"),
                 cron=arguments.get("cron"),
                 enabled=arguments.get("enabled"),
+                webhook=arguments.get("webhook"),
                 actions=arguments.get("actions"),
                 timeout_seconds=arguments.get("timeout_seconds"),
                 actor=identity.actor,
@@ -1839,12 +1846,15 @@ class AgentActionService:
             )
         except ValueError as exc:
             raise AgentToolError("invalid_arguments", str(exc), 400) from exc
-        schedule = (f"cron `{automation.cron}`" if automation.cron
-                    else "仅手动触发")
+        triggers = [f"cron `{automation.cron}`"] if automation.cron else []
+        if automation.webhook:
+            triggers.append("webhook")
+        # 密钥只给人看:Agent 拿到的配置里没有 webhook_secret
         return {
             "summary": (f"已{'创建' if created else '更新'}自动化脚本 "
-                        f"{automation.name}({schedule})"),
-            "automation": automation.to_dict(),
+                        f"{automation.name}({' + '.join(triggers) or '仅手动触发'})"),
+            "automation": {**automation.public_dict(),
+                           "webhook_path": webhook_path(automation)},
             "resource_url": automation_resource_url(project.id, automation.id),
         }
 
@@ -1884,6 +1894,8 @@ class AgentActionService:
                 "id": automation.id.removeprefix(f"{project.id}:"),
                 "name": automation.name, "description": automation.description,
                 "cron": automation.cron, "enabled": automation.enabled,
+                "webhook": automation.webhook,
+                "webhook_path": webhook_path(automation) if automation.webhook else "",
                 "actions": automation.actions,
                 "timeout_seconds": automation.timeout_seconds,
                 "last_run_at": automation.last_run_at,
@@ -1899,7 +1911,7 @@ class AgentActionService:
             runs = []
             for row in self.store.list_automation_runs(automation.id, limit):
                 run = {key: row.get(key) for key in (
-                    "id", "trigger", "status", "exit_code", "error",
+                    "id", "trigger", "trigger_detail", "status", "exit_code", "error",
                     "started_at", "finished_at")}
                 for stream in ("stdout", "stderr"):
                     text = str(row.get(stream) or "")

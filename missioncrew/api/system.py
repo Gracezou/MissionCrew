@@ -81,7 +81,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                         "resource_url": dashboard_resource_url(project_id, b.id)}
                        for b in store.list_boards(project_id)],
             "automations": [
-                {**a.to_dict(),
+                {**a.public_dict(),
                  "resource_url": automation_resource_url(project_id, a.id)}
                 for a in store.list_automations(project_id)],
         })

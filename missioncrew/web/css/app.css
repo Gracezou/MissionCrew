@@ -1532,6 +1532,11 @@
 .form .automation-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
 .automation-trigger-summary, .automation-trigger-editor { display: grid; gap: 7px; }
 .automation-trigger-summary code { width: fit-content; }
+.automation-webhook-value { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.automation-webhook-value code { padding: 2px 6px; border-radius: 5px; background: var(--bg-soft);
+  overflow-wrap: anywhere; }
+.automation-webhook-hint { margin: 12px 0 0; font-size: 12px; line-height: 1.7; }
+.automation-webhook-hint code { padding: 0 4px; border-radius: 4px; background: var(--bg-soft); }
 .automation-cron-field { display: grid; gap: 4px; max-width: 520px; }
 .automation-edit-config .automation-actions-row { align-items: start; }
 .automation-edit-config .automation-actions-row dt { padding-top: 6px; }

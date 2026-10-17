@@ -2,17 +2,17 @@
 
 两个机制拼成一条自动化流水线：
 
-1. **自动化脚本（Automation）**：按 crontab 定时（或手动）触发一个脚本，平台为该次运行签发一次性 Agent Tool 令牌，脚本用它调用平台动作——创建任务、同步数据源、发消息、发布文档等，也就是"脚本更新 MissionCrew"的能力。
+1. **自动化脚本（Automation）**：按 crontab 定时、由外部系统的 webhook 投递或手动触发一个脚本，平台为该次运行签发一次性 Agent Tool 令牌，脚本用它调用平台动作——创建任务、同步数据源、发消息、发布文档等，也就是"脚本更新 MissionCrew"的能力。
 2. **任务自动处理规则（Task 自动规则）**：新建 Task 的标签命中某条规则的标签表达式时，平台自动把它派发进频道交给角色处理，与人工「交给主控处理」完全同构。
 
-两者组合，外部系统的条目可以全自动流转：**GitHub/GitCode Issue、PR、告警 → 定时脚本同步成 Task → 规则命中 → 自动派发给角色 → Agent 在频道里处理 → 结果经 `task.brief`/`task.update` 回写**。人类只在频道里看进展、必要时介入。
+两者组合，外部系统的条目可以全自动流转：**GitHub/GitCode Issue、PR、告警 → 定时或 webhook 触发的脚本同步成 Task → 规则命中 → 自动派发给角色 → Agent 在频道里处理 → 结果经 `task.brief`/`task.update` 回写**。人类只在频道里看进展、必要时介入。
 
 ## 自动化脚本
 
-- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建；主控改脚本前用 `automation.list`（带 `id`）读取当前全文，改完可用 `automation.run` 立即试跑。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 仅手动触发）、`enabled`、`actions`、`timeout_seconds`。
-- **调度**：所有 cron 触发都走统一定时入口；同一脚本上一次还没跑完时不会重复启动；停机期间错过的触发不补跑。
+- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建；主控改脚本前用 `automation.list`（带 `id`）读取当前全文，改完可用 `automation.run` 立即试跑。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 不定时）、`enabled`（只管定时触发）、`webhook`（是否接受 webhook 投递，可与 cron 同时开启，见下文「Webhook 触发」）、`actions`、`timeout_seconds`。手动触发始终可用。
+- **调度**：所有 cron 触发都走统一定时入口；同一脚本同时只运行一次，上一次还没跑完时定时与手动触发直接跳过，webhook 投递排队；停机期间错过的定时触发不补跑。
 - **权限**：脚本身份的可用动作以自身 `actions` 白名单为事实源，默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`；审计 actor 记为 `automation:<项目>:<脚本>`。
-- **运行记录**：自动化详情页可查看每次运行的触发方式、退出码与 stdout/stderr。退出码非零记为失败。主控用 `automation.list` 带 `id` 读取最近几次运行（输出只回传末尾），据此排查失败的脚本。
+- **运行记录**：自动化详情页可查看每次运行的触发方式（定时 / Webhook / 手动，webhook 另记来源、事件名与投递 id）、退出码与 stdout/stderr。退出码非零记为失败。每个脚本只保留最近 200 条运行记录。主控用 `automation.list` 带 `id` 读取最近几次运行（输出只回传末尾），据此排查失败的脚本。
 
 ### 运行环境
 
@@ -26,6 +26,9 @@
   | `MISSIONCREW_AGENT_TOKEN_FILE` | 本次运行的一次性令牌文件（工作目录下的 `.agent-tool-token`）；CLI 自行读取，脚本不需要读取，也不要打印 |
   | `MISSIONCREW_PROJECT_ID` | 项目 id |
   | `MISSIONCREW_AUTOMATION_ID` | 脚本 id，格式 `<项目 id>:<脚本短 id>` |
+  | `MISSIONCREW_TRIGGER` | 本次运行的触发来源：`cron`、`webhook` 或 `manual`（人在页面点「立即运行」或主控 `automation.run`） |
+  | `MISSIONCREW_WEBHOOK_EVENT_FILE` | 仅 webhook 触发：本次事件文件的路径，格式见下文「Webhook 触发」 |
+  | `MISSIONCREW_WEBHOOK_PROVIDER` / `MISSIONCREW_WEBHOOK_EVENT` / `MISSIONCREW_WEBHOOK_DELIVERY` | 仅 webhook 触发：来源（`github`、`gitcode`、`gitlab` 或空）、事件名（如 `issues`、`Issue Hook`）与投递 id，便于脚本直接按事件分支 |
 
 - **令牌与超时**：令牌在运行结束时立即撤销，超时被终止时同样撤销；运行超过 `timeout_seconds` 的脚本会被终止并记为超时。
 - **调用平台动作**：
@@ -39,6 +42,58 @@
   ```
 
   CLI 成功时退出码为 0；平台返回错误、无法连接或参数不合法时退出码非零，并把错误 JSON 打印到 stdout。bash 脚本开头加 `set -euo pipefail`，任何一步失败都会让本次运行失败并留下记录。
+
+## Webhook 触发
+
+开启 `webhook` 的脚本可以由外部系统（GitHub、GitCode、GitLab 或自建服务）推送事件触发，事件一到就运行，不必等下一次定时；同一个脚本可以同时保留 cron 做定期兜底。
+
+- **专用端口**：`mc serve` 另起一个只接收 webhook 的端口，默认 `8322`（`--webhook-port` 或环境变量 `MISSIONCREW_WEBHOOK_PORT` 修改，`0` 关闭），监听地址默认与 `--host` 相同，可用 `--webhook-host` 或 `MISSIONCREW_WEBHOOK_HOST` 单独指定。这个端口上只有 `POST /hooks/<项目 id>/<脚本短 id>` 一条路由：其他路径一律 404、其他方法 405，不提供页面、API 或静态文件。主服务没有身份验证，需要让外部系统访问时只转发 webhook 端口（端口转发、隧道或反向代理），不要暴露主服务端口。端口被占用时主服务照常启动，自动化详情页的「Webhook」区显示未监听的原因。
+- **地址与密钥**：开启后在自动化详情页的「Webhook」区查看投递地址与密钥，可以复制或重新生成（重新生成后旧密钥立即失效，外部系统要同步修改）。密钥在首次开启时生成，关闭 webhook 后保留。它只在这个页面显示，总览数据和 Agent Tool 的结果里都没有：主控用 `automation.save` 开启 webhook 后，应把投递路径告诉人，由人到页面取密钥去配置外部系统。
+- **验签**：每次投递必须带下表之一，否则返回 401。有签名头时只认签名。
+
+  | 方式 | 请求头 | 适用 |
+  | --- | --- | --- |
+  | HMAC-SHA256 签名（对原始正文计算） | `X-Hub-Signature-256: sha256=<hex>` | GitHub（Secret 填密钥）、Gitea 及自建服务 |
+  | HMAC-SHA256 签名 | `X-GitCode-Signature-256: sha256=<hex 或 base64>` | GitCode 签名密钥模式 |
+  | 密码 | `X-GitCode-Token`、`X-Gitlab-Token` 或 `Authorization: Bearer <密钥>` | GitCode 密码模式、GitLab 的 Secret token、自建服务 |
+
+- **请求与响应**：正文支持 JSON 与 GitHub 的表单格式（`payload=<json>`），上限 25 MiB（超出返回 413），声明为 JSON 却解析失败返回 400。接受后立即返回 `202 {"ok": true, "run_id": <运行记录 id>}`，脚本在后台运行；GitHub 的 `ping` 事件由平台直接回 `200 {"ok": true, "pong": true}`，不运行脚本。脚本不存在、不属于该项目或没开 webhook 时一律 404，不区分原因。
+- **排队**：脚本正在运行时到达的投递按到达顺序排队，返回 `202 {"ok": true, "queued": true}`；每个脚本最多排 20 条，满了返回 503。本次运行结束后接着跑下一条，排到时以脚本最新定义为准：这期间关掉 webhook 或删除脚本，排队的事件会被丢弃并记审计。队列只在内存里，服务重启时丢失，所以需要不漏事件的同步要靠 cron 定期全量兜底。
+- **事件文件**：webhook 触发的运行里，事件写在工作目录下的 `.webhook-event.json`（路径即 `MISSIONCREW_WEBHOOK_EVENT_FILE`），运行结束即删除：
+
+  ```json
+  {
+    "provider": "github",
+    "event": "issues",
+    "delivery": "<投递 id>",
+    "received_at": 1760000000.0,
+    "content_type": "application/json",
+    "headers": {"user-agent": "GitHub-Hookshot/...", "x-github-event": "issues"},
+    "payload": {"action": "opened", "issue": {"number": 42}},
+    "body": null
+  }
+  ```
+
+  `provider` 按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
+- **过滤交给脚本**：平台不按事件类型、仓库或动作过滤，脚本读事件后对不关心的投递直接 `exit 0`。这样的运行也会留一条记录，便于排查到过哪些事件。
+
+示例：Issue 打开、关闭或重新打开时立即同步，其余事件忽略；cron 每 30 分钟兜底一次。注意 `board_source.save` 是整体同步，webhook 触发时也要拉全量再保存，不能只拿事件里那一条 Issue 去保存，否则其他任务会被删除。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$MISSIONCREW_TRIGGER" = webhook ]; then
+  [ "$MISSIONCREW_WEBHOOK_EVENT" = issues ] || { echo "忽略事件 $MISSIONCREW_WEBHOOK_EVENT"; exit 0; }
+  action=$(jq -r '.payload.action' "$MISSIONCREW_WEBHOOK_EVENT_FILE")
+  case "$action" in
+    opened|closed|reopened) ;;
+    *) echo "忽略 issues.$action"; exit 0 ;;
+  esac
+fi
+
+# 定时、手动与命中的 webhook 走同一段全量同步，写法见下文「闭环示例」
+```
 
 ## 外部列表同步成任务（数据源）
 
@@ -87,7 +142,7 @@
 
 ## 闭环示例：自动处理 GitCode/GitHub Issue
 
-1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本，用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
+1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本（想让 Issue 一变化就同步，再开启 webhook 并按上文过滤事件），用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
 
    ```bash
    #!/usr/bin/env bash

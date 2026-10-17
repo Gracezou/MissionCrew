@@ -50,8 +50,9 @@ class AutomationInput(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     script: Optional[str] = None
-    cron: Optional[str] = None           # 五段 crontab;空字符串 = 仅手动触发
-    enabled: Optional[bool] = None
+    cron: Optional[str] = None           # 五段 crontab;空字符串 = 不定时
+    enabled: Optional[bool] = None       # 只管定时触发
+    webhook: Optional[bool] = None       # 是否接受专用 webhook 端口的投递
     actions: Optional[list[str]] = None  # None = 保留现值
     timeout_seconds: Optional[int] = Field(None, ge=1)
 

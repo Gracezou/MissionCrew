@@ -40,6 +40,7 @@ app.add_typer(role_app, name="role")
 # 环境变量 MISSIONCREW_HOST(便于 pm2 等托管方式不改命令行)。
 DEFAULT_SERVE_HOST = "127.0.0.1"
 DEFAULT_SERVE_PORT = 8321
+DEFAULT_WEBHOOK_PORT = 8322
 
 
 def _store() -> Store:
@@ -102,16 +103,28 @@ def demo(run: bool = typer.Option(True, help="是否顺带演示 Channel 派发"
 
 @app.command()
 def serve(host: Optional[str] = None, port: int = DEFAULT_SERVE_PORT,
-          chat_workers: Optional[int] = None):
-    """启动 Web 服务(REST API + 看板)。
+          chat_workers: Optional[int] = None,
+          webhook_host: Optional[str] = None,
+          webhook_port: Optional[int] = None):
+    """启动 Web 服务(REST API + 看板)与专用 webhook 端口。
 
     平台不提供身份验证,默认只监听本机 127.0.0.1;需要局域网访问时显式传
     --host 0.0.0.0(或设置 MISSIONCREW_HOST),并只在可信网络中使用。
     --chat-workers 设定聊天执行并发上限(默认 16,亦可用环境变量
     MISSIONCREW_CHAT_MAX_WORKERS 配置);同频道同角色仍按会话串行。
+    webhook 端口只接收自动化脚本的 webhook 投递(默认 8322,0 = 关闭;亦可用
+    MISSIONCREW_WEBHOOK_PORT),监听地址默认同 --host(MISSIONCREW_WEBHOOK_HOST
+    可单独指定)。对外暴露时只转发这个端口,不要暴露主服务端口。
     """
     import uvicorn
     host = host or os.environ.get("MISSIONCREW_HOST") or DEFAULT_SERVE_HOST
+    webhook_host = (webhook_host or os.environ.get("MISSIONCREW_WEBHOOK_HOST")
+                    or host)
+    if webhook_port is None:
+        raw_port = os.environ.get("MISSIONCREW_WEBHOOK_PORT", "").strip()
+        webhook_port = int(raw_port) if raw_port else DEFAULT_WEBHOOK_PORT
+    if webhook_port and webhook_port == port:
+        raise typer.BadParameter("webhook 端口不能与主服务端口相同")
     from .api import create_app
     # Runtime 总是经本机回环访问 Agent Tool API；监听地址可继续面向所有网卡。
     os.environ["MISSIONCREW_AGENT_TOOL_URL"] = (
@@ -119,7 +132,11 @@ def serve(host: Optional[str] = None, port: int = DEFAULT_SERVE_PORT,
     if chat_workers is not None:
         os.environ["MISSIONCREW_CHAT_MAX_WORKERS"] = str(chat_workers)
     typer.echo(f"MissionCrew 看板: http://{host}:{port}")
-    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+    if webhook_port:
+        typer.echo(f"Webhook 入口: http://{webhook_host}:{webhook_port}"
+                   "/hooks/<项目>/<脚本>")
+    uvicorn.run(create_app(webhook_host=webhook_host, webhook_port=webhook_port),
+                host=host, port=port, log_level="warning")
 
 
 @app.command()

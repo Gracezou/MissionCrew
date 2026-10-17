@@ -3,6 +3,7 @@
 const AUTOMATION_STATUS = {
   running: "运行中", succeeded: "成功", failed: "失败", timeout: "超时",
 };
+const AUTOMATION_TRIGGERS = { cron: "定时", webhook: "Webhook", manual: "手动" };
 
 const projAutomations = () =>
   (overview.automations || []).filter(item => item.project_id === currentProject);
@@ -11,6 +12,10 @@ let automationPageRequest = 0;
 // undefined = view mode, null = new automation, string = editing automation id
 let automationEditingId;
 let automationInitialFormSnapshot = "";
+// 详情页当前脚本的 webhook 配置({automationId, path, secret, listener});密钥只从
+// /webhook 端点按需取,不在总览轮询里。切换脚本时重新隐藏密钥。
+let automationWebhook = null;
+let automationSecretVisible = false;
 
 function automationShortId(automation) {
   return automation.id.replace(`${automation.project_id}:`, "");
@@ -56,7 +61,7 @@ function automationRunRows(automation, runs) {
   const shortId = automationShortId(automation);
   return runs.map(run => `<tr>
     <td>#${run.id}</td>
-    <td>${esc(run.trigger === "cron" ? "定时" : "手动")}</td>
+    <td title="${esc(run.trigger_detail || "")}">${esc(AUTOMATION_TRIGGERS[run.trigger] || run.trigger)}</td>
     <td><span class="pill automation-st-${esc(run.status)}">${esc(AUTOMATION_STATUS[run.status] || run.status)}</span></td>
     <td class="muted">${esc(fmtTs(run.started_at))}</td>
     <td class="muted">${run.finished_at ? `${Math.round(run.finished_at - run.started_at)}s` : "…"}</td>
@@ -65,11 +70,84 @@ function automationRunRows(automation, runs) {
   </tr>`).join("");
 }
 
+// 触发方式摘要:定时(启用时)、Webhook(开启时)与始终可用的手动
+function automationTriggerMode(automation) {
+  const modes = [automation.cron && automation.enabled ? "定时" : "",
+                 automation.webhook ? "Webhook" : "", "手动"].filter(Boolean);
+  return modes.join("、") + (automation.cron && !automation.enabled ? "（定时已停用）" : "");
+}
+
+function automationWebhookHtml(automation) {
+  if (!automation.webhook) return "";
+  const config = automationWebhook?.automationId === automation.id ? automationWebhook : null;
+  const listener = config?.listener || { enabled: false };
+  // 监听器是纯 HTTP,地址按当前访问的主机名拼;外部系统要经端口转发或隧道才能访问
+  const url = listener.enabled
+    ? `http://${location.hostname}:${listener.port}${automation.webhook_path}`
+    : automation.webhook_path;
+  const state = !config ? "加载中…"
+    : !listener.enabled ? '<span class="automation-error">服务未开启 webhook 端口（mc serve --webhook-port）</span>'
+    : listener.listening ? `<span class="pill automation-st-succeeded">监听中</span> <span class="muted">${esc(listener.host)}:${esc(listener.port)}</span>`
+    : `<span class="automation-error">${esc(listener.error || "未在监听")}</span>`;
+  const secret = config?.secret || "";
+  const shown = secret ? (automationSecretVisible ? secret : "•".repeat(20)) : "加载中…";
+  const id = esc(automation.id);
+  return `<section class="automation-detail-section automation-webhook-section">
+      <h3>Webhook</h3>
+      <dl class="automation-config">
+        <div><dt>投递地址</dt><dd class="automation-webhook-value"><code>${esc(url)}</code>
+          <button class="ghost compact" type="button" data-copy="${esc(url)}"
+            onclick="copyAutomationWebhookValue(this.dataset.copy, '投递地址')">复制</button></dd></div>
+        <div><dt>密钥</dt><dd class="automation-webhook-value"><code>${esc(shown)}</code>
+          ${secret ? `<button class="ghost compact" type="button" onclick="toggleAutomationSecret()">${automationSecretVisible ? "隐藏" : "显示"}</button>
+          <button class="ghost compact" type="button"
+            onclick="copyAutomationWebhookValue(automationWebhook?.secret, '密钥')">复制</button>
+          <button class="ghost compact" type="button" data-id="${id}"
+            onclick="rotateAutomationSecret(this.dataset.id)">重新生成</button>` : ""}</dd></div>
+        <div><dt>端口</dt><dd>${state}</dd></div>
+      </dl>
+      <p class="muted automation-webhook-hint">GitHub：Payload URL 填投递地址，Content type 选
+        <code>application/json</code>，Secret 填密钥；GitCode 选签名密钥或密码模式，填同一个密钥。
+        外部系统要能访问这个端口：对外只转发 webhook 端口，不要暴露主服务端口。脚本用
+        <code>$MISSIONCREW_TRIGGER</code> 区分触发来源，事件内容在
+        <code>$MISSIONCREW_WEBHOOK_EVENT_FILE</code>，由脚本决定处理哪些事件。</p>
+    </section>`;
+}
+
+function rerenderAutomationWebhook() {
+  const automation = projAutomations().find(item => item.id === selectedAutomationId);
+  const section = document.querySelector(".automation-webhook-section");
+  if (automation && section) section.outerHTML = automationWebhookHtml(automation);
+}
+
+function toggleAutomationSecret() {
+  automationSecretVisible = !automationSecretVisible;
+  rerenderAutomationWebhook();
+}
+
+async function copyAutomationWebhookValue(value, label) {
+  if (!value) return;
+  const copied = await copyTextToClipboard(value);
+  toast(copied ? `${label}已复制` : "复制失败，请手动选择复制", copied ? "success" : "error");
+}
+
+async function rotateAutomationSecret(id) {
+  const automation = projAutomations().find(item => item.id === id);
+  if (!automation || !await uiConfirm(
+    "重新生成后旧密钥立即失效，外部系统（GitHub/GitCode 等）的 Webhook 配置要同步改成新密钥。是否继续？",
+    "重新生成密钥")) return;
+  const result = await api("POST", `/api/projects/${encodeURIComponent(currentProject)}` +
+    `/automations/${encodeURIComponent(automationShortId(automation))}/webhook/secret`);
+  if (automationWebhook?.automationId === id) automationWebhook.secret = result.secret;
+  automationSecretVisible = true;   // 刚生成的新密钥直接显示,方便复制到外部系统
+  rerenderAutomationWebhook();
+  toast("已生成新密钥", "success");
+}
+
 function automationDetailHtml(automation, runs) {
   const status = automation.running ? "running" : automation.last_status;
-  const schedule = automation.cron ? `<code>${esc(automation.cron)}</code>` : "仅手动触发";
-  const triggerMode = automation.cron
-    ? (automation.enabled ? "定时与手动" : "仅手动（定时已停用）") : "仅手动";
+  const schedule = automation.cron ? `<code>${esc(automation.cron)}</code>` : "";
+  const triggerMode = automationTriggerMode(automation);
   const creator = automation.created_by_role_id ? `@${automation.created_by_role_id}` : "human/platform";
   return `<div class="automation-page-head">
       <div><h2>${esc(automation.name || automationShortId(automation))}</h2>
@@ -96,11 +174,12 @@ function automationDetailHtml(automation, runs) {
       <h3>配置</h3>
       <dl class="automation-config">
         <div><dt>触发方式</dt><dd class="automation-trigger-summary">
-          <span>${triggerMode}</span><span>${schedule}</span></dd></div>
+          <span>${triggerMode}</span>${schedule ? `<span>${schedule}</span>` : ""}</dd></div>
         <div><dt>超时</dt><dd>${esc(automation.timeout_seconds)} 秒</dd></div>
         <div class="automation-actions-row"><dt>允许的平台动作</dt><dd>${(automation.actions || []).map(action => `<code>${esc(action)}</code>`).join("") || "无"}</dd></div>
       </dl>
     </section>
+    ${automationWebhookHtml(automation)}
     <section class="automation-detail-section">
       <h3>脚本预览</h3>
       <pre class="automation-script-preview"><code>${esc(automation.script)}</code></pre>
@@ -197,10 +276,13 @@ function automationEditorHtml(automation, runsSection = "") {
           <label class="automation-toggle"><input type="checkbox" id="af-enabled"
             ${automation ? (automation.enabled ? "checked" : "") : "checked"}> 启用定时触发</label>
           <label class="automation-cron-field">
-            <span class="automation-cron-label">crontab(五段;留空 = 仅手动触发) ${automationCronHelpHtml()}</span>
+            <span class="automation-cron-label">crontab(五段;留空 = 不定时) ${automationCronHelpHtml()}</span>
             <input type="text" id="af-cron" aria-label="crontab"
               placeholder="例如 0 9 * * 1-5" value="${esc(automation?.cron || "")}">
           </label>
+          <label class="automation-toggle"><input type="checkbox" id="af-webhook"
+            ${automation?.webhook ? "checked" : ""}> 接受 Webhook 触发
+            <span class="muted">（保存后在详情页查看投递地址与密钥；可与定时同时使用）</span></label>
         </dd></div>
         <div><dt>超时</dt><dd><input type="number" id="af-timeout" min="1" aria-label="超时秒数"
           value="${esc(automation?.timeout_seconds ?? 600)}"><span class="muted"> 秒</span></dd></div>
@@ -226,6 +308,7 @@ function automationFormSnapshot() {
     description: field("af-desc")?.value || "",
     cron: field("af-cron")?.value || "",
     enabled: Boolean(field("af-enabled")?.checked),
+    webhook: Boolean(field("af-webhook")?.checked),
     timeout: field("af-timeout")?.value || "",
     actions: [...document.querySelectorAll(".automation-actions-grid input:checked")]
       .map(input => input.value).sort(),
@@ -261,6 +344,7 @@ async function renderAutomationPage(refresh = false) {
   const sameAutomation = detail.dataset.automationId === automation.id;
   const scrollTop = sameAutomation ? workspace?.scrollTop || 0 : 0;
   if (!sameAutomation) {
+    automationSecretVisible = false;
     detail.dataset.automationId = automation.id;
     detail.innerHTML = automationDetailHtml(automation, []);
     if (workspace) workspace.scrollTop = 0;
@@ -279,9 +363,13 @@ async function renderAutomationPage(refresh = false) {
     }
     if (!automation) return renderAutomationPage(false);
     const shortId = automationShortId(automation);
-    const data = await api("GET",
-      `/api/projects/${encodeURIComponent(currentProject)}/automations/${encodeURIComponent(shortId)}/runs?limit=30`);
+    const base = `/api/projects/${encodeURIComponent(currentProject)}/automations/${encodeURIComponent(shortId)}`;
+    const [data, webhook] = await Promise.all([
+      api("GET", `${base}/runs?limit=30`),
+      automation.webhook ? api("GET", `${base}/webhook`) : null,
+    ]);
     if (request !== automationPageRequest) return;
+    automationWebhook = webhook ? { automationId: automation.id, ...webhook } : null;
     detail.dataset.automationId = automation.id;
     detail.innerHTML = automationDetailHtml(automation, data.runs);
     if (workspace) workspace.scrollTop = scrollTop;
@@ -340,6 +428,7 @@ async function saveAutomationForm(existingId) {
     script,
     cron: document.getElementById("af-cron").value.trim(),
     enabled: document.getElementById("af-enabled").checked,
+    webhook: document.getElementById("af-webhook").checked,
     actions,
     timeout_seconds: Number(document.getElementById("af-timeout").value) || 600,
   });
@@ -383,8 +472,10 @@ async function openAutomationRunDetail(shortId, runId) {
     `/api/projects/${encodeURIComponent(currentProject)}/automations/${encodeURIComponent(shortId)}/runs/${runId}`);
   const section = (title, text) => text
     ? `<label>${title}</label><pre class="automation-output">${esc(text)}</pre>` : "";
+  const trigger = AUTOMATION_TRIGGERS[run.trigger] || run.trigger;
   openFormDialog(`运行 #${run.id} · ${esc(AUTOMATION_STATUS[run.status] || run.status)}`, `
-    <p class="muted" style="margin-top:0">开始 ${esc(fmtTs(run.started_at))} ·
+    <p class="muted" style="margin-top:0">触发 ${esc(trigger)}${run.trigger_detail ? `（${esc(run.trigger_detail)}）` : ""} ·
+      开始 ${esc(fmtTs(run.started_at))} ·
       结束 ${esc(fmtTs(run.finished_at))} · 退出码 ${run.exit_code ?? "—"}</p>
     ${run.error ? `<p class="automation-error">${esc(run.error)}</p>` : ""}
     ${section("stdout", run.stdout)}

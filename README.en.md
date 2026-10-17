@@ -121,7 +121,7 @@ MissionCrew exposes a set of tool commands to agents, so an agent operates platf
 - **Channel**: a chat room. Every agent can read the conversation history and collaborate in it.
 - **Guidelines**: a special kind of document whose list is injected into context. Use them to define workflows such as development or testing requirements.
 - **Docs**: every project gets a versioned document library, a good home for material that does not belong in the code repository.
-- **Automation**: a script triggered on a schedule or by hand that calls the MissionCrew API to perform actions.
+- **Automation**: a script triggered on a schedule, by a webhook from an external system (such as GitHub events) or by hand that calls the MissionCrew API to perform actions.
 
 **None of these resources need to be managed by hand.** Channels, tasks, documents, guidelines, skills, dashboards and automation scripts can all be created and maintained by the orchestrator through the Agent Tool: say "split the login rework into tasks and open a channel to track it", "write up what we just concluded as a document" or "put these testing requirements into a guideline" in the chat, and the orchestrator calls the matching actions and posts the results back as links; other roles can create and update tasks and publish documents too. The web UI is mainly for viewing, reviewing and the occasional manual tweak, not the everyday entry point for data entry.
 
@@ -138,7 +138,7 @@ Detailed docs are indexed in [docs/en/README.md](docs/en/README.md) (Chinese ver
 
 ## Security and data directory
 
-**There is no authentication of any kind.** The web UI and API can browse local directories and dispatch agents that run commands, so `mc serve` listens on `127.0.0.1` only by default. To reach it from other devices on your LAN, pass `--host 0.0.0.0` explicitly (or set `MISSIONCREW_HOST`), do so only on a trusted network, and never expose it to the internet — see [SECURITY.md](SECURITY.md). The chat concurrency limit defaults to 16 and can be changed with `--chat-workers <N>` or `MISSIONCREW_CHAT_MAX_WORKERS`.
+**There is no authentication of any kind.** The web UI and API can browse local directories and dispatch agents that run commands, so `mc serve` listens on `127.0.0.1` only by default. To reach it from other devices on your LAN, pass `--host 0.0.0.0` explicitly (or set `MISSIONCREW_HOST`), do so only on a trusted network, and never expose it to the internet — see [SECURITY.md](SECURITY.md). The chat concurrency limit defaults to 16 and can be changed with `--chat-workers <N>` or `MISSIONCREW_CHAT_MAX_WORKERS`. Webhooks for automation scripts use a separate port (default 8322) whose only entry point is "verify the signature, then trigger the script"; when GitHub or another external system needs to push events, forward only that port — see [docs/en/automation.md](docs/en/automation.md).
 
 Platform data (SQLite, document libraries, agent workspaces, logs) lives in `.missioncrew/` under the current directory; override it with `MISSIONCREW_HOME`. Nothing is ever written into your code repositories.
 

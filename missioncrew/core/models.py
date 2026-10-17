@@ -916,7 +916,7 @@ AUTOMATION_MAX_TIMEOUT = 6 * 3600
 
 @dataclass
 class Automation:
-    """项目自动化脚本:由主控或人类编写,经统一定时入口按 cron 或手动触发。
+    """项目自动化脚本:由主控或人类编写,按 cron、webhook 投递或手动触发。
 
     脚本以子进程运行,通过专属 Agent Tool token(按 actions 白名单授权)
     调用平台动作;script 有 shebang 时按可执行文件运行,否则用 bash 解释。
@@ -927,8 +927,10 @@ class Automation:
     name: str = ""
     description: str = ""
     script: str = ""
-    cron: str = ""                 # 五段 crontab;空 = 仅手动触发
-    enabled: bool = True
+    cron: str = ""                 # 五段 crontab;空 = 不定时
+    enabled: bool = True           # 只管定时触发;webhook 由 webhook 字段单独开关
+    webhook: bool = False          # 接受专用 webhook 端口上的投递触发(可与 cron 并用)
+    webhook_secret: str = ""       # 验签密钥;只在人类页面显示,不进总览与 Agent 输出
     actions: list[str] = field(
         default_factory=lambda: list(AUTOMATION_DEFAULT_ACTIONS))
     timeout_seconds: int = AUTOMATION_DEFAULT_TIMEOUT
@@ -947,6 +949,12 @@ class Automation:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def public_dict(self) -> dict:
+        """对外展示用:去掉 webhook 密钥,其余字段同 to_dict。"""
+        data = self.to_dict()
+        data.pop("webhook_secret", None)
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "Automation":

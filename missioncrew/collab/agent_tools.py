@@ -134,8 +134,16 @@ ACTION_DEFINITIONS = {
                        "source's first status value (待处理 for the built-in source)"),
             "source": ("optional data source id: the built-in `built-in` (default) or a custom "
                        "source's short id; the task then shows on boards bound to that source and "
-                       "uses its status values. A custom source's whole sync "
-                       "(board_source.save cards) never touches tasks created here"),
+                       "uses its status values"),
+            "url": "optional link to the external item (e.g. the issue page)",
+            "meta": "optional array of short display notes shown on the board card",
+            "external_id": ("optional id of the external item (e.g. the issue number), unique "
+                            "within the source; already taken returns already_exists with the "
+                            "existing task in error.details. In a custom source it is the key "
+                            "of the whole sync (board_source.save cards): card `id` equal to "
+                            "external_id updates this task instead of creating another, and a "
+                            "later card list without it deletes the task. Tasks without "
+                            "external_id are never touched by the whole sync"),
         },
     },
     "task.update": {
@@ -147,9 +155,10 @@ ACTION_DEFINITIONS = {
             "snapshot_updated_at": ("the task's updated_at as last read (tasks/ snapshot or a "
                                     "previous result); on version_conflict, error.details.task "
                                     "is the current task"),
-            "title/summary/body/status/labels/channel_ids": ("fields to update; labels "
-                                                             "replaces the whole label list; "
-                                                             "channel_ids [] unbinds all"),
+            "title/summary/body/status/labels/channel_ids/url/meta/external_id": (
+                "fields to update; labels replaces the whole label list; channel_ids [] "
+                "unbinds all; external_id \"\" removes the sync key (same rules as "
+                "task.create)"),
             "properties": ("set individual `property: value` labels without touching the rest, "
                            "e.g. {\"owner\": \"张三\", \"priority\": null}; a value may be a "
                            "string or an array, null clears the property; status wins if "
@@ -343,8 +352,9 @@ ACTION_DEFINITIONS = {
             "source's tasks (add/update/delete); suited to automation scripts that "
             "periodically sync external lists such as GitCode/GitHub issues, then use "
             "dashboard.save to create a task board bound to the source. To add, change or "
-            "remove single tasks of a source, use task.create with source and "
-            "task.update/task.delete instead of resending the whole card list"
+            "remove single tasks of a source, use task.create with source (and external_id "
+            "when the item exists externally) and task.update/task.delete instead of "
+            "resending the whole card list"
         ),
         "orchestrator_only": True,
         "arguments": {
@@ -353,9 +363,9 @@ ACTION_DEFINITIONS = {
             "columns": ("optional array of status values [{value,color}] (legacy "
                         "{key,title,color} accepted); defaults to 待处理/处理中/已阻塞/已完成 "
                         "on creation, omitted on update keeps the existing ones"),
-            "cards": ("optional card array, synced as a whole by id: synced tasks absent "
-                      "from the list are deleted, while tasks added with task.create and source "
-                      "are left alone. Each card needs id (title too when it creates a task), "
+            "cards": ("optional card array, synced as a whole by id against the source's "
+                      "tasks' external_id: tasks with an external_id absent from the list are "
+                      "deleted, tasks without one are left alone. Each card needs id (title too when it creates a task), "
                       "optionally summary, status (status text), labels, properties, "
                       "updated_at (Unix seconds), meta (array of strings) and url (external "
                       "link). Existing tasks only change "
@@ -527,10 +537,11 @@ PEER_MESSAGE_PUBLISH = {
 ACTION_ARGUMENTS = {
     "task.create": {
         "title", "summary", "body", "labels", "channel_ids", "status", "source",
+        "url", "meta", "external_id",
     },
     "task.update": {
         "id", "snapshot_updated_at", "title", "summary", "body", "status",
-        "labels", "properties", "channel_ids",
+        "labels", "properties", "channel_ids", "url", "meta", "external_id",
     },
     "task.brief": {"id", "content", "status"},
     "task.delete": {"id"},
@@ -1155,13 +1166,16 @@ class AgentActionService:
     def _create_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
         from types import SimpleNamespace
-        from .tasks import auto_process_task, create_task
+        from .tasks import TaskConflictError, auto_process_task, create_task
 
-        task = create_task(
-            self.store, project.id, **arguments,
-            actor=identity.actor,
-            fallback_channel_id=identity.channel_id,
-        )
+        try:
+            task = create_task(
+                self.store, project.id, **arguments,
+                actor=identity.actor,
+                fallback_channel_id=identity.channel_id,
+            )
+        except TaskConflictError as exc:
+            raise self._task_conflict(exc) from exc
         self._refresh_task_snapshot(project.id, identity)
         self.store.audit(
             identity.actor, "agent_task_created", task.id,
@@ -1184,7 +1198,7 @@ class AgentActionService:
 
     def _update_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
-        from .tasks import update_task
+        from .tasks import TaskConflictError, update_task
 
         task_id = str(arguments.get("id", "")).strip()
         task = self.store.get_task(task_id)
@@ -1198,6 +1212,8 @@ class AgentActionService:
                 snapshot_updated_at=arguments.get("snapshot_updated_at"),
                 changes=changes, actor=identity.actor,
             )
+        except TaskConflictError as exc:
+            raise self._task_conflict(exc) from exc
         except ValueError as exc:
             if "重新读取" in str(exc):
                 # 刷新快照并带回当前版本,调用方核对后用新的 updated_at 当场重试
@@ -1219,6 +1235,13 @@ class AgentActionService:
             "summary": f"已更新任务 [{task.title}]({url})",
             "task": task.to_dict(), "resource_url": url,
         }
+
+    @staticmethod
+    def _task_conflict(exc) -> "AgentToolError":
+        # 带回已占用该 external_id 的任务,调用方改用 task.update 更新它而不是再建一张
+        return AgentToolError(
+            "already_exists", f"{exc}；error.details.task 是已有任务，请改用 task.update",
+            409, details={"task": exc.existing.to_dict()})
 
     def _add_task_brief(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:

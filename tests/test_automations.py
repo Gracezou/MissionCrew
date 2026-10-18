@@ -334,6 +334,91 @@ def test_api_creates_task_in_custom_source(seeded):
         assert missing.status_code == 400
 
 
+def test_task_create_records_external_item_matched_by_whole_sync(seeded, tmp_path):
+    """task.create/update 可写 url、meta、external_id(两类源同一口径);
+    带 external_id 登记的外部条目由整体同步按 id 接管,不会再建一张。"""
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="pr-sync", script="true",
+        actions=["board_source.save", "task.create", "task.update"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    call("board_source.save", {"id": "pr-dev", "columns": [{"value": "正在开发"}],
+                               "cards": [{"id": "1", "title": "已同步的 PR"}]}, "s1")
+    url = "https://github.com/acme/webshop/pull/42"
+    copied = call("task.create", {
+        "title": "先登记的 PR", "source": "pr-dev", "external_id": 42, "url": url,
+        "meta": ["#42", "@alice"], "status": "正在开发"}, "c1")["task"]
+    assert (copied["external_id"], copied["url"], copied["meta"]) == ("42", url, ["#42", "@alice"])
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{copied['id']}.md")
+    assert (attributes["external_id"], attributes["url"]) == ("42", url)
+
+    # 同源重复登记返回已有任务;别的源(含内置源)可以用同一个 id,内置源内同样唯一
+    with pytest.raises(AgentToolError) as taken:
+        call("task.create", {"title": "又一张", "source": "pr-dev", "external_id": "42"}, "c2")
+    assert (taken.value.code, taken.value.status_code) == ("already_exists", 409)
+    assert taken.value.details["task"]["id"] == copied["id"]
+    builtin = call("task.create", {"title": "内置条目", "external_id": "42", "url": url}, "c3")
+    assert builtin["task"]["source_id"] == "built-in"
+    with pytest.raises(AgentToolError):
+        call("task.create", {"title": "内置重复", "external_id": "42"}, "c4")
+
+    # 下一次整体同步按 external_id 接管这张任务:更新卡片带的字段,不再新建
+    sync = call("board_source.save", {"id": "pr-dev", "cards": [
+        {"id": "1", "title": "已同步的 PR"},
+        {"id": "42", "title": "同步来的 PR 42"}]}, "s2")["sync"]
+    assert sync == {"created": 0, "updated": 1, "removed": 0}
+    task = seeded.get_task(copied["id"])
+    assert task.title == "同步来的 PR 42" and task.meta == ["#42", "@alice"]
+    assert task.status == "正在开发"
+
+    # task.update 同样能改这些字段;改成已被占用的 id 冲突,空串去掉同步键
+    def update(changes, request_id):
+        current = seeded.get_task(copied["id"])
+        return call("task.update", {"id": current.id,
+                                    "snapshot_updated_at": current.updated_at,
+                                    **changes}, request_id)["task"]
+
+    assert update({"url": url + "#c", "meta": []}, "u1")["meta"] == []
+    with pytest.raises(AgentToolError) as clash:
+        update({"external_id": "1"}, "u2")
+    assert clash.value.code == "already_exists"
+    assert seeded.get_task(copied["id"]).external_id == "42"
+    assert update({"external_id": ""}, "u3")["external_id"] == ""
+    # 去掉同步键后整体同步不再管它:不在 cards 里也保留
+    call("board_source.save", {"id": "pr-dev", "cards": []}, "s3")
+    assert [t.id for t in seeded.list_tasks("webshop", source_id="pr-dev")] == [copied["id"]]
+
+
+def test_api_task_external_fields_and_conflict(seeded):
+    with TestClient(create_app()) as client:
+        created = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "Issue 7", "external_id": "7",
+            "url": "https://example.com/issues/7", "meta": ["#7"]})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert (body["external_id"], body["meta"]) == ("7", ["#7"])
+        dup = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "Issue 7 again", "external_id": "7"})
+        assert dup.status_code == 409 and body["id"] in dup.json()["detail"]
+        edited = client.patch(f"/api/tasks/{body['id']}", json={
+            "snapshot_updated_at": body["updated_at"], "url": "", "meta": ["改过"]})
+        assert edited.status_code == 200, edited.text
+        assert (edited.json()["task"]["url"], edited.json()["task"]["meta"]) == ("", ["改过"])
+        # 网页编辑不带这些字段时保持原值
+        current = edited.json()["task"]
+        kept = client.patch(f"/api/tasks/{body['id']}", json={
+            "snapshot_updated_at": current["updated_at"], "title": "Issue 7 改名"})
+        assert kept.json()["task"]["external_id"] == "7"
+
+
 def test_synced_task_shows_original_link_and_rule_trigger_to_agents(seeded, tmp_path):
     """同步任务的原始链接要进快照和派发消息;规则派发的触发行不能写成自动化脚本。"""
     from missioncrew.collab.workspace import _parse_task_file, write_task_files

@@ -20,6 +20,14 @@ class TaskDispatchError(ValueError):
     """多 Channel 派发只完成一部分时，保留已经产生的消息。"""
 
 
+class TaskConflictError(ValueError):
+    """external_id 在同一数据源里已被另一个 Task 占用;existing 是那个 Task。"""
+
+    def __init__(self, message: str, existing: Task):
+        super().__init__(message)
+        self.existing = existing
+
+
 def _text(value: object, field: str, *, required: bool = False) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} 必须是字符串")
@@ -33,6 +41,23 @@ def _labels(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError("labels 必须是字符串数组")
     return normalize_labels(value)
+
+
+def _external_id(store: Store, project_id: str, source_id: str, value: object,
+                 exclude_task_id: str = "") -> str:
+    """外部条目的同步键(如 Issue 编号):同一数据源内唯一,空串表示没有。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("external_id 必须是字符串")
+    external_id = str(value).strip()
+    twin = board_sources.external_twin(
+        store, project_id, source_id, external_id, exclude_task_id)
+    if twin is not None:
+        raise TaskConflictError(
+            f"数据源 {source_id} 已有 external_id 为 {external_id} 的 Task: {twin.id}",
+            twin)
+    return external_id
 
 
 def task_channels(store: Store, project_id: str, channel_ids: object,
@@ -71,11 +96,18 @@ def task_channels(store: Store, project_id: str, channel_ids: object,
 def create_task(store: Store, project_id: str, *, title: object,
                 summary: object = "", body: object = "", labels: object = None,
                 channel_ids: object = None, status: object = None,
-                source: object = None, actor: str = "human",
+                source: object = None, url: object = None, meta: object = None,
+                external_id: object = None, actor: str = "human",
                 fallback_channel_id: str = "") -> Task:
+    """新建 Task;url/meta/external_id 与同步卡片同一口径,内置源与自定义源都可带。
+
+    自定义源里带 external_id 的任务归整体同步管理:同 id 的卡片更新它,
+    卡片列表里没有它时被删除。
+    """
     if store.get_project(project_id) is None:
         raise ValueError("项目不存在")
     source_id = board_sources.require_source(store, project_id, source)
+    external_id = _external_id(store, project_id, source_id, external_id)
     channels = task_channels(
         store, project_id, channel_ids if channel_ids is not None else [],
         fallback_channel_id=fallback_channel_id,
@@ -93,10 +125,14 @@ def create_task(store: Store, project_id: str, *, title: object,
         summary=_text(summary, "summary"), body=_text(body, "body"),
         labels=label_list,
         channel_ids=[channel.id for channel in channels],
+        url=board_sources.clean_url(_text(url, "url")) if url is not None else "",
+        meta=board_sources.clean_meta(meta) if meta is not None else [],
+        external_id=external_id,
     )
     store.put_task(task)
     store.audit(actor, "task_created", task.id, f"project={project_id}"
-                + (f" source={source_id}" if source_id != BUILTIN_SOURCE_ID else ""))
+                + (f" source={source_id}" if source_id != BUILTIN_SOURCE_ID else "")
+                + (f" external_id={external_id}" if external_id else ""))
     return task
 
 
@@ -108,6 +144,15 @@ def update_task(store: Store, task: Task, *, snapshot_updated_at: object,
             or isinstance(snapshot_updated_at, bool)
             or abs(float(snapshot_updated_at) - task.updated_at) > 1e-6):
         raise ValueError("任务已被其他执行更新，请重新读取后再修改")
+    # 先校验会冲突的同步键,冲突时不留下改了一半的对象
+    if "external_id" in changes:
+        external_id = _external_id(store, task.project_id, task.source_id,
+                                   changes["external_id"], exclude_task_id=task.id)
+        task.external_id = external_id
+    if "url" in changes:
+        task.url = board_sources.clean_url(_text(changes["url"], "url"))
+    if "meta" in changes:
+        task.meta = board_sources.clean_meta(changes["meta"])
     if "title" in changes:
         task.title = _text(changes["title"], "title", required=True)
     if "summary" in changes:

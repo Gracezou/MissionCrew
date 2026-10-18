@@ -15,6 +15,9 @@ class TaskCreate(BaseModel):
     channel_ids: list[str] = Field(default_factory=list)
     status: Optional[str] = None   # 状态文本;None = labels 已带则保留,否则默认
     source: Optional[str] = None   # 数据源 id;None = 内置源
+    url: Optional[str] = None      # 外部条目链接
+    meta: Optional[list[str]] = None   # 看板卡片附注
+    external_id: Optional[str] = None  # 外部条目 id(同源唯一,自定义源的整体同步键)
 
 
 class TaskUpdate(BaseModel):
@@ -27,6 +30,9 @@ class TaskUpdate(BaseModel):
     properties: Optional[dict[str, Optional[Union[str, list[str]]]]] = None
     channel_ids: Optional[list[str]] = None
     status: Optional[str] = None
+    url: Optional[str] = None
+    meta: Optional[list[str]] = None
+    external_id: Optional[str] = None   # "" 去掉同步键
 
 
 class TaskBriefInput(BaseModel):

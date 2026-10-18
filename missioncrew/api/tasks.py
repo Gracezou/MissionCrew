@@ -8,9 +8,9 @@ from fastapi import FastAPI, HTTPException, Request
 from ..collab.recycle_bin import recycle_task
 from ..collab.resource_urls import channel_resource_url, task_resource_url
 from ..core.models import BUILTIN_SOURCE_ID
-from ..collab.tasks import (TaskDispatchError, add_task_brief, archive_task,
-                            auto_process_task, create_task, dispatch_task,
-                            restore_task, update_task)
+from ..collab.tasks import (TaskConflictError, TaskDispatchError, add_task_brief,
+                            archive_task, auto_process_task, create_task,
+                            dispatch_task, restore_task, update_task)
 from .context import ApiContext, etag_json_response
 from .schemas import TaskBriefInput, TaskCreate, TaskProcessInput, TaskUpdate
 
@@ -44,8 +44,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             task = create_task(
                 store, body.project_id, title=body.title, summary=body.summary,
                 body=body.body, labels=body.labels, channel_ids=body.channel_ids,
-                status=body.status, source=body.source,
+                status=body.status, source=body.source, url=body.url,
+                meta=body.meta, external_id=body.external_id,
             )
+        except TaskConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         auto = auto_process_task(store, ctx.chat, task)
@@ -102,7 +105,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 changes=changes,
             )
         except ValueError as exc:
-            status = 409 if any(
+            status = 409 if isinstance(exc, TaskConflictError) or any(
                 text in str(exc) for text in ("重新读取", "已归档")) else 400
             raise HTTPException(status, str(exc)) from exc
         return _task_data(store, task)

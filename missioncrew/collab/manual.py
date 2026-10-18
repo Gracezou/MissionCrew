@@ -157,9 +157,14 @@ An orchestrator's turn:
   values (in the data source list of your context, or as seen on that source's tasks in
   `tasks/`). To add or remove a single task of a custom source, use `task.create` /
   `task.delete`, never a partial `board_source.save` card list: that whole sync deletes every
-  synced task missing from it.
-- Tasks synced from a data source also carry `external_id` and `url` (the original item,
-  such as a GitHub issue) in their snapshot, and their dispatch message includes the link. The
+  task with an `external_id` missing from it.
+- When a task copies an external item (such as an issue), pass `external_id` (the id the sync
+  cards use, e.g. the issue number) and `url` to `task.create`, in either kind of source. In a
+  custom source the next whole sync then updates that task instead of creating a duplicate, and
+  deletes it once the item leaves the card list. `external_id` is unique within a source:
+  `already_exists` returns the existing task in `error.details.task`, so update that one instead.
+- Tasks with an `external_id` also carry it and `url` (the original item, such as a GitHub
+  issue) in their snapshot, and their dispatch message includes the link. The
   sync script owns the fields its cards carry (usually title, summary, url and plain labels) and
   rewrites them on every sync; keep local progress in the status, `property: value` labels and
   status briefs, which a sync changes only when its cards carry them.

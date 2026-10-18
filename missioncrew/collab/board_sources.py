@@ -2,9 +2,10 @@
 
 数据源分两类:内置源 `built-in`(平台原生任务)与自定义源(BoardDataSource,
 由主控 board_source.save 创建)。两类源的任务操作对等:task.create 带 source
-建进指定源,改、删、归档都按任务 id。自定义源另可由 board_source.save 按
+建进指定源,改、删、归档都按任务 id,两类源的任务都可带 url、meta 与
+external_id(外部条目的同步键,同源唯一)。自定义源另可由 board_source.save 按
 external_id 整体同步卡片(适合定时同步 GitCode/GitHub Issue 这类外部列表),
-整体同步只管理同步来的任务,不碰 task.create 建的任务。状态就是
+整体同步只管理带 external_id 的任务,不论它是同步建的还是 task.create 建的。状态就是
 `status: 文本` 标签,数据源只声明状态取值的顺序与颜色,用于生成默认筛选列。
 
 看板由 filters([{title,query,color}],每列一个标签表达式)分列;
@@ -96,6 +97,32 @@ def declares_status(store, project_id: str, source_id: str, text: str) -> bool:
     except ValueError:
         return False
     return any(str(c.get("value") or "").lower() == text.lower() for c in values)
+
+
+def clean_url(value) -> str:
+    """外部条目链接:去掉首尾空白,空串表示没有(同步卡片与 task.* 同一口径)。"""
+    return str(value or "").strip()
+
+
+def clean_meta(value, owner: str = "") -> list[str]:
+    """卡片附注:字符串数组;owner 是报错时的主语(如「卡片 42 的」)。"""
+    if not isinstance(value, list):
+        raise ValueError(f"{owner}meta 必须是数组")
+    return [str(item) for item in value]
+
+
+def external_twin(store, project_id: str, source_id: str, external_id: str,
+                  exclude_task_id: str = "") -> Optional[Task]:
+    """同一数据源里已带这个 external_id 的任务。
+
+    整体同步按 external_id 匹配任务,同一源内必须唯一,否则同一条目会有两张
+    卡片且其中一张永远不再被同步更新;内置源没有整体同步,但同样用它识别外部条目。
+    """
+    if not external_id:
+        return None
+    return next((task for task in store.list_tasks(project_id, source_id=source_id)
+                 if task.external_id == external_id
+                 and task.id != exclude_task_id), None)
 
 
 def describe_sources(store=None, project_id: Optional[str] = None,
@@ -246,7 +273,7 @@ def validate_source_cards(raw) -> list[dict]:
         if "summary" in given:
             card["summary"] = str(given["summary"])
         if "url" in given:
-            card["url"] = str(given["url"]).strip()
+            card["url"] = clean_url(given["url"])
         status = str(given.get("status") or "").strip()
         if status:   # 空状态等同没带
             card["status"] = status
@@ -257,9 +284,7 @@ def validate_source_cards(raw) -> list[dict]:
                 raise ValueError(f"卡片 {card_id} 的 labels 必须是字符串数组")
             card["labels"] = normalize_labels(labels_raw)
         if "meta" in given:
-            if not isinstance(given["meta"], list):
-                raise ValueError(f"卡片 {card_id} 的 meta 必须是数组")
-            card["meta"] = [str(x) for x in given["meta"]]
+            card["meta"] = clean_meta(given["meta"], f"卡片 {card_id} 的 ")
         if "properties" in item:   # properties 里的 null 是「清空」,单独校验
             card["properties"] = normalize_properties(
                 item["properties"], f"卡片 {card_id} 的 properties")
@@ -310,8 +335,8 @@ def sync_source_tasks(store, project_id: str, source_id: str,
     没带的保持本地值(本地改过的状态、Agent 加的属性不会被下一次同步冲掉;
     内容没有变化时不写库,不刷新 updated_at);未命中则新建,没带状态时落到
     第一个状态取值,新任务会走项目自动处理规则(auto_process 回调);本次
-    未出现的 external_id 任务连带简报删除。没有 external_id 的任务(task.create
-    建进本源的)不参与匹配,也不会被删除。
+    未出现的 external_id 任务连带简报删除。用 task.create 建进本源的任务带了
+    external_id 就同样参与匹配与删除,没带的不参与匹配,也不会被删除。
     """
     key_text = _column_key_map(raw_columns)
     declared = [str(c.get("value") or "") for c in status_values or []]

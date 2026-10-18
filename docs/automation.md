@@ -104,7 +104,7 @@ fi
 
 > **本次 `cards` 里没有的任务会连同全部状态简报永久删除，不进回收站。** 所以拉取外部列表失败时脚本必须非零退出，不能拿空列表或半份列表去保存；分页拉取要拉全；卡片 `id` 的生成规则要跨次保持不变，否则每次都会删掉旧任务、再新建一份。
 
-整体同步只管理同步来的任务，也就是由卡片 `id` 建出、带 `external_id` 的任务。要在数据源里单独加、改、删一个任务，和内置任务一样用 `task.create`（传 `source`）、`task.update`、`task.delete`：`task.create` 建的任务没有 `external_id`，整体同步既不会更新它，也不会因为它不在 `cards` 里而删除它。外部列表里的条目仍应走 `cards` 同步，不要用 `task.create` 单独建，否则下次整体同步会把同一条目再建一份。
+整体同步只管理带 `external_id` 的任务：由卡片 `id` 建出的，以及用 `task.create` 带 `external_id` 登记进来的。要在数据源里单独加、改、删一个任务，和内置任务一样用 `task.create`（传 `source`）、`task.update`、`task.delete`。单独登记外部列表里的条目（例如先补一个 Issue，不等下次同步）时，带上 `external_id`（卡片会用的那个 id）和 `url`：下次整体同步时同 id 的卡片会更新这个任务，不会再建一份；之后同步的 `cards` 里没有这个 id 时，任务会被删除。`external_id` 在同一数据源内唯一，重复登记会返回 `already_exists`。不带 `external_id` 的任务，整体同步既不会更新它，也不会因为它不在 `cards` 里而删除它。
 
 ### 卡片字段
 

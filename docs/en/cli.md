@@ -50,7 +50,7 @@ The channel argument can be either the full id (such as `default:general`) or ju
 
 | Command | Description |
 |---|---|
-| `mc task create -p project --title title [-s summary] [-b body] [-l label]... [-c channel-id]... [--status S] [--source data-source] [--process]` | Creates a task. The status is free text (built-in values `待处理`, `处理中`, `已阻塞`, `已完成`) and is stored as a `status: <text>` label; `--source` takes a custom data source's short id (the built-in source by default), and without a status the task gets that source's first status value; `--process` sends the task to the orchestrator of the bound channels right after it is created. |
+| `mc task create -p project --title title [-s summary] [-b body] [-l label]... [-c channel-id]... [--status S] [--source data-source] [--url link] [--meta note]... [--external-id external-id] [--process]` | Creates a task. The status is free text (built-in values `待处理`, `处理中`, `已阻塞`, `已完成`) and is stored as a `status: <text>` label; `--source` takes a custom data source's short id (the built-in source by default), and without a status the task gets that source's first status value; `--url`, `--meta` and `--external-id` record the external item's link, board notes and id (`external_id` is unique within the source, and a custom source's whole sync matches by it); `--process` sends the task to the orchestrator of the bound channels right after it is created. |
 | `mc task process <task_id> [-m note]` | Notifies the orchestrator in each bound channel to process the task. |
 | `mc task brief <task_id> -m <content> [--status S]` | Appends a status brief, and can update the task status at the same time. |
 | `mc task list` / `mc task show <task_id>` | Lists tasks; shows a single task and its status briefs. |

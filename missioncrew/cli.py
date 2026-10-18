@@ -65,6 +65,8 @@ def _print_task(t: Task) -> None:
     typer.echo(f"  项目={t.project_id} 数据源={t.source_id} 状态={t.status}")
     typer.echo(f"  频道={', '.join(t.channel_ids)} 标签={', '.join(t.labels) or '-'}")
     typer.echo(f"  简介={t.summary or '-'}")
+    if t.external_id or t.url:
+        typer.echo(f"  外部条目={t.external_id or '-'} 链接={t.url or '-'}")
     if t.body:
         typer.echo(f"\n{t.body}")
 
@@ -395,13 +397,17 @@ def task_create(project: str = typer.Option(..., "-p", "--project"),
                     None, help="状态文本,如 待处理/处理中/已阻塞/已完成;缺省为数据源第一个状态"),
                 source: Optional[str] = typer.Option(
                     None, help="数据源短 id;缺省为内置源 built-in"),
+                url: Optional[str] = typer.Option(None, help="外部条目链接"),
+                meta: list[str] = typer.Option([], help="看板卡片附注,可重复"),
+                external_id: Optional[str] = typer.Option(
+                    None, help="外部条目 id,同源唯一;自定义源的整体同步按它匹配"),
                 process: bool = typer.Option(False, help="创建后发送给绑定 Channel 的主控")):
     store = _store()
     try:
         task = create_task(
             store, project, title=title, summary=summary, body=body,
             labels=list(label), channel_ids=list(channel), status=status,
-            source=source,
+            source=source, url=url, meta=list(meta), external_id=external_id,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc))

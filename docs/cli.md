@@ -50,7 +50,7 @@ MissionCrew 的日常操作在 Web 页面完成，频道、Task、文档、准�
 
 | 命令 | 说明 |
 |---|---|
-| `mc task create -p 项目 --title 标题 [-s 简介] [-b 正文] [-l 标签]... [-c 频道id]... [--status S] [--source 数据源] [--process]` | 创建 Task，状态是自由文本（内置取值 `待处理`、`处理中`、`已阻塞`、`已完成`），落库为 `status: 文本` 标签；`--source` 指定自定义数据源短 id，缺省为内置源，没给状态时落到该源第一个状态取值；`--process` 表示创建后立即发送给绑定频道的主控。 |
+| `mc task create -p 项目 --title 标题 [-s 简介] [-b 正文] [-l 标签]... [-c 频道id]... [--status S] [--source 数据源] [--url 链接] [--meta 附注]... [--external-id 外部id] [--process]` | 创建 Task，状态是自由文本（内置取值 `待处理`、`处理中`、`已阻塞`、`已完成`），落库为 `status: 文本` 标签；`--source` 指定自定义数据源短 id，缺省为内置源，没给状态时落到该源第一个状态取值；`--url`、`--meta`、`--external-id` 记录外部条目的链接、看板附注与 id（`external_id` 同源唯一，自定义源的整体同步按它匹配）；`--process` 表示创建后立即发送给绑定频道的主控。 |
 | `mc task process <task_id> [-m 附言]` | 在每个绑定频道里通知主控处理该 Task。 |
 | `mc task brief <task_id> -m <内容> [--status S]` | 追加状态简报，可同时更新 Task 状态。 |
 | `mc task list` / `mc task show <task_id>` | 列出 Task；查看单个 Task 及其状态简报。 |

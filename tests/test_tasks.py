@@ -665,6 +665,7 @@ const context = {
   esc: value => String(value ?? "").replace(/[&<>"]/g,
     char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]),
   taskActivity: task => Number(task.updated_at || 0),
+  projBoardSources: () => [],
   currentChan: "webshop:delivery", currentTab: "chat",
 };
 vm.createContext(context);
@@ -719,18 +720,69 @@ def test_channel_task_button_previews_count_and_pops_up_list():
     html = opened["pop"]["html"]
     assert "3 个未完成 · 共 4" in html
     assert html.index("最新处理中") < html.index("旧的待处理")
-    assert '<span class="pill st-in_progress">处理中</span>' in html
-    assert '<span class="pill st-open">待处理</span>' in html
+    assert '<span class="pill status-pill" style="--status-color:var(--accent)">处理中</span>' in html
+    assert '<span class="pill status-pill" style="--status-color:var(--muted)">待处理</span>' in html
     assert "&lt;b&gt;无状态&lt;/b&gt;" in html and ">无状态</span>" in html
     assert "已经完成" not in html and "openTask(this.dataset.taskId, false)" in html
     # 切到全部后已完成的也列出,范围偏好按浏览器记住;关闭后弹层清空
-    assert '<span class="pill st-done">已完成</span>' in data["all"]["pop"]["html"]
+    assert ('<span class="pill status-pill" style="--status-color:var(--ok)">已完成</span>'
+            in data["all"]["pop"]["html"])
     assert data["saved"] == {"mc.channelTaskScope": "all"}
     assert data["closedAgain"]["pop"]["hidden"] and data["closedAgain"]["pop"]["html"] == ""
     assert not data["closedAgain"]["button"]["active"]
     # 切到没有关联 Task 的频道:按钮隐藏,打开着的弹层随之收起
     other = data["otherChannel"]
     assert other["button"]["hidden"] and other["pop"]["hidden"]
+
+
+_STATUS_PILL_SCRIPT = r"""
+const fs = require("fs");
+const vm = require("vm");
+const context = {
+  localStorage: { getItem: () => null, setItem() {} },
+  dlg: { addEventListener() {} },
+  esc: value => String(value ?? "").replace(/[&<>"]/g,
+    char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]),
+  projBoardSources: () => [
+    { id: "built-in", status_values: [{ value: "待处理", color: "var(--muted)" }] },
+    { id: "pr-dev", status_values: [{ value: "正在开发", color: "#0969da" },
+                                    { value: "已关闭", color: "" }] },
+  ],
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1] + "/tasks.js", "utf8"), context);
+process.stdout.write(JSON.stringify(vm.runInContext(`({
+  custom: statusPillHtml("正在开发", "pr-dev"),
+  noColor: statusPillHtml("已关闭", "pr-dev"),
+  undeclared: statusPillHtml("处理中", "pr-dev"),
+  builtin: statusPillHtml("待处理"),
+  goneSource: statusPillHtml("待处理", "deleted-source"),
+  options: taskStatusOptions("pr-dev"),
+  fallbackOptions: taskStatusOptions("deleted-source"),
+})`, context)));
+"""
+
+
+def test_status_pill_color_comes_from_task_source():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser renderers")
+    result = subprocess.run(
+        [node, "-e", _STATUS_PILL_SCRIPT, str(WEB_JS)],
+        text=True, capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # 自定义状态与内置状态同一规则:颜色取任务所属数据源的声明
+    assert data["custom"] == (
+        '<span class="pill status-pill" style="--status-color:#0969da">正在开发</span>')
+    assert data["builtin"] == (
+        '<span class="pill status-pill" style="--status-color:var(--muted)">待处理</span>')
+    # 声明了没给颜色的与看板列一样用灰色;该源没声明的状态、源已删除时不着色
+    assert "--status-color:var(--muted)" in data["noColor"]
+    assert data["undeclared"] == '<span class="pill">处理中</span>'
+    assert data["goneSource"] == '<span class="pill">待处理</span>'
+    assert data["options"] == ["正在开发", "已关闭"]
+    assert data["fallbackOptions"] == ["待处理", "处理中", "已阻塞", "已完成"]
 
 
 def test_task_board_exposes_activity_order_and_archive_filter(seeded):

@@ -14,27 +14,14 @@ let boardEditMode = false;        // 编辑模式:侧栏 ✎ 进入,"完成编�
 let customBoardRenderSignature = null;
 let boardWidgetRenderToken = 0;
 
-/* ---- 看板数据源清单:按项目缓存;取不到时回退内置任务源 ---- */
-let boardSourcesCache = { project: null, list: null };
-
-async function loadBoardSources() {
-  if (boardSourcesCache.project !== currentProject || !boardSourcesCache.list) {
-    try {   // 静默取数:失败走回退,不弹窗
-      const r = await fetch(`/api/projects/${encodeURIComponent(currentProject)}/board_sources`);
-      if (r.ok) boardSourcesCache = { project: currentProject, list: await r.json() };
-    } catch (_) { /* ignore */ }
-  }
-  return (boardSourcesCache.project === currentProject && boardSourcesCache.list)
-    || [{ id: "built-in", name: "项目任务", description: "" }];
-}
-
+/* ---- 看板数据源清单:随项目总览下发(ui.js 的 projBoardSources);未到时回退内置任务源 ---- */
 function boardSourceName(id) {
-  const hit = (boardSourcesCache.list || []).find(s => s.id === id);
+  const hit = projBoardSources().find(s => s.id === id);
   return hit ? hit.name : (id || "built-in");
 }
 
 function boardSourceOptionsHtml(selected) {
-  return (boardSourcesCache.list || [{ id: "built-in", name: "项目任务", description: "" }])
+  return projBoardSources()
     .map(s => `<option value="${esc(s.id)}"${s.id === selected ? " selected" : ""}>
       ${esc(s.name)}${s.description ? ` — ${esc(s.description)}` : ""}</option>`).join("");
 }
@@ -45,11 +32,17 @@ function currentCustomBoardStateSignature() {
                          boardEditMode, board]);
 }
 
+// taskboard 组件的 content.source 是数据源 id;其余组件的 content.source 是取数绑定
+function widgetIsLive(widget) {
+  const source = widget.content?.source;
+  return widget.type === "taskboard"
+    || (!!source && typeof source === "object" && !Array.isArray(source));
+}
+
 function boardHasLiveWidgets(board) {
-  // taskboard(组件或整板)直接读 overview 里的任务数据,需随轮询重绘
+  // 任务看板与实时组件都从服务端取数,需随轮询重绘
   if (board?.kind === "taskboard") return true;
-  return (board?.layout || []).some(widget =>
-    widget.content?.source || widget.type === "taskboard");
+  return (board?.layout || []).some(widgetIsLive);
 }
 
 function renderCustomBoards(force = false) {
@@ -221,8 +214,8 @@ function matchLabelQuery(query, labels) {
 }
 
 /* 看板通用卡片:所有卡片都是任务,点击打开任务详情;带 url 的另给外链 ↗。
-   showStatus 时在标题后加状态药丸(列不是单个状态时才有信息量)。 */
-function boardCardHtml(card, { showStatus = false } = {}) {
+   showStatus 时在标题后加状态药丸(列不是单个状态时才有信息量),颜色取 source 数据源的声明。 */
+function boardCardHtml(card, { showStatus = false, source = "built-in" } = {}) {
   const click = card.task_id
     ? `data-task-id="${esc(card.task_id)}" onclick="openTask(this.dataset.taskId)"`
     : (card.url ? `data-url="${esc(card.url)}" onclick="window.open(this.dataset.url,'_blank','noopener')"` : "");
@@ -232,7 +225,7 @@ function boardCardHtml(card, { showStatus = false } = {}) {
     splitLabel(l)[0].toLowerCase() !== "status");
   return `<div class="card${card.archived ? " task-archived" : ""}" ${click}>
     <div class="title">${esc(card.title)}${showStatus && card.status
-      ? ` ${statusPillHtml(card.status)}` : ""}${card.archived
+      ? ` ${statusPillHtml(card.status, source)}` : ""}${card.archived
       ? '<span class="badge task-archived-badge">已归档</span>' : ""}${card.url
       ? ` <a class="badge" href="${esc(card.url)}" target="_blank" rel="noopener"
            onclick="event.stopPropagation()" title="打开外部链接">↗</a>` : ""}</div>
@@ -399,9 +392,9 @@ function isStatusColumnQuery(query) {
   return prop.toLowerCase() === "status" && value !== "*";
 }
 
-function taskboardColumnHtml(col) {
+function taskboardColumnHtml(col, source) {
   const showStatus = !isStatusColumnQuery(col.query);
-  const cards = col.cards.map(card => boardCardHtml(card, { showStatus })).join("")
+  const cards = col.cards.map(card => boardCardHtml(card, { showStatus, source })).join("")
     || `<div class="empty" style="padding:6px 4px">暂无条目</div>`;
   const rule = ruleForQuery(col.query);
   const ruleState = rule ? (rule.enabled ? "rule-on" : "rule-off") : "";
@@ -454,7 +447,7 @@ async function renderTaskboard(binding) {
   });
   host.innerHTML = taskboardFilterBarHtml(binding, data)
     + `<div class="taskboard-grid" data-scroll-key="tb:grid">${
-        data.columns.map(taskboardColumnHtml).join("")}</div>`;
+        data.columns.map(col => taskboardColumnHtml(col, binding.source)).join("")}</div>`;
   for (const item of inputState) {
     const input = host.querySelector(item.selector);
     if (!input) continue;
@@ -567,19 +560,22 @@ function renderWidgetContent(w, resolved) {
     case "code":
       return `${c.language ? `<span class="pill">${esc(c.language)}</span>` : ""}
         <pre style="white-space:pre-wrap;margin:4px 0 0;font-size:12px">${esc(c.code || "")}</pre>`;
-    case "taskboard": {   // 标签任务看板:与看板页标签列同数据、同规则入口
+    case "taskboard": {   // 标签任务看板:与看板列同数据(服务端按数据源 + 标签表达式取卡片)、同规则入口
+      // 渲染前已等过取数,这里没有结果说明请求失败
+      if (!resolved) return `<div class="empty">任务数据暂不可用</div>`;
       const label = String(c.label || "").trim();
-      if (!label) return `<div class="empty">缺少 content.label(要聚合的 Task 标签)</div>`;
-      const tasks = builtinProjTasks().filter(task =>
-        !task.archived && taskHasLabel(task, label));
+      const cardList = Array.isArray(c.cards) ? c.cards : [];
       const rule = ruleForQuery(label);
       const ruleText = rule
         ? (rule.enabled ? "⚡ 自动规则已启用" : "⚡ 自动规则已停用") : "⚡ 设置自动规则";
-      const cards = tasks.map(task => boardCardHtml(taskAsBoardCard(task), { showStatus: true }))
-        .join("") || `<div class="empty">暂无带此标签的 Task</div>`;
+      const cards = cardList.map(card =>
+        boardCardHtml(card, { showStatus: true, source: c.source })).join("")
+        || `<div class="empty">暂无带此标签的 Task</div>`;
+      const sourceBadge = c.source && c.source !== "built-in"
+        ? `<span class="badge">${esc(boardSourceName(c.source))}</span>` : "";
       return `<div class="widget-taskboard-head">
-          <span class="badge">${esc(label)}</span>
-          <span class="muted">${tasks.length} 个 Task</span>
+          ${sourceBadge}<span class="badge">${esc(label)}</span>
+          <span class="muted">${cardList.length} 个 Task</span>
           <button class="ghost" data-label="${esc(label)}"
             onclick="openColumnRule(this.dataset.label)">${ruleText}</button>
         </div><div class="widget-taskboard-cards">${cards}</div>`;
@@ -594,9 +590,9 @@ async function renderBoardWidgets(layout) {
   const preview = document.getElementById("custom-board-preview");
   preview?.classList.remove("taskboard-host");
   const widgets = Array.isArray(layout) ? layout : [];
-  // 有数据源的卡片:批量向平台解析(保存态与预览态共用同一端点)
+  // 实时组件:批量向平台解析(保存态与预览态共用同一端点)
   let resolved = {};
-  const sourced = widgets.filter(w => w.content && w.content.source);
+  const sourced = widgets.filter(widgetIsLive);
   if (sourced.length && currentProject) {
     try {   // 静默取数:失败时按静态内容渲染,不弹窗
       const r = await fetch(`/api/projects/${encodeURIComponent(currentProject)}/widget_data`, {
@@ -610,7 +606,7 @@ async function renderBoardWidgets(layout) {
   const scrollState = captureKeyedScrollPositions(preview);
   preview.innerHTML = widgets.map(w =>
     `<section class="widget" data-scroll-key="widget:${esc(w.id)}" style="grid-column:${Number(w.x || 0) + 1}/span ${Number(w.width || 6)};grid-row:${Number(w.y || 0) + 1}/span ${Number(w.height || 4)}">
-      <span class="widget-type">${esc(w.type)}${w.content?.source ? " · 实时" : ""}</span><h3>${esc(w.title || w.id)}</h3>${renderWidgetContent(w, resolved[w.id])}</section>`
+      <span class="widget-type">${esc(w.type)}${widgetIsLive(w) ? " · 实时" : ""}</span><h3>${esc(w.title || w.id)}</h3>${renderWidgetContent(w, resolved[w.id])}</section>`
   ).join("") || `<div class="empty" style="grid-column:1/-1">面板中还没有组件。</div>`;
   restoreKeyedScrollPositions(preview, scrollState);
 }
@@ -646,9 +642,8 @@ async function deleteCustomBoard(boardId = null) {
 
 /* ---------------- 新建面板与 taskboard 编辑 ---------------- */
 
-async function openNewBoardDialog() {
+function openNewBoardDialog() {
   if (!currentProject) { uiAlert("请先创建/选择项目"); return; }
-  await loadBoardSources();
   openFormDialog("新建面板", `
     <label>面板类型</label>
     <div class="new-board-kinds">
@@ -725,10 +720,9 @@ async function submitNewBoard() {
   toast(`已交给 @${target}(频道 #${channel.name});完成后面板会出现在侧栏`, "success", 6000);
 }
 
-async function openTaskboardDialog(boardId) {
+function openTaskboardDialog(boardId) {
   const board = projBoards().find(item => item.id === boardId);
   if (!board) return;
-  await loadBoardSources();
   openFormDialog(`编辑任务看板 · ${board.name || board.id}`, `
     <label>名称</label>
     <input type="text" id="tbf-name" value="${esc(board.name || "")}">

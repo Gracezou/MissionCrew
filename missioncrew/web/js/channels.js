@@ -261,7 +261,7 @@ function renderChannelTasks() {
       ${shown.map(task => `<li><button type="button" class="channel-task"
           data-task-id="${esc(task.id)}" onclick="openTask(this.dataset.taskId, false)"
           title="${esc(task.summary || task.title)}">
-          ${statusPillHtml(taskStatus(task)) || '<span class="pill">无状态</span>'}
+          ${statusPillHtml(taskStatus(task), task.source_id) || '<span class="pill">无状态</span>'}
           <span class="channel-task-title">${esc(task.title)}</span></button></li>`).join("")
         || '<li class="empty">没有未完成的 Task</li>'}
     </ul>`;

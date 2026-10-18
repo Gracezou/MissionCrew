@@ -145,7 +145,7 @@ BOARD_WIDGET_TYPES = {
     "list",       # 条目列表:content.items [str 或 {text,tone?}]
     "log",        # 日志尾部:content.lines [str] 或 content.text
     "code",       # 代码块:content.code + language?
-    "taskboard",  # 标签任务看板:content.label,前端按 label 实时渲染 Task 卡片
+    "taskboard",  # 标签任务看板:content.label 标签表达式 + content.source 数据源(缺省内置)
 }
 
 

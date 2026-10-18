@@ -84,7 +84,7 @@ Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 
 
 ### 面板
 
-自定义面板的事实源是平台数据库中的 `Board`。面板包含 12 列布局及 `markdown`、`table`、`card`、`chart`、`list`、`log`、`code` 等组件；组件也可以从任务、文档、审计或频道消息读取实时数据。
+自定义面板的事实源是平台数据库中的 `Board`。面板包含 12 列布局及 `markdown`、`table`、`card`、`chart`、`list`、`log`、`code`、`taskboard` 等组件；组件也可以从任务、文档、审计或频道消息读取实时数据。读任务的两种组件与任务看板同一口径，只取一个数据源，用 `source` 指定（缺省内置源 `built-in`）：表格绑定 `{"from":"tasks","source":"pr-dev",...}` 列出任务行，`taskboard` 组件用 `content.source` 加 `content.label`（标签表达式）列出活跃任务卡片。任务状态药丸的颜色取任务所属数据源声明的状态颜色，内置四态与自定义状态同一规则。
 
 内置任务看板不是可删除的 `Board` 记录，而是平台根据项目任务实时生成的特殊面板，因此使用保留地址 `/dashboards/tasks`。代码内部仍使用 `boards` 命名模型和 API，但公开 URL 统一使用面向用户的 `dashboards`。
 

@@ -27,7 +27,8 @@ from missioncrew.collab.workspace import (channel_page_context_dir,
                                           platform_history_dir,
                                           migrate_resource_workspace_links,
                                           write_task_files)
-from missioncrew.core.models import (DEFAULT_MAX_CHAIN_RUNS, Backend, Channel,
+from missioncrew.core.models import (DEFAULT_MAX_CHAIN_RUNS, Backend,
+                                     BoardDataSource, Channel,
                                      ExecutionConfig, GuidelineDocument,
                                      ProjectResource, ProjectSkill, RunResult)
 from missioncrew.api import create_app
@@ -2014,6 +2015,59 @@ def test_widget_data_resolves_tasks_source(seeded):
     ]}).json()
     rows = resolved["w1"]["rows"]
     assert len(rows) == 1 and rows[0]["标题"] == "修购物车"
+
+
+def test_task_widgets_read_one_data_source(seeded):
+    from missioncrew.collab.tasks import create_task
+    seeded.put_board_datasource(BoardDataSource(
+        id="webshop:pr-dev", project_id="webshop", name="PR 开发",
+        status_values=[{"value": "正在开发", "color": "#0969da"}]))
+    builtin = create_task(seeded, "webshop", title="内置缺陷", labels=["bug"])
+    custom = create_task(seeded, "webshop", title="PR 缺陷", labels=["bug"],
+                         source="pr-dev")
+    create_task(seeded, "webshop", title="PR 需求", labels=["feature"],
+                source="pr-dev")
+    client = _client(seeded)
+
+    def resolve(*widgets):
+        return client.post("/api/projects/webshop/widget_data",
+                           json={"widgets": list(widgets)}).json()
+
+    def table(widget_id, **binding):
+        return {"id": widget_id, "type": "table",
+                "content": {"source": {"from": "tasks", **binding}}}
+
+    def board(widget_id, **content):
+        return {"id": widget_id, "type": "taskboard", "content": content}
+
+    resolved = resolve(
+        table("t-default", labels=["bug"]),
+        table("t-custom", source="pr-dev", status=["正在开发"]),
+        table("t-legacy", status=["OPEN"]),
+        table("t-missing", source="no-such"),
+        board("b-default", label="bug"),
+        board("b-custom", label="bug | feature", source="pr-dev"),
+        board("b-missing", label="bug", source="no-such"),
+        board("b-empty"),
+    )
+    # 两种任务组件同一口径:只取一个数据源,缺省内置源
+    assert [row["id"] for row in resolved["t-default"]["rows"]] == [builtin.id]
+    assert {row["标题"] for row in resolved["t-custom"]["rows"]} == {"PR 缺陷", "PR 需求"}
+    assert [row["id"] for row in resolved["t-legacy"]["rows"]] == [builtin.id]
+    assert [card["task_id"] for card in resolved["b-default"]["cards"]] == [builtin.id]
+    assert resolved["b-default"]["source"] == "built-in"
+    # taskboard 组件的 label 是标签表达式;卡片与看板同形态(带缺省附注)
+    cards = resolved["b-custom"]["cards"]
+    assert resolved["b-custom"]["source"] == "pr-dev" and len(cards) == 2
+    assert next(c for c in cards if c["task_id"] == custom.id)["meta"][0] == custom.id
+    assert all("数据源不存在" in resolved[key]["error"] for key in ("t-missing", "b-missing"))
+    assert "content.label" in resolved["b-empty"]["error"]
+
+    # 状态药丸颜色要用的各源状态取值随项目总览下发,不带同步统计(不因同步换 ETag)
+    sources = client.get("/api/projects/webshop/overview").json()["board_sources"]
+    assert [item["id"] for item in sources] == ["built-in", "pr-dev"]
+    assert sources[1]["status_values"] == [{"value": "正在开发", "color": "#0969da"}]
+    assert "cards" not in sources[1] and "updated_at" not in sources[1]
 
 
 def test_widget_data_resolves_document_and_messages(seeded):

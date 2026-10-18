@@ -1,7 +1,7 @@
 """总览与词表端点。
 
 总览分层:`/api/overview` 只返回全局数据(项目列表/后端/角色模板),
-项目内数据走 `/api/projects/{id}/overview`(角色/面板/自动化),
+项目内数据走 `/api/projects/{id}/overview`(角色/面板/数据源/自动化),
 频道与任务由各自模块提供带 scope 的按项目列表,按页面状态按需拉取。
 """
 from __future__ import annotations
@@ -10,6 +10,7 @@ import time
 
 from fastapi import FastAPI, Request
 
+from ..collab import board_sources
 from ..collab.skills import sync_all_project_skill_libraries
 from ..collab.resource_urls import (automation_resource_url,
                                     dashboard_resource_url,
@@ -57,7 +58,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.get("/api/projects/{project_id}/overview")
     def project_overview(project_id: str, request: Request):
-        """项目内总览:角色(含限额停用状态)、面板、自动化。"""
+        """项目内总览:角色(含限额停用状态)、面板、数据源(状态取值与颜色)、自动化。"""
         ctx.must_project(project_id)
 
         usage_blocks = {
@@ -80,6 +81,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "boards": [{**b.to_dict(),
                         "resource_url": dashboard_resource_url(project_id, b.id)}
                        for b in store.list_boards(project_id)],
+            "board_sources": board_sources.describe_sources(
+                store, project_id, stats=False),
             "automations": [
                 {**a.public_dict(),
                  "resource_url": automation_resource_url(project_id, a.id)}

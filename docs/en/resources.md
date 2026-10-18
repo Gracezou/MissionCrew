@@ -84,7 +84,7 @@ Main APIs:
 
 ### Dashboards
 
-The source of truth for a custom dashboard is a `Board` in the platform database. A dashboard has a 12-column layout and widgets such as `markdown`, `table`, `card`, `chart`, `list`, `log`, and `code`; widgets can also read live data from tasks, documents, audit records, or channel messages.
+The source of truth for a custom dashboard is a `Board` in the platform database. A dashboard has a 12-column layout and widgets such as `markdown`, `table`, `card`, `chart`, `list`, `log`, `code`, and `taskboard`; widgets can also read live data from tasks, documents, audit records, or channel messages. Both task-reading widgets work like task boards: they read a single data source, chosen with `source` (default: the built-in `built-in`). A table bound to `{"from":"tasks","source":"pr-dev",...}` lists task rows, and a `taskboard` widget lists active task cards by `content.source` plus `content.label` (a label expression). Task status pills take the status color declared by the task's data source, with the same rule for the four built-in statuses and custom ones.
 
 The built-in task board is not a deletable `Board` record but a special dashboard that the platform generates live from the project's tasks, so it uses the reserved address `/dashboards/tasks`. The code still uses the `boards` name internally for the model and API, but public URLs consistently use the user-facing `dashboards`.
 

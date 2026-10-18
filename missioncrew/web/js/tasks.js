@@ -1,12 +1,13 @@
 /* ---------------- Issue 化 Task 看板 ---------------- */
-/* 状态即标签(status: 文本);内置四态是锁定的前四列,样式按文本映射 */
-const STATUS_META = {
-  "待处理": { color: "var(--muted)", cls: "st-open" },
-  "处理中": { color: "var(--accent)", cls: "st-in_progress" },
-  "已阻塞": { color: "var(--bad)", cls: "st-blocked" },
-  "已完成": { color: "var(--ok)", cls: "st-done" },
-};
-const STATUS_VALUES = Object.keys(STATUS_META);
+/* 状态即标签(status: 文本);取值与颜色由任务所属数据源声明,
+   内置源是下面四态(也是内置看板锁定的前四列) */
+const BUILTIN_STATUS_VALUES = [
+  { value: "待处理", color: "var(--muted)" },
+  { value: "处理中", color: "var(--accent)" },
+  { value: "已阻塞", color: "var(--bad)" },
+  { value: "已完成", color: "var(--ok)" },
+];
+const STATUS_VALUES = BUILTIN_STATUS_VALUES.map(item => item.value);
 
 /* 标签工具:与服务端 label_query 同一套归一化(首个冒号切分高级标签) */
 function splitLabel(text) {
@@ -34,10 +35,23 @@ function taskDisplayLabels(task) {
   return (task.labels || []).filter(label =>
     splitLabel(label)[0].toLowerCase() !== "status");
 }
-function statusPillHtml(status) {
+// 数据源声明的状态取值 [{value,color}](随项目总览下发);清单未到时内置源用本地四态
+function sourceStatusValues(source) {
+  const id = source || "built-in";
+  const hit = projBoardSources().find(item => item.id === id);
+  if (hit?.status_values?.length) return hit.status_values;
+  return id === "built-in" ? BUILTIN_STATUS_VALUES : [];
+}
+
+// 状态药丸按所属数据源声明的颜色着色,内置与自定义状态同一规则;
+// 声明了但没给颜色的与看板列一样用灰色,未声明的自由状态文本不着色
+function statusPillHtml(status, source = "built-in") {
   if (!status) return "";
-  const meta = STATUS_META[status];
-  return `<span class="pill ${meta ? meta.cls : ""}">${esc(status)}</span>`;
+  const hit = sourceStatusValues(source).find(item =>
+    String(item.value).toLowerCase() === status.toLowerCase());
+  return hit
+    ? `<span class="pill status-pill" style="--status-color:${esc(hit.color || "var(--muted)")}">${esc(status)}</span>`
+    : `<span class="pill">${esc(status)}</span>`;
 }
 const TASK_FILTERS = new Set(["all", "active", "archived"]);
 let taskFilter = localStorage.getItem("mc.taskFilter") || "active";
@@ -62,17 +76,6 @@ dlg.addEventListener("close", () => {
   syncUrl();
 });
 
-function taskChannelLabel(channelId) {
-  const channel = overview.channels.find(item => item.id === channelId);
-  return channel ? `#${channel.name || channel.id}` : channelId;
-}
-
-// 内置任务看板只显示 built-in 源;外部同步任务在各自的自定义看板里
-function builtinProjTasks() {
-  return projTasks().filter(task =>
-    (task.source_id || "built-in") === "built-in");
-}
-
 // 显示范围(活跃/全部/已归档)是两块任务看板共用的视图状态
 function setTaskFilter(value) {
   if (!TASK_FILTERS.has(value)) return;
@@ -81,12 +84,6 @@ function setTaskFilter(value) {
   renderBoard();
   renderCustomBoards(true);
   void refreshTasks();   // 任务列表(直链打开详情等用)按新范围重拉
-}
-
-// widgets 面板里的 taskboard 组件直接读 overview 里的任务:补成看板卡片形态
-function taskAsBoardCard(task) {
-  return { ...task, task_id: task.id, status: taskStatus(task),
-           meta: [task.id, ...(task.channel_ids || []).map(taskChannelLabel)] };
 }
 
 // 内置任务看板与自定义任务看板共用 boards.js 的渲染器,只差绑定(数据端点与配置保存)
@@ -108,7 +105,7 @@ async function openTask(id, updateRoute = true) {
   ).join(" · ");
   const briefs = detail.briefs.map(brief => `<article class="task-brief">
     <div class="task-brief-meta">
-      ${statusPillHtml(brief.status) || '<span class="pill"></span>'}
+      ${statusPillHtml(brief.status, task.source_id) || '<span class="pill"></span>'}
       <span>${new Date(brief.created_at * 1000).toLocaleString()}</span>
       <span>${brief.author_type === "agent" ? "@" : ""}${esc(brief.author)}</span>
     </div>
@@ -116,7 +113,7 @@ async function openTask(id, updateRoute = true) {
   </article>`).join("");
   document.getElementById("dlg-body").innerHTML = `
     <div class="task-detail-meta">
-      ${statusPillHtml(taskStatus(task))}
+      ${statusPillHtml(taskStatus(task), task.source_id)}
       ${task.archived ? '<span class="badge task-archived-badge">已归档</span>' : ""}
       ${task.url ? `<a class="badge" href="${esc(task.url)}" target="_blank"
         rel="noopener">外部链接 ↗</a>` : ""}
@@ -153,16 +150,9 @@ function renderTaskChannelOptions(selected = []) {
   ).join("") || '<span class="empty">当前项目没有可用 Channel</span>';
 }
 
-// 状态取值随数据源而定:内置源是四态,自定义源用自己声明的取值(看板数据源清单里带)
-async function taskSourceStatusValues(source) {
-  const id = source || "built-in";
-  if (id === "built-in") return STATUS_VALUES;
-  let hit = (await loadBoardSources()).find(item => item.id === id);
-  if (!hit) {   // 清单按项目缓存,Agent 后来新建的数据源要重新拉取
-    boardSourcesCache.list = null;
-    hit = (await loadBoardSources()).find(item => item.id === id);
-  }
-  const values = (hit?.status_values || []).map(item => item.value).filter(Boolean);
+// 表单的状态选项随任务所属数据源而定;源已不在时退回内置四态
+function taskStatusOptions(source) {
+  const values = sourceStatusValues(source).map(item => item.value).filter(Boolean);
   return values.length ? values : STATUS_VALUES;
 }
 
@@ -175,12 +165,12 @@ function renderTaskStatusOptions(values, selected) {
   select.value = selected || values[0];
 }
 
-async function openNewTask(source = "built-in") {
+function openNewTask(source = "built-in") {
   if (!currentProject) { uiAlert("请先创建/选择项目"); return; }
   editingTaskId = null;
   editingTaskSnapshot = null;
   editingTaskSource = source || "built-in";
-  const values = await taskSourceStatusValues(editingTaskSource);
+  const values = taskStatusOptions(editingTaskSource);
   document.getElementById("tdlg-title").textContent = editingTaskSource === "built-in"
     ? "新建 Task" : `新建 Task · ${boardSourceName(editingTaskSource)}`;
   document.getElementById("task-save-btn").textContent = "创建 Task";
@@ -197,13 +187,13 @@ async function openNewTask(source = "built-in") {
   tdlg.showModal();
 }
 
-async function openTaskEditor(id) {
+function openTaskEditor(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   editingTaskId = id;
   editingTaskSnapshot = task.updated_at;
   closeTaskDialog(false);
-  const values = await taskSourceStatusValues(task.source_id);
+  const values = taskStatusOptions(task.source_id);
   document.getElementById("tdlg-title").textContent = `编辑 ${id}`;
   document.getElementById("task-save-btn").textContent = "保存修改";
   document.getElementById("nt-title").value = task.title;
@@ -255,12 +245,12 @@ async function saveTask() {
   toast(id ? "Task 已更新" : "Task 已创建", "success");
 }
 
-async function openTaskBriefForm(id) {
+function openTaskBriefForm(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   closeTaskDialog(false);
   const current = taskStatus(task);
-  const values = await taskSourceStatusValues(task.source_id);
+  const values = taskStatusOptions(task.source_id);
   const options = [...new Set([current, ...values])].filter(Boolean);
   openFormDialog("添加状态简报", `
     <label>状态</label><select id="task-brief-status">
@@ -379,11 +369,6 @@ function projTaskRules() {
 
 function projTaskBoardFilters() {
   return projObj()?.task_board_filters || [];
-}
-
-function taskHasLabel(task, label) {
-  return (task.labels || []).some(item =>
-    normalizeLabel(item).toLowerCase() === normalizeLabel(label).toLowerCase());
 }
 
 function ruleForQuery(query) {

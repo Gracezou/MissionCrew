@@ -9,7 +9,8 @@ from ..collab import board_sources
 from ..collab.documents import library_for
 from ..collab.recycle_bin import recycle_dashboard
 from ..collab.resource_urls import dashboard_resource_url
-from ..core.models import BOARD_KINDS, BOARD_WIDGET_TYPES, Board, BoardWidget
+from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, LEGACY_STATUS_TEXT,
+                           Board, BoardWidget)
 from .context import MENTION_ID_RE, ApiContext
 from .schemas import BoardInput, WidgetDataInput
 
@@ -75,16 +76,22 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         """解析卡片数据源:卡片是通用展示原语,领域数据从平台实时取。"""
         kind = source.get("from")
         if kind == "tasks":
-            want_status = source.get("status") or []
+            # 与任务看板同口径:只取一个数据源(缺省内置源)的任务
+            try:
+                source_id = board_sources.require_source(
+                    store, project_id, source.get("source"))
+            except ValueError as exc:
+                return {"error": str(exc)}
+            # 状态按文本比较(不区分大小写);旧枚举(open/in_progress…)映射成状态文本
+            want_status = {LEGACY_STATUS_TEXT.get(str(s).lower(), str(s)).lower()
+                           for s in source.get("status") or []}
             want_labels = source.get("labels") or []
             want_channels = source.get("channel_ids") or []
             rows = []
-            for t in store.list_tasks():
-                if t.project_id != project_id:
-                    continue
+            for t in store.list_tasks(project_id, source_id=source_id):
                 if t.archived and not source.get("include_archived", False):
                     continue
-                if want_status and t.status not in want_status:
+                if want_status and t.status.lower() not in want_status:
                     continue
                 if want_channels and not set(t.channel_ids) & set(want_channels):
                     continue
@@ -135,9 +142,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         ctx.must_project(project_id)
         resolved = {}
         for w in body.widgets:
-            source = ((w.get("content") or {}).get("source")) or None
-            if isinstance(source, dict) and w.get("id"):
-                resolved[w["id"]] = _resolve_widget_source(project_id, source)
+            content = w.get("content") or {}
+            if not w.get("id"):
+                continue
+            if w.get("type") == "taskboard":   # content.source 是数据源 id,不是取数绑定
+                resolved[w["id"]] = board_sources.resolve_taskboard_widget(
+                    store, project_id, content)
+            elif isinstance(content.get("source"), dict):
+                resolved[w["id"]] = _resolve_widget_source(
+                    project_id, content["source"])
         return resolved
 
     @app.post("/api/projects/{project_id}/boards")

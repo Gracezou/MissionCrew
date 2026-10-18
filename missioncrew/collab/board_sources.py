@@ -98,8 +98,13 @@ def declares_status(store, project_id: str, source_id: str, text: str) -> bool:
     return any(str(c.get("value") or "").lower() == text.lower() for c in values)
 
 
-def describe_sources(store=None, project_id: Optional[str] = None) -> list[dict]:
-    """创建/编辑看板时展示的可选数据源清单(内置 + 本项目自定义)。"""
+def describe_sources(store=None, project_id: Optional[str] = None,
+                     stats: bool = True) -> list[dict]:
+    """创建/编辑看板时展示的可选数据源清单(内置 + 本项目自定义)。
+
+    stats=False 时不带任务数与同步时间:项目总览轮询下发这份清单(前端据此取
+    各源状态取值与颜色),只随数据源配置变化,不因每次同步而换 ETag。
+    """
     items = [{"id": BUILTIN_SOURCE_ID, "name": "项目任务",
               "description": "本项目的平台原生 Task",
               "status_values": [dict(c) for c in BUILTIN_STATUS_VALUES],
@@ -107,15 +112,17 @@ def describe_sources(store=None, project_id: Optional[str] = None) -> list[dict]
     if store is not None and project_id:
         for record in store.list_board_datasources(project_id):
             short_id = record.id.removeprefix(f"{project_id}:")
-            items.append({
+            item = {
                 "id": short_id,
                 "name": record.name or record.id,
                 "description": record.description,
                 "status_values": [dict(c) for c in record.status_values],
                 "custom": True,
-                "cards": len(store.list_tasks(project_id, source_id=short_id)),
-                "updated_at": record.updated_at,
-            })
+            }
+            if stats:
+                item["cards"] = len(store.list_tasks(project_id, source_id=short_id))
+                item["updated_at"] = record.updated_at
+            items.append(item)
     return items
 
 
@@ -380,6 +387,26 @@ def _default_meta(store, task: Task) -> list[str]:
         channel = store.get_channel(channel_id)
         meta.append(f"#{channel.name or channel.id}" if channel else channel_id)
     return meta
+
+
+def resolve_taskboard_widget(store, project_id: str, content: dict) -> dict:
+    """面板里的 taskboard 组件:取 content.source 数据源(缺省内置源)的活跃任务,
+    content.label 按标签表达式匹配,与看板筛选列、自动处理规则同一语法。"""
+    label = str(content.get("label") or "").strip()
+    if not label:
+        return {"error": "缺少 content.label(要聚合的 Task 标签)"}
+    try:
+        source_id = require_source(store, project_id, content.get("source"))
+        ast = label_query.parse(label)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    cards = []
+    for task in store.list_tasks(project_id, include_archived=False,
+                                 source_id=source_id):
+        if label_query.matches(ast, task.labels):
+            task.meta = task.meta or _default_meta(store, task)
+            cards.append(_task_card(task))
+    return {"source": source_id, "cards": cards}
 
 
 def _property_columns(tasks: list[Task], prop: str,

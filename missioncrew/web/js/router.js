@@ -370,12 +370,12 @@ function switchTab(tab) {
 
 /* ---- 分层加载 ----
    /api/overview 只含全局数据(projects/backends/role_templates);
-   角色/面板/自动化走项目内总览,频道/任务按当前筛选状态另取。
+   角色/面板/数据源/自动化走项目内总览,频道/任务按当前筛选状态另取。
    每个加载器在响应落地时校验项目与筛选未变,避免竞态覆盖。 */
 async function loadProjectScope() {
   if (!currentProject) {
     overview.roles = []; overview.channels = []; overview.boards = [];
-    overview.automations = []; overview.tasks = [];
+    overview.board_sources = []; overview.automations = []; overview.tasks = [];
     channelCounts = null; taskCounts = null; tasksScopeKey = null;
     return;
   }
@@ -392,6 +392,7 @@ async function loadProjectScope() {
   if (!scope || project !== currentProject) return;
   overview.roles = scope.roles;
   overview.boards = scope.boards;
+  overview.board_sources = scope.board_sources || [];
   overview.automations = scope.automations;
 }
 

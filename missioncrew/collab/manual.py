@@ -239,9 +239,12 @@ An orchestrator's turn:
   entirely when one is. Each layout item has id, type, title, x, y, width, height and content.
   type is a generic display primitive (domain meaning comes from the data, not the type):
   markdown (content.markdown), table (columns+rows), card (metrics value cards),
-  chart (kind=bar|line|pie + data + x_key/y_key), list (items), log (lines), code (code+language).
+  chart (kind=bar|line|pie + data + x_key/y_key), list (items), log (lines), code (code+language),
+  taskboard (content.label = a label expression, content.source = data source id, default
+  `built-in`; shows the matching active tasks of that source as cards).
 - A card can bind live platform data through content.source, fetched automatically at render time:
-  `{"from":"tasks","status":["待处理"],"labels":[]}` (project tasks → table rows),
+  `{"from":"tasks","source":"built-in","status":["待处理"],"labels":[]}` (one data source's
+  tasks → table rows; source defaults to `built-in`, like task boards),
   `{"from":"document","path":"specs/x.md"}` (document library file → markdown),
   `{"from":"audit","actions":[],"limit":30}` (audit events → list),
   `{"from":"messages","channel":"general","limit":20}` (channel messages → list).

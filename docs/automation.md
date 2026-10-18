@@ -49,13 +49,16 @@
 
 - **专用端口**：`mc serve` 另起一个只接收 webhook 的端口，默认 `8322`（`--webhook-port` 或环境变量 `MISSIONCREW_WEBHOOK_PORT` 修改，`0` 关闭），监听地址默认与 `--host` 相同，可用 `--webhook-host` 或 `MISSIONCREW_WEBHOOK_HOST` 单独指定。这个端口上只有 `POST /hooks/<项目 id>/<脚本短 id>` 一条路由：其他路径一律 404、其他方法 405，不提供页面、API 或静态文件。主服务没有身份验证，需要让外部系统访问时只转发 webhook 端口（端口转发、隧道或反向代理），不要暴露主服务端口。端口被占用时主服务照常启动，自动化详情页的「Webhook」区显示未监听的原因。
 - **地址与密钥**：开启后在自动化详情页的「Webhook」区查看投递地址与密钥，可以复制或重新生成（重新生成后旧密钥立即失效，外部系统要同步修改）。密钥在首次开启时生成，关闭 webhook 后保留。它只在这个页面显示，总览数据和 Agent Tool 的结果里都没有：主控用 `automation.save` 开启 webhook 后，应把投递路径告诉人，由人到页面取密钥去配置外部系统。
-- **验签**：每次投递必须带下表之一，否则返回 401。有签名头时只认签名。
+- **验签**：每次投递至少带下表中的一种凭据，并且用本脚本的密钥验得过，否则返回 401。带了多种时任一种验过即可：经转发服务送来的请求常常原样保留上游平台的签名头（例如 GitHub 的 `X-Hub-Signature-256`，它是用上游平台的密钥签的），这种验不过的签名不会导致拒收，只要同一请求里还有一种凭据验得过。
 
   | 方式 | 请求头 | 适用 |
   | --- | --- | --- |
   | HMAC-SHA256 签名（对原始正文计算） | `X-Hub-Signature-256: sha256=<hex>` | GitHub（Secret 填密钥）、Gitea 及自建服务 |
   | HMAC-SHA256 签名 | `X-GitCode-Signature-256: sha256=<hex 或 base64>` | GitCode 签名密钥模式 |
-  | 密码 | `X-GitCode-Token`、`X-Gitlab-Token` 或 `Authorization: Bearer <密钥>` | GitCode 密码模式、GitLab 的 Secret token、自建服务 |
+  | Standard Webhooks 签名 | `webhook-id`、`webhook-timestamp`、`webhook-signature: v1,<base64>`（`svix-*` 同义） | 遵循 [Standard Webhooks](https://www.standardwebhooks.com/) 规范的发送方、签名库与转发服务 |
+  | 密码 | `X-GitCode-Token`、`X-Gitlab-Token` 或 `Authorization: Bearer <密钥>` | GitCode 密码模式、GitLab 的 Secret token、能配置附加请求头的转发服务与自建服务 |
+
+  Standard Webhooks 签名的内容是 `<webhook-id>.<webhook-timestamp>.<原始正文>`，时间戳与平台时间相差超过 5 分钟即拒收（防重放）。新生成的密钥是规范格式 `whsec_<base64>`，规范的签名库可以直接使用，签名时用 base64 解码后的字节；早先生成的非 `whsec_` 密钥用原文字节（签名库的 raw 格式）。GitHub 风格签名与密码方式始终把整串密钥当作原文。
 
 - **请求与响应**：正文支持 JSON 与 GitHub 的表单格式（`payload=<json>`），上限 25 MiB（超出返回 413），声明为 JSON 却解析失败返回 400。接受后立即返回 `202 {"ok": true, "run_id": <运行记录 id>}`，脚本在后台运行；GitHub 的 `ping` 事件由平台直接回 `200 {"ok": true, "pong": true}`，不运行脚本。脚本不存在、不属于该项目或没开 webhook 时一律 404，不区分原因。
 - **排队**：脚本正在运行时到达的投递按到达顺序排队，返回 `202 {"ok": true, "queued": true}`；每个脚本最多排 20 条，满了返回 503。本次运行结束后接着跑下一条，排到时以脚本最新定义为准：这期间关掉 webhook 或删除脚本，排队的事件会被丢弃并记审计。队列只在内存里，服务重启时丢失，所以需要不漏事件的同步要靠 cron 定期全量兜底。
@@ -74,7 +77,7 @@
   }
   ```
 
-  `provider` 按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
+  `provider` 按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串，这时 `delivery` 取 Standard Webhooks 的 `webhook-id`；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
 - **过滤交给脚本**：平台不按事件类型、仓库或动作过滤，脚本读事件后对不关心的投递直接 `exit 0`。这样的运行也会留一条记录，便于排查到过哪些事件。
 
 示例：Issue 打开、关闭或重新打开时立即同步，其余事件忽略；cron 每 30 分钟兜底一次。注意 `board_source.save` 是整体同步，webhook 触发时也要拉全量再保存，不能只拿事件里那一条 Issue 去保存，否则其他任务会被删除。

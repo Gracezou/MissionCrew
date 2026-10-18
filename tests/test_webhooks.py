@@ -21,12 +21,18 @@ from missioncrew.api import webhooks as webhook_api
 from missioncrew.collab import automations as automation_mod
 from missioncrew.collab.automations import AutomationService, save_automation
 from missioncrew.collab.chat import ChatEngine
-from missioncrew.collab.webhooks import (WebhookRejected, verify_webhook,
-                                         webhook_event)
+from missioncrew.collab.webhooks import (WebhookRejected, new_webhook_secret,
+                                         verify_webhook, webhook_event)
 
 
 def _sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _standard(key: bytes, msg_id: str, timestamp: int, body: bytes) -> str:
+    """Standard Webhooks 的 `v1,<base64>` 签名(签 `<id>.<时间戳>.<正文>`)。"""
+    digest = hmac.new(key, f"{msg_id}.{timestamp}.".encode() + body, hashlib.sha256).digest()
+    return "v1," + base64.b64encode(digest).decode()
 
 
 def _wait_runs(store, automation_id, count, timeout=10.0):
@@ -74,11 +80,65 @@ def test_verify_accepts_github_gitcode_and_token_styles():
             ({"x-hub-signature-256": _sign("other", body)}, "signature mismatch"),
             ({"x-hub-signature-256": "sha256=zz"}, "signature mismatch"),
             ({"x-gitcode-token": "wrong"}, "token mismatch"),
-            # 有签名头时只认签名,带对的密码也不能绕过错的签名
-            ({"x-hub-signature-256": _sign("other", body), "x-gitcode-token": secret},
-             "signature mismatch")):
+            # 多种凭据都没验过时,原因按出现顺序列出
+            ({"x-hub-signature-256": _sign("other", body), "authorization": "Bearer wrong"},
+             "signature mismatch; token mismatch")):
         with pytest.raises(WebhookRejected) as exc:
             verify_webhook(secret, headers, body)
+        assert (exc.value.status, exc.value.message) == (401, reason)
+
+
+def test_relayed_delivery_passes_with_any_matching_credential():
+    """转发服务原样保留上游平台的签名(用上游的密钥签,这里验不过),同时用本脚本的
+    密钥另签或带密码头:任一凭据验过就接受,不按第一个签名头定论。"""
+    body = b'{"action":"opened"}'
+    secret, now = new_webhook_secret(), 1_760_000_000
+    upstream = {"x-github-event": "pull_request",
+                "x-hub-signature-256": _sign("github-app-secret", body)}
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    relay = {"webhook-id": "msg_1", "webhook-timestamp": str(now),
+             "webhook-signature": _standard(key, "msg_1", now, body)}
+    assert verify_webhook(secret, {**upstream, **relay}, body, now=now) == "standard"
+    assert verify_webhook(secret, {**upstream, "authorization": f"Bearer {secret}"},
+                          body, now=now) == "token"
+    # 只有上游签名和本平台不认识的私有签名头时仍然拒收
+    with pytest.raises(WebhookRejected) as exc:
+        verify_webhook(secret, {**upstream, "x-sdbot-signature-256": _sign(secret, body)},
+                       body, now=now)
+    assert exc.value.message == "signature mismatch"
+
+
+def test_standard_webhooks_signature():
+    body = b'{"type":"invoice.paid"}'
+    now = 1_760_000_000
+    secret = new_webhook_secret()
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    assert secret.startswith("whsec_") and len(key) == 32
+
+    def headers(signature, timestamp=now, prefix="webhook"):
+        return {f"{prefix}-id": "msg_2", f"{prefix}-timestamp": str(timestamp),
+                f"{prefix}-signature": signature}
+
+    good = _standard(key, "msg_2", now, body)
+    assert verify_webhook(secret, headers(good), body, now=now) == "standard"
+    assert verify_webhook(secret, headers(good, prefix="svix"), body, now=now) == "standard"
+    # 密钥轮换期间签名头带多个签名,任一匹配即可;未知版本忽略
+    rotating = f"v1a,xyz {_standard(b'old-key', 'msg_2', now, body)} {good}"
+    assert verify_webhook(secret, headers(rotating), body, now=now) == "standard"
+    # 非 whsec_ 的旧密钥按原文字节签名(签名库的 raw 格式)
+    legacy = "legacy-token-secret"
+    raw = _standard(legacy.encode(), "msg_2", now, body)
+    assert verify_webhook(legacy, headers(raw), body, now=now) == "standard"
+    # GitHub 风格签名与密码方式把 whsec_ 密钥整串当作原文
+    assert verify_webhook(secret, {"x-hub-signature-256": _sign(secret, body)}, body) == "hmac"
+
+    for bad, reason in (
+            (headers(good, timestamp=now - 301), "timestamp outside tolerance"),
+            (headers(good, timestamp="soon"), "invalid timestamp"),
+            (headers(_standard(key, "msg_2", now, b"{}")), "signature mismatch"),
+            (headers("v1,not-base64!"), "signature mismatch")):
+        with pytest.raises(WebhookRejected) as exc:
+            verify_webhook(secret, bad, body, now=now)
         assert (exc.value.status, exc.value.message) == (401, reason)
 
 
@@ -123,6 +183,23 @@ def test_signed_delivery_runs_script_with_event_file(hook):
     # 事件文件只在运行期间存在
     workdir = automation_mod.automation_workdir(hook.automation)
     assert not (workdir / automation_mod.WEBHOOK_EVENT_FILE).exists()
+
+
+def test_relayed_github_delivery_is_accepted_by_relay_signature(hook):
+    """转发服务保留 GitHub 原签名与事件头,用 Standard Webhooks 另签:接受并按 GitHub 事件交给脚本。"""
+    body = json.dumps({"action": "opened", "number": 9}).encode()
+    timestamp = int(time.time())
+    key = base64.b64decode(hook.secret.removeprefix("whsec_"))
+    response = hook.client.post("/hooks/webshop/on-issue", content=body, headers={
+        "Content-Type": "application/json", "X-GitHub-Event": "pull_request",
+        "X-GitHub-Delivery": "gh-9", "X-Hub-Signature-256": _sign("github-app-secret", body),
+        "webhook-id": "relay-9", "webhook-timestamp": str(timestamp),
+        "webhook-signature": _standard(key, "relay-9", timestamp, body)})
+    assert response.status_code == 202, response.text
+    [run] = _wait_runs(hook.store, hook.automation.id, 1)
+    assert run["trigger_detail"] == "github pull_request gh-9"
+    assert any(row["action"] == "automation_webhook_accepted" and "auth=standard" in row["detail"]
+               for row in hook.store.list_audit(None, 20))
 
 
 def test_ping_and_rejections_do_not_run(hook):

@@ -1,9 +1,11 @@
 """任务看板数据源:所有卡片都来自统一的 tasks 表,按 source_id 圈定范围。
 
 数据源分两类:内置源 `built-in`(平台原生任务)与自定义源(BoardDataSource,
-由主控 board_source.save 创建、自动化脚本按 external_id upsert 任务,适合
-定时同步 GitCode/GitHub Issue 这类外部列表)。状态就是 `status: 文本` 标签,
-数据源只声明状态取值的顺序与颜色,用于生成默认筛选列。
+由主控 board_source.save 创建)。两类源的任务操作对等:task.create 带 source
+建进指定源,改、删、归档都按任务 id。自定义源另可由 board_source.save 按
+external_id 整体同步卡片(适合定时同步 GitCode/GitHub Issue 这类外部列表),
+整体同步只管理同步来的任务,不碰 task.create 建的任务。状态就是
+`status: 文本` 标签,数据源只声明状态取值的顺序与颜色,用于生成默认筛选列。
 
 看板由 filters([{title,query,color}],每列一个标签表达式)分列;
 group_by 非空时改为按该属性的取值横向分列(每个取值一列,末尾追加「未设置」列),
@@ -69,6 +71,31 @@ def source_status_values(store, project_id: str, source_id: str) -> list[dict]:
     if record is None:
         raise ValueError(f"未知数据源: {source_id}")
     return [dict(c) for c in record.status_values]
+
+
+def require_source(store, project_id: str, source) -> str:
+    """新建 Task 的归属数据源:缺省为内置源,自定义源必须属于本项目。"""
+    if source is not None and not isinstance(source, str):
+        raise ValueError("source 必须是字符串")
+    source_id = normalize_source_id(source)
+    if not source_exists(store, project_id, source_id):
+        raise ValueError(f"数据源不存在: {source_id}")
+    return source_id
+
+
+def default_status(store, project_id: str, source_id: str) -> str:
+    """没指定状态的新 Task 落到该源第一个状态取值(内置源即「待处理」)。"""
+    values = source_status_values(store, project_id, source_id)
+    return str(values[0]["value"]) if values else BUILTIN_STATUS_VALUES[0]["value"]
+
+
+def declares_status(store, project_id: str, source_id: str, text: str) -> bool:
+    """该源是否声明了这个状态取值;数据源已不存在时视为未声明。"""
+    try:
+        values = source_status_values(store, project_id, source_id)
+    except ValueError:
+        return False
+    return any(str(c.get("value") or "").lower() == text.lower() for c in values)
 
 
 def describe_sources(store=None, project_id: Optional[str] = None) -> list[dict]:
@@ -276,7 +303,8 @@ def sync_source_tasks(store, project_id: str, source_id: str,
     没带的保持本地值(本地改过的状态、Agent 加的属性不会被下一次同步冲掉;
     内容没有变化时不写库,不刷新 updated_at);未命中则新建,没带状态时落到
     第一个状态取值,新任务会走项目自动处理规则(auto_process 回调);本次
-    未出现的 external_id 任务连带简报删除。
+    未出现的 external_id 任务连带简报删除。没有 external_id 的任务(task.create
+    建进本源的)不参与匹配,也不会被删除。
     """
     key_text = _column_key_map(raw_columns)
     declared = [str(c.get("value") or "") for c in status_values or []]
@@ -346,7 +374,7 @@ def _task_card(task: Task) -> dict:
     return card
 
 
-def _builtin_meta(store, task: Task) -> list[str]:
+def _default_meta(store, task: Task) -> list[str]:
     meta = [task.id]
     for channel_id in task.channel_ids:
         channel = store.get_channel(channel_id)
@@ -411,10 +439,10 @@ def resolve_board_data(store, project_id: str, source_id: str,
     tasks = (all_tasks if scope == "all" else
              [task for task in all_tasks
               if task.archived == (scope == "archived")])
-    if source_id == BUILTIN_SOURCE_ID:
-        for task in tasks:
-            if not task.meta:
-                task.meta = _builtin_meta(store, task)
+    # 没有附注的卡片(内置任务、task.create 建进自定义源的任务)显示 id 与绑定频道
+    for task in tasks:
+        if not task.meta:
+            task.meta = _default_meta(store, task)
 
     group_by = str(group_by or "").strip()
     column_filters = (validate_filters(filters) if filters

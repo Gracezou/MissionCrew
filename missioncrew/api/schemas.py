@@ -14,6 +14,7 @@ class TaskCreate(BaseModel):
     labels: list[str] = Field(default_factory=list)
     channel_ids: list[str] = Field(default_factory=list)
     status: Optional[str] = None   # 状态文本;None = labels 已带则保留,否则默认
+    source: Optional[str] = None   # 数据源 id;None = 内置源
 
 
 class TaskUpdate(BaseModel):

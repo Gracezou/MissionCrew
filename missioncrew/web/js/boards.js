@@ -243,7 +243,7 @@ function boardCardHtml(card, { showStatus = false } = {}) {
 }
 
 /* ---------------- 任务看板渲染器(内置任务看板与自定义任务看板共用) ----------------
-   两块看板样式与功能完全一致,只差「绑定」:数据端点、配置保存方式、能否新建任务。
+   两块看板样式与功能完全一致,只差「绑定」:数据端点、配置保存方式、新建任务所属的数据源。
    列定义与卡片由服务端解析(内置 /builtin_board/data,自定义 /boards/{id}/data),
    这里只做通用渲染:筛选列工具条(每列一个标签表达式,锁定列不可删)、分组属性
    (设置后改为按取值横向分列,筛选列退为卡片范围)、显示范围(活跃/全部/已归档)
@@ -257,7 +257,7 @@ function builtinTaskboardBinding() {
     host: () => document.getElementById("board"),
     visible: () => currentTab === "board",
     dataUrl: () => `/api/projects/${encodeURIComponent(currentProject)}/builtin_board/data`,
-    canCreate: true,
+    source: "built-in",
     // 配置存在项目对象上:自定义筛选列(锁定的状态列不存)与分列属性
     save: patch => persistTaskBoardConfig({
       ...("filters" in patch
@@ -275,7 +275,7 @@ function customTaskboardBinding(board) {
     host: () => document.getElementById("custom-board-preview"),
     visible: () => currentTab === "custom" && currentCustomBoard === board.id,
     dataUrl: () => `/api/projects/${encodeURIComponent(currentProject)}/boards/${encodeURIComponent(shortId)}/data`,
-    canCreate: false,
+    source: board.source || "built-in",
     save: patch => saveTaskboardConfig(board, {
       ...("filters" in patch ? { filters: taskboardFilterPayload(patch.filters) } : {}),
       ...("group_by" in patch ? { group_by: patch.group_by } : {}),
@@ -326,7 +326,8 @@ function taskboardFilterBarHtml(binding, data) {
   const scopeOption = (value, label) =>
     `<option value="${value}"${taskFilter === value ? " selected" : ""}>${label}</option>`;
   return `<div class="tb-filter-bar">
-    ${binding.canCreate ? `<button class="action" onclick="openNewTask()">+ 新建任务</button>` : ""}
+    <button class="action" data-source="${esc(binding.source)}"
+      onclick="openNewTask(this.dataset.source)">+ 新建任务</button>
     <span class="muted" title="${grouped ? "分组时各筛选列的并集决定进入看板的卡片" : ""}">${
       grouped ? "范围:" : "筛选列:"}</span>${chips}
     <input class="tb-new-filter" list="${listId}"

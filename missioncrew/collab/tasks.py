@@ -4,14 +4,14 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+from . import board_sources
 from .resource_urls import task_resource_url
 from ..core import label_query
-from ..core.models import (Channel, Task, new_id, normalize_labels,
-                           normalize_properties, status_of, with_property,
-                           with_status)
+from ..core.models import (BUILTIN_SOURCE_ID, Channel, Task, new_id,
+                           normalize_labels, normalize_properties, status_of,
+                           with_property, with_status)
 from ..core.store import Store
 
-DEFAULT_STATUS = "待处理"
 DONE_STATUS = "已完成"
 DISPATCHED_STATUS = "处理中"
 
@@ -71,28 +71,32 @@ def task_channels(store: Store, project_id: str, channel_ids: object,
 def create_task(store: Store, project_id: str, *, title: object,
                 summary: object = "", body: object = "", labels: object = None,
                 channel_ids: object = None, status: object = None,
-                actor: str = "human", fallback_channel_id: str = "") -> Task:
+                source: object = None, actor: str = "human",
+                fallback_channel_id: str = "") -> Task:
     if store.get_project(project_id) is None:
         raise ValueError("项目不存在")
+    source_id = board_sources.require_source(store, project_id, source)
     channels = task_channels(
         store, project_id, channel_ids if channel_ids is not None else [],
         fallback_channel_id=fallback_channel_id,
     )
     # 状态即标签:显式 status 参数优先,其次保留 labels 里已有的状态标签,
-    # 两者都没有时落默认状态。状态文本不做合法性校验。
+    # 两者都没有时落该源第一个状态取值。状态文本不做合法性校验。
     label_list = _labels(labels if labels is not None else [])
     status_text = str(status).strip() if status is not None else ""
     if status_text or not status_of(label_list):
-        label_list = with_status(label_list, status_text or DEFAULT_STATUS)
+        label_list = with_status(label_list, status_text or board_sources.default_status(
+            store, project_id, source_id))
     task = Task(
         id=new_id("t"), project_id=project_id,
-        title=_text(title, "title", required=True),
+        title=_text(title, "title", required=True), source_id=source_id,
         summary=_text(summary, "summary"), body=_text(body, "body"),
         labels=label_list,
         channel_ids=[channel.id for channel in channels],
     )
     store.put_task(task)
-    store.audit(actor, "task_created", task.id, f"project={project_id}")
+    store.audit(actor, "task_created", task.id, f"project={project_id}"
+                + (f" source={source_id}" if source_id != BUILTIN_SOURCE_ID else ""))
     return task
 
 
@@ -243,7 +247,11 @@ def dispatch_task(store: Store, chat, task: Task, *, message: str = "",
         raise ValueError("Task 派发需要至少一个可用 Channel")
     task.channel_ids = [channel.id for channel in channels]
     previous_labels = list(task.labels)
-    task.labels = with_status(task.labels, DISPATCHED_STATUS)
+    # 自定义源有自己的状态取值:没声明「处理中」时保持原状态,
+    # 否则卡片会从按状态分列的看板上消失
+    if board_sources.declares_status(
+            store, task.project_id, task.source_id, DISPATCHED_STATUS):
+        task.labels = with_status(task.labels, DISPATCHED_STATUS)
     store.put_task(task)
     handled_by = "、".join(f"@{role_id}" for role_id in target_ids)
     sent: list[dict] = []

@@ -46,6 +46,7 @@ let currentTaskId = null;
 let currentTaskDetail = null;
 let editingTaskId = null;
 let editingTaskSnapshot = null;
+let editingTaskSource = "built-in";   // 新建 Task 归属的数据源(从哪块看板点的新建)
 
 function closeTaskDialog(updateRoute = true) {
   currentTaskId = null;
@@ -152,16 +153,41 @@ function renderTaskChannelOptions(selected = []) {
   ).join("") || '<span class="empty">当前项目没有可用 Channel</span>';
 }
 
-function openNewTask() {
+// 状态取值随数据源而定:内置源是四态,自定义源用自己声明的取值(看板数据源清单里带)
+async function taskSourceStatusValues(source) {
+  const id = source || "built-in";
+  if (id === "built-in") return STATUS_VALUES;
+  let hit = (await loadBoardSources()).find(item => item.id === id);
+  if (!hit) {   // 清单按项目缓存,Agent 后来新建的数据源要重新拉取
+    boardSourcesCache.list = null;
+    hit = (await loadBoardSources()).find(item => item.id === id);
+  }
+  const values = (hit?.status_values || []).map(item => item.value).filter(Boolean);
+  return values.length ? values : STATUS_VALUES;
+}
+
+function renderTaskStatusOptions(values, selected) {
+  // 不在取值里的自由状态文本也列为选项,编辑时不会被悄悄改掉
+  const options = [...new Set([...values, selected].filter(Boolean))];
+  const select = document.getElementById("nt-status");
+  select.innerHTML = options.map(value =>
+    `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+  select.value = selected || values[0];
+}
+
+async function openNewTask(source = "built-in") {
   if (!currentProject) { uiAlert("请先创建/选择项目"); return; }
   editingTaskId = null;
   editingTaskSnapshot = null;
-  document.getElementById("tdlg-title").textContent = "新建 Task";
+  editingTaskSource = source || "built-in";
+  const values = await taskSourceStatusValues(editingTaskSource);
+  document.getElementById("tdlg-title").textContent = editingTaskSource === "built-in"
+    ? "新建 Task" : `新建 Task · ${boardSourceName(editingTaskSource)}`;
   document.getElementById("task-save-btn").textContent = "创建 Task";
   document.getElementById("nt-title").value = "";
   document.getElementById("nt-summary").value = "";
   document.getElementById("nt-body").value = "";
-  document.getElementById("nt-status").value = "待处理";
+  renderTaskStatusOptions(values, values[0]);
   document.getElementById("nt-labels").value = "";
   const active = projChannels().filter(channel => !channel.archived);
   const initial = active.some(channel => channel.id === currentChan)
@@ -171,23 +197,19 @@ function openNewTask() {
   tdlg.showModal();
 }
 
-function openTaskEditor(id) {
+async function openTaskEditor(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   editingTaskId = id;
   editingTaskSnapshot = task.updated_at;
   closeTaskDialog(false);
+  const values = await taskSourceStatusValues(task.source_id);
   document.getElementById("tdlg-title").textContent = `编辑 ${id}`;
   document.getElementById("task-save-btn").textContent = "保存修改";
   document.getElementById("nt-title").value = task.title;
   document.getElementById("nt-summary").value = task.summary;
   document.getElementById("nt-body").value = task.body;
-  const select = document.getElementById("nt-status");
-  const status = taskStatus(task);
-  if (status && !STATUS_VALUES.includes(status))   // 自由状态文本也可编辑
-    select.insertAdjacentHTML("beforeend",
-      `<option value="${esc(status)}">${esc(status)}</option>`);
-  select.value = status || "待处理";
+  renderTaskStatusOptions(values, taskStatus(task) || values[0]);
   document.getElementById("nt-labels").value = taskDisplayLabels(task).join(", ");
   renderTaskChannelOptions(task.channel_ids);
   tdlg.showModal();
@@ -222,6 +244,7 @@ async function saveTask() {
     await api("PATCH", `/api/tasks/${id}`, payload);
   } else {
     payload.project_id = currentProject;
+    payload.source = editingTaskSource;
     await api("POST", "/api/tasks", payload);
   }
   editingTaskId = null;
@@ -232,12 +255,13 @@ async function saveTask() {
   toast(id ? "Task 已更新" : "Task 已创建", "success");
 }
 
-function openTaskBriefForm(id) {
+async function openTaskBriefForm(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   closeTaskDialog(false);
   const current = taskStatus(task);
-  const options = [...new Set([current, ...STATUS_VALUES])].filter(Boolean);
+  const values = await taskSourceStatusValues(task.source_id);
+  const options = [...new Set([current, ...values])].filter(Boolean);
   openFormDialog("添加状态简报", `
     <label>状态</label><select id="task-brief-status">
       ${options.map(value =>

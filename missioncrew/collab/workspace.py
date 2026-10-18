@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from ..core.config import mc_home, workspaces_dir
-from ..core.models import Project, Task
+from ..core.models import BUILTIN_SOURCE_ID, Project, Task
 from .documents import document_resource_url
 from .manual import render_manual
 from .platform_docs import INDEX_NAME, sync_platform_docs
@@ -400,9 +400,10 @@ def _render_task(task: Task, briefs: list[dict] | None = None) -> str:
         "status": task.status,
         "labels": task.labels,
         "channel_ids": task.channel_ids,
-        # 外部源同步来的任务带上来源与原始链接,Agent 才能回到 Issue 等原始条目
-        **({"source": task.source_id, "external_id": task.external_id}
-           if task.external_id else {}),
+        # 自定义源的任务标明来源;同步来的再带同步键与原始链接,Agent 才能回到 Issue 等原始条目
+        **({"source": task.source_id}
+           if task.source_id != BUILTIN_SOURCE_ID else {}),
+        **({"external_id": task.external_id} if task.external_id else {}),
         **({"url": task.url} if task.url else {}),
         **({"meta": task.meta} if task.meta else {}),
         "snapshot_updated_at": task.updated_at,

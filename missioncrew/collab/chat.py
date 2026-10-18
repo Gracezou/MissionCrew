@@ -2003,8 +2003,11 @@ class ChatEngine:
                  f"- {_short(b.id)} ({b.name}): {b.description or 'no description'}; {body}; "
                  f"Web {dashboard_resource_url(project.id, b.id)}")
         for s in self.store.list_board_datasources(project.id):
+            # 状态取值随源而定:task.create/task.update 往自定义源写状态时要用它们
             _add("source", _short(s.id),
-                 f"- {_short(s.id)} ({s.name}): {s.description or 'no description'}")
+                 f"- {_short(s.id)} ({s.name}): {s.description or 'no description'}; "
+                 "status values " + "/".join(str(c.get("value") or "")
+                                             for c in s.status_values))
         for a in self.store.list_automations(project.id):
             _add("automation", _short(a.id),
                  f"- {_short(a.id)} ({a.name}): {a.description or 'no description'}; "

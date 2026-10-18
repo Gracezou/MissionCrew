@@ -15,6 +15,7 @@ from missioncrew.collab.automations import (AutomationScheduler,
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.tasks import update_task
 from missioncrew.core.cron import next_cron_time, parse_cron, validate_cron
+from missioncrew.core.models import BoardDataSource
 
 
 def _ts(*args) -> float:
@@ -216,6 +217,121 @@ def test_board_source_sync_only_updates_what_cards_carry(seeded):
     assert seeded.get_task(task.id).status == "已完成"
     assert [t.external_id for t in seeded.list_tasks(
         "webshop", source_id="gh")] == ["7"]
+
+
+def test_custom_source_tasks_are_operated_like_builtin_ones(seeded, tmp_path):
+    """task.create 带 source 建进自定义源;整体同步只管同步来的任务,不碰手工任务。"""
+    from types import SimpleNamespace
+
+    from missioncrew.collab.board_sources import resolve_board_data
+    from missioncrew.collab.tasks import dispatch_task
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="pr-sync", script="true",
+        actions=["board_source.save", "task.create", "task.delete"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    call("board_source.save", {
+        "id": "pr-dev", "columns": [{"value": "正在开发"}, {"value": "需要审批"},
+                                    {"value": "已关闭"}],
+        "cards": [{"id": "pr-1", "title": "同步来的 PR"}]}, "s1")
+
+    # 没给状态落到该源第一个状态取值;不传 source 仍建在内置源
+    manual = call("task.create", {"title": "手工登记的 PR", "source": "pr-dev"},
+                  "c1")["task"]
+    assert manual["source_id"] == "pr-dev" and manual["external_id"] == ""
+    assert manual["labels"] == ["status: 正在开发"]
+    builtin = call("task.create", {"title": "内置任务"}, "c2")["task"]
+    assert builtin["source_id"] == "built-in"
+    assert builtin["labels"] == ["status: 待处理"]
+    with pytest.raises(AgentToolError) as unknown:
+        call("task.create", {"title": "x", "source": "nope"}, "c3")
+    assert unknown.value.code == "invalid_arguments"
+
+    # 整体同步只增删同步来的任务,手工任务不在 cards 里也保留
+    assert call("board_source.save", {"id": "pr-dev", "cards": []},
+                "s2")["sync"] == {"created": 0, "updated": 0, "removed": 1}
+    assert [t.id for t in seeded.list_tasks("webshop", source_id="pr-dev")] \
+        == [manual["id"]]
+
+    # 快照标明来源;看板卡片与内置任务一样带 id 附注
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{manual['id']}.md")
+    assert attributes["source"] == "pr-dev" and "external_id" not in attributes
+    data = resolve_board_data(seeded, "webshop", "pr-dev")
+    card = data["columns"][0]["cards"][0]
+    assert card["id"] == manual["id"] and card["meta"][0] == manual["id"]
+
+    # 该源没声明「处理中」:派发不改状态,卡片留在原来的状态列
+    sent, _brief = dispatch_task(seeded, SimpleNamespace(post=lambda *a, **k: 1),
+                                 seeded.get_task(manual["id"]))
+    assert sent and seeded.get_task(manual["id"]).status == "正在开发"
+    dispatch_task(seeded, SimpleNamespace(post=lambda *a, **k: 1),
+                  seeded.get_task(builtin["id"]))
+    assert seeded.get_task(builtin["id"]).status == "处理中"
+
+    # 单张删除进回收站,恢复后仍在原数据源
+    from missioncrew.collab.recycle_bin import restore_recycle_item
+
+    project = seeded.get_project("webshop")
+    item = call("task.delete", {"id": manual["id"]}, "d1")["recycle_item"]
+    assert seeded.get_task(manual["id"]) is None
+    restore_recycle_item(seeded, project, item["id"], actor="human")
+    assert seeded.get_task(manual["id"]).source_id == "pr-dev"
+
+
+def test_recycled_source_task_restore_conflicts(seeded):
+    """数据源已删除、或同一外部条目已被同步重建时,回收站恢复要拒绝。"""
+    from missioncrew.collab.recycle_bin import (RecycleConflictError,
+                                                restore_recycle_item)
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save", "board_source.delete", "task.create",
+                 "task.delete"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    project = seeded.get_project("webshop")
+    call("board_source.save", {"id": "gh", "cards": [{"id": "7", "title": "缺陷"}]}, "s1")
+    synced = seeded.list_tasks("webshop", source_id="gh")[0]
+    item = call("task.delete", {"id": synced.id}, "d1")["recycle_item"]
+    # 外部条目还在:下一次同步重建,旧任务再恢复就会出现两张同一条目的卡片
+    assert call("board_source.save", {"id": "gh", "cards": [{"id": "7", "title": "缺陷"}]},
+                "s2")["sync"]["created"] == 1
+    with pytest.raises(RecycleConflictError):
+        restore_recycle_item(seeded, project, item["id"], actor="human")
+
+    manual = call("task.create", {"title": "手工", "source": "gh"}, "c1")["task"]
+    item = call("task.delete", {"id": manual["id"]}, "d2")["recycle_item"]
+    call("board_source.delete", {"id": "gh"}, "x1")
+    with pytest.raises(ValueError, match="数据源已删除"):
+        restore_recycle_item(seeded, project, item["id"], actor="human")
+
+
+def test_api_creates_task_in_custom_source(seeded):
+    seeded.put_board_datasource(BoardDataSource(
+        id="webshop:pr-dev", project_id="webshop",
+        status_values=[{"value": "正在开发", "color": ""}]))
+    with TestClient(create_app()) as client:
+        created = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "PR", "source": "pr-dev"})
+        assert created.status_code == 200, created.text
+        assert created.json()["source_id"] == "pr-dev"
+        assert created.json()["labels"] == ["status: 正在开发"]
+        missing = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "PR", "source": "nope"})
+        assert missing.status_code == 400
 
 
 def test_synced_task_shows_original_link_and_rule_trigger_to_agents(seeded, tmp_path):

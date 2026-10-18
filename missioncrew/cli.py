@@ -62,7 +62,7 @@ def _fmt_ts(ts: float) -> str:
 
 def _print_task(t: Task) -> None:
     typer.echo(f"[{t.id}] {t.title}")
-    typer.echo(f"  项目={t.project_id} 状态={t.status}")
+    typer.echo(f"  项目={t.project_id} 数据源={t.source_id} 状态={t.status}")
     typer.echo(f"  频道={', '.join(t.channel_ids)} 标签={', '.join(t.labels) or '-'}")
     typer.echo(f"  简介={t.summary or '-'}")
     if t.body:
@@ -392,13 +392,19 @@ def task_create(project: str = typer.Option(..., "-p", "--project"),
                 label: list[str] = typer.Option([], "-l", "--label"),
                 channel: list[str] = typer.Option([], "-c", "--channel"),
                 status: Optional[str] = typer.Option(
-                    None, help="状态文本,如 待处理/处理中/已阻塞/已完成"),
+                    None, help="状态文本,如 待处理/处理中/已阻塞/已完成;缺省为数据源第一个状态"),
+                source: Optional[str] = typer.Option(
+                    None, help="数据源短 id;缺省为内置源 built-in"),
                 process: bool = typer.Option(False, help="创建后发送给绑定 Channel 的主控")):
     store = _store()
-    task = create_task(
-        store, project, title=title, summary=summary, body=body,
-        labels=list(label), channel_ids=list(channel), status=status,
-    )
+    try:
+        task = create_task(
+            store, project, title=title, summary=summary, body=body,
+            labels=list(label), channel_ids=list(channel), status=status,
+            source=source,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
     typer.echo(f"任务已创建: {task.id}")
     if process:
         sent, _ = dispatch_task(store, ChatEngine(store), task)

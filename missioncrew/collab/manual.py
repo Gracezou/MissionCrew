@@ -151,7 +151,14 @@ An orchestrator's turn:
   `error.details.task` is the current task and the snapshot is already refreshed; check what
   changed, then retry with its `updated_at`. `task.brief` needs no version, so use it to record
   progress or to change only the status.
-- Tasks synced from a data source carry `source`, `external_id` and `url` (the original item,
+- Every Task belongs to a data source: the built-in `built-in` by default, or a custom source
+  when `task.create` is given `source` (its snapshot then carries `source`). Tasks of either
+  kind are changed one at a time with the same `task.*` actions; use the source's own status
+  values (in the data source list of your context, or as seen on that source's tasks in
+  `tasks/`). To add or remove a single task of a custom source, use `task.create` /
+  `task.delete`, never a partial `board_source.save` card list: that whole sync deletes every
+  synced task missing from it.
+- Tasks synced from a data source also carry `external_id` and `url` (the original item,
   such as a GitHub issue) in their snapshot, and their dispatch message includes the link. The
   sync script owns the fields its cards carry (usually title, summary, url and plain labels) and
   rewrites them on every sync; keep local progress in the status, `property: value` labels and

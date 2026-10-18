@@ -130,7 +130,12 @@ ACTION_DEFINITIONS = {
                        "e.g. owner: 张三"),
             "channel_ids": ("optional array of channel ids to bind; omitted binds the current "
                             "channel"),
-            "status": "status text such as 待处理/处理中/已阻塞/已完成; defaults to 待处理",
+            "status": ("status text such as 待处理/处理中/已阻塞/已完成; defaults to the data "
+                       "source's first status value (待处理 for the built-in source)"),
+            "source": ("optional data source id: the built-in `built-in` (default) or a custom "
+                       "source's short id; the task then shows on boards bound to that source and "
+                       "uses its status values. A custom source's whole sync "
+                       "(board_source.save cards) never touches tasks created here"),
         },
     },
     "task.update": {
@@ -337,7 +342,9 @@ ACTION_DEFINITIONS = {
             "Create or update a custom task data source; cards are synced by id as that "
             "source's tasks (add/update/delete); suited to automation scripts that "
             "periodically sync external lists such as GitCode/GitHub issues, then use "
-            "dashboard.save to create a task board bound to the source"
+            "dashboard.save to create a task board bound to the source. To add, change or "
+            "remove single tasks of a source, use task.create with source and "
+            "task.update/task.delete instead of resending the whole card list"
         ),
         "orchestrator_only": True,
         "arguments": {
@@ -346,8 +353,9 @@ ACTION_DEFINITIONS = {
             "columns": ("optional array of status values [{value,color}] (legacy "
                         "{key,title,color} accepted); defaults to 待处理/处理中/已阻塞/已完成 "
                         "on creation, omitted on update keeps the existing ones"),
-            "cards": ("optional card array, synced as a whole by id: tasks absent from the "
-                      "list are deleted. Each card needs id (title too when it creates a task), "
+            "cards": ("optional card array, synced as a whole by id: synced tasks absent "
+                      "from the list are deleted, while tasks added with task.create and source "
+                      "are left alone. Each card needs id (title too when it creates a task), "
                       "optionally summary, status (status text), labels, properties, "
                       "updated_at (Unix seconds), meta (array of strings) and url (external "
                       "link). Existing tasks only change "
@@ -518,7 +526,7 @@ PEER_MESSAGE_PUBLISH = {
 
 ACTION_ARGUMENTS = {
     "task.create": {
-        "title", "summary", "body", "labels", "channel_ids", "status",
+        "title", "summary", "body", "labels", "channel_ids", "status", "source",
     },
     "task.update": {
         "id", "snapshot_updated_at", "title", "summary", "body", "status",

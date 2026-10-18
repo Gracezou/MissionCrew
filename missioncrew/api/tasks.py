@@ -44,7 +44,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             task = create_task(
                 store, body.project_id, title=body.title, summary=body.summary,
                 body=body.body, labels=body.labels, channel_ids=body.channel_ids,
-                status=body.status,
+                status=body.status, source=body.source,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

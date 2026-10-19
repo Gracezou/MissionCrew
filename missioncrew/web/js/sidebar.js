@@ -394,6 +394,13 @@ function insertMention(id) {
   }
   if (currentTab !== "chat") switchTab("chat");
   activateComposer("input", "mention-picker");
+  // 无主控项目:输入框只剩自动带上的默认点名时,点角色是切换默认对象而不是追加;
+  // 新插入的提及不再标为默认,继续点其他角色就按普通方式追加(多选)
+  const box = document.getElementById("input");
+  if (box.querySelector(".mention-compose[data-sticky]") && composerHoldsOnlySticky(box)) {
+    box.replaceChildren();
+    savedComposerRange = null;
+  }
   insertComposerMention(id);
 }
 
@@ -404,6 +411,7 @@ function selectChannel(id, jump = true) {
   pendingUploads = [];
   renderPendingUploads();
   setComposerError();
+  applyStickyMentions();
   updateChatRunControls([]);
   document.getElementById("msgs").innerHTML = "";
   if (jump && currentTab !== "chat") switchTab("chat");
@@ -952,6 +960,66 @@ function setComposerError(text = "") {
   el.hidden = !text;
 }
 
+/* ---- 无主控项目的默认点名 ----
+   无主控项目只靠人类点名启动角色:发送后按「项目 + 频道」记住本条点到的角色
+   (存浏览器),清空输入框时自动插到下一条消息开头。自动插入的提及带 data-sticky;
+   输入框里只剩这些提及和空白时视为未改动——切频道时换成新频道的默认点名,
+   点角色时替换为所点角色;一旦写了正文就不再自动改写。 */
+const STICKY_MENTIONS_KEY = "mc.stickyMentions";
+
+function stickyMentionStore() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STICKY_MENTIONS_KEY) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (_) { return {}; }
+}
+
+function stickyMentionKey(project = currentProject, channel = currentChan) {
+  return JSON.stringify([project, channel]);
+}
+
+function rememberStickyMentions(mentions) {
+  const ids = [...new Set(mentions.map(item => item.role_id))];
+  if (!peerModeProject() || !currentChan || !ids.length) return;
+  const store = stickyMentionStore();
+  store[stickyMentionKey()] = ids;
+  try { localStorage.setItem(STICKY_MENTIONS_KEY, JSON.stringify(store)); }
+  catch (_) { /* 存储不可用时只在本次会话内失效,不影响发送 */ }
+}
+
+function composerHoldsOnlySticky(box) {
+  return [...box.childNodes].every(node => node.nodeType === Node.TEXT_NODE
+    ? !node.nodeValue.trim()
+    : node.tagName === "BR"
+      || (node.classList?.contains("mention-compose") && node.dataset.sticky !== undefined));
+}
+
+function applyStickyMentions({ focus = false } = {}) {
+  const box = document.getElementById("input");
+  if (!box || !composerHoldsOnlySticky(box)) return;
+  const ids = peerModeProject() && currentChan
+    ? stickyMentionStore()[stickyMentionKey()] || [] : [];
+  const fragment = document.createDocumentFragment();
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const mention = createComposerMention(String(id));   // 已删除或停用的角色跳过
+    if (!mention) continue;
+    mention.dataset.sticky = "";
+    mention.title += "；本频道的默认点名，发送后保留";
+    fragment.append(mention, document.createTextNode(" "));
+  }
+  box.replaceChildren(fragment);
+  savedComposerRange = null;
+  if (!focus || !box.childNodes.length) return;
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  savedComposerRange = range.cloneRange();
+  box.focus();
+}
+
 async function send() {
   const box = document.getElementById("input");
   const payload = composerPayload();
@@ -973,11 +1041,14 @@ async function send() {
   // 附件路径追加在正文尾部，不影响前面提及范围的字符偏移
   if (attachments.length)
     content = (content ? content + "\n\n" : "") + attachmentBlock(attachments);
+  const hadFocus = document.activeElement === box;
   box.replaceChildren();
   pendingUploads = [];
   renderPendingUploads();
   savedComposerRange = null;
   hideMentionPicker();
+  rememberStickyMentions(mentions);
+  applyStickyMentions({ focus: hadFocus });
   try {
     await api("POST", `/api/chat/${currentChan}/messages`,
               { author: "human", content, mentions,

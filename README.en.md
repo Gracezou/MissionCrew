@@ -29,7 +29,7 @@ Getting several agents to cooperate used to mean asking one tool for a plan, cop
 
 1. Create a channel for the task with the ＋ next to **Channels** in the sidebar; it can be bound to a local repository as its working directory.
 2. Type `@` in the composer to pick a role. Pick a single role and it executes directly, with the result staying in the channel.
-3. To have several agents answer the same question at once, set the project's orchestrator to **No orchestrator** in **Project settings**: mentioning several roles then starts each of them independently (in a project with an orchestrator, mentioning several roles hands the list to the orchestrator).
+3. To have several agents answer the same question at once, set the project's orchestrator to **No orchestrator** in **Project settings**: mentioning several roles then starts each of them independently (in a project with an orchestrator, mentioning several roles hands the list to the orchestrator). After you send, the channel remembers the roles you mentioned and puts them at the start of your next message; click another role to switch.
 4. Mention another role in the next message and it can read every answer above. "Fix both, taking codex's finding into account" needs no copy-paste.
 
 ![No-orchestrator project: @claude and @codex investigate the same problem, Claude fixes it using Codex's finding, Codex reviews and Kimi adds tests](docs/images/get-started/multi-agent.jpg)

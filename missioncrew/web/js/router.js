@@ -580,7 +580,8 @@ function renderSidebar() {
   const orch = projObj()?.orchestrator_role_id;
   const roleHelp = document.getElementById("role-help-text");
   if (roleHelp) roleHelp.textContent = peerModeProject()
-    ? "输入 @ 后从列表选择角色；本项目没有主控，必须 @ 至少一个角色，多个角色各自启动"
+    ? "输入 @ 后从列表选择角色；本项目没有主控，必须 @ 至少一个角色，多个角色各自启动；"
+      + "发送后本频道记住所点角色，自动带到下一条开头，点其他角色即切换"
     : "输入 @ 后从列表选择角色；单个角色直接执行，多个角色交给主控协调";
   if (!_secState("roles", "role-list", "cnt-roles", projRoles().length))
     document.getElementById("role-list").innerHTML = projRoles().map(r => {

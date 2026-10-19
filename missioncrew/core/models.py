@@ -455,7 +455,8 @@ class Project:
     resources: list[str] = field(default_factory=list)  # 可申请的受控资源 id
     required_env: Optional[str] = None                  # 执行环境要求,如 linux/gpu
     task_auto_rules: list[TaskAutoRule] = field(default_factory=list)
-    # 内置任务看板在四个锁定状态列之后追加的自定义筛选列 [{title,query,color}]
+    # 内置任务看板的自定义筛选列 [{title,query,color}],默认排在四个锁定状态列之后;
+    # 与锁定列同表达式的条目只记录该锁定列的排序位置
     task_board_filters: list[dict] = field(default_factory=list)
     # 内置任务看板的默认分列属性(与自定义任务看板 Board.group_by 同语义)
     task_board_group_by: str = ""

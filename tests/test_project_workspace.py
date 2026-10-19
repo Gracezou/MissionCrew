@@ -1062,6 +1062,26 @@ def test_builtin_board_locks_status_columns_and_appends_custom_filters(seeded):
         "all": 1, "archived": 0, "active": 1}
 
 
+def test_builtin_board_custom_filters_can_position_locked_status_columns(seeded):
+    client = _client(seeded)
+    client.post("/api/tasks", json={
+        "project_id": "webshop", "title": "登录崩溃", "labels": ["bug"]})
+    # 与锁定列同表达式的条目只标记位置:标题沿用状态列,未标记的锁定列排在最前
+    client.post("/api/projects", json={
+        "id": "webshop", "name": "网店", "task_board_filters": [
+            {"title": "缺陷", "query": "bug"},
+            {"title": "旧标题", "query": "STATUS: 待处理"},
+            {"title": "已完成", "query": "status: 已完成"}]})
+    payload = client.get("/api/projects/webshop/builtin_board/data").json()
+    assert [(c["title"], c["locked"]) for c in payload["columns"]] == [
+        ("处理中", True), ("已阻塞", True), ("缺陷", False),
+        ("待处理", True), ("已完成", True)]
+    assert [c["title"] for c in payload["columns"][3]["cards"]] == ["登录崩溃"]
+    assert [(f["query"], f["locked"]) for f in payload["filters"]] == [
+        ("status: 处理中", True), ("status: 已阻塞", True), ("bug", False),
+        ("status: 待处理", True), ("status: 已完成", True)]
+
+
 def test_builtin_board_shares_group_by_and_scope_with_custom_boards(seeded):
     """内置任务看板与自定义任务看板同一协议:项目级 group_by 按取值分列,
     scope 切换活跃/已归档/全部,卡片带 archived 标记。"""
@@ -1472,9 +1492,10 @@ def test_project_config_managers_are_full_pages_with_orchestrator_requests(seede
     assert "markdownPreviewHtml(markdown)" in js
     assert "markdownPreviewHtml(" in viewer
     assert "markdownPreviewHtml(c.markdown || c.text" in boards
-    # 新建看板对话框无标签表达式输入;筛选列在看板顶部工具条增删
+    # 新建看板对话框无标签表达式输入;筛选列在看板工具条 ✎ 打开的编辑对话框中增删
     assert 'id="nb-query"' not in boards
-    assert "tb-filter-bar" in boards and "addTaskboardFilter" in boards
+    assert "tb-filter-bar" in boards and "addTaskboardColumnRow" in boards
+    assert "saveTaskboardColumns" in boards
     assert js.count("markdownPreviewHtml(") >= 2
     assert "markdownContentWithoutFrontmatter" not in js
     assert "skillMarkdownPreviewHtml" not in js

@@ -46,6 +46,16 @@ const context = {
   },
   localStorage: { getItem: () => null, setItem() {} },
   esc: value => String(value ?? ''),
+  // 与 tasks.js 同义的标签拆分/归一化,供表达式编译使用
+  splitLabel: text => {
+    const raw = String(text || '').trim(), idx = raw.indexOf(':');
+    const prop = idx > 0 ? raw.slice(0, idx).trim() : '', value = raw.slice(idx + 1).trim();
+    return prop && value ? [prop, value] : ['', raw];
+  },
+  normalizeLabel: text => {
+    const [prop, value] = context.splitLabel(text);
+    return prop ? `${prop}: ${value}` : value;
+  },
   sourceStatusValues: () => [{ value: 'Open', color: '' }],
   captureKeyedScrollPositions: () => [], restoreKeyedScrollPositions() {},
   fetch: (url, options) => {
@@ -192,14 +202,14 @@ await commitTaskboardColumns(binding, form, [{ query: 'third' }], 'also ignored'
 const duringRefresh = saved.length;
 refresh.resolve();
 await first;
-return { pending, duringRefresh, saved, reopened,
+return { pending, duringRefresh, saved, reopened, closed: !fdlg.open,
   saving: taskboardState(binding).columnsSaving,
   disabled: controls.some(item => item.disabled) };
 """)
     assert result["pending"] == {"calls": 1, "disabled": True, "saving": True}
     assert result["duringRefresh"] == 1
     assert result["saved"] == [{"filters": [{"query": "first"}]}]
-    assert result["reopened"] == ["editor"]
+    assert result["closed"] and result["reopened"] == []
     assert not result["saving"] and not result["disabled"]
 
 
@@ -209,16 +219,17 @@ const { binding, form, error, controls, saved, reopened } = setupColumnEditor();
 binding.save = async patch => { saved.push(patch); };
 taskboardState(binding).data.filters.reverse();
 await commitTaskboardColumns(binding, form, [{ query: 'urgent' }], 'saved');
-return { saved, reopened, error: error.innerHTML,
+return { saved, reopened, error: error.innerHTML, open: fdlg.open,
   disabled: controls.some(item => item.disabled), saving: !!taskboardState(binding).columnsSaving };
 """)
-    assert result["saved"] == [] and result["reopened"] == []
-    assert "列配置已发生变化" in result["error"]
+    assert result["saved"] == [] and result["reopened"] == [] and result["open"]
+    assert "列配置已被其他人修改" in result["error"]
     assert not result["saving"] and not result["disabled"]
 
 
-@pytest.mark.parametrize("dismiss", ["fdlg.open = false;", "form.isConnected = false;"])
-def test_finished_save_does_not_reopen_a_closed_or_replaced_editor(dismiss):
+@pytest.mark.parametrize("dismiss, still_open", [
+    ("fdlg.open = false;", False), ("form.isConnected = false;", True)])
+def test_finished_save_does_not_close_a_dialog_that_replaced_the_editor(dismiss, still_open):
     result = evaluate("""
 const { binding, form, saved, refreshed, reopened } = setupColumnEditor();
 const save = deferred();
@@ -227,10 +238,12 @@ const pending = commitTaskboardColumns(binding, form, [{ query: 'bug' }], 'saved
 """ + dismiss + """
 save.resolve();
 await pending;
-return { saves: saved.length, refreshes: refreshed.length, reopened,
+return { saves: saved.length, refreshes: refreshed.length, reopened, open: fdlg.open,
   saving: taskboardState(binding).columnsSaving };
 """)
-    assert result == {"saves": 1, "refreshes": 1, "reopened": [], "saving": False}
+    # 编辑器已被关闭或替换成别的表单时,保存完成不能关掉当前对话框。
+    assert result == {"saves": 1, "refreshes": 1, "reopened": [], "open": still_open,
+                      "saving": False}
 
 
 def test_failed_column_save_releases_controls_and_allows_retry():
@@ -246,6 +259,31 @@ return { failed, calls, refreshes: refreshed.length };
 """)
     assert result["failed"] == {"error": "save failed", "disabled": False, "saving": False}
     assert result["calls"] == 2 and result["refreshes"] == 1
+
+
+def test_builtin_payload_keeps_locked_columns_only_as_moved_position_markers():
+    result = evaluate("""
+const open = { title: 'Open', query: 'status: Open', color: '', locked: true };
+const bug = { title: 'Bug', query: 'bug', color: '', locked: false };
+return [builtinTaskboardFilterPayload([open, bug]),
+        builtinTaskboardFilterPayload([bug, open])];
+""")
+    assert result == [
+        [{"title": "Bug", "query": "bug", "color": ""}],
+        [{"title": "Bug", "query": "bug", "color": ""},
+         {"title": "Open", "query": "status: Open", "color": ""}],
+    ]
+
+
+def test_column_draft_problems_flag_syntax_duplicates_and_empty_only_when_saving():
+    result = evaluate("""
+const rows = [{ title: '', query: 'bug' }, { title: '', query: 'BUG ' },
+  { title: 'x', query: '(bug' }, { title: '新列', query: '' }];
+return [rows.map(row => columnRowProblem(row, rows, false)),
+        columnRowProblem(rows[3], rows, true)];
+""")
+    assert result == [
+        ["", "与上方列的表达式重复", "表达式不合法：缺少右括号", ""], "表达式不能为空"]
 
 
 @pytest.mark.parametrize("input_class", [".tb-facet-search", ".tb-advanced-query"])

@@ -67,22 +67,28 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         pinned = board_sources.default_filters(
             board_sources.source_status_values(
                 store, project_id, board_sources.BUILTIN_SOURCE_ID))
-        extras = list(project.task_board_filters)
+        # 自定义列中与锁定列同表达式的条目只标记该锁定列被排到的位置;
+        # 未标记的锁定列按默认顺序排在最前。
+        by_query = {item["query"].casefold(): item for item in pinned}
+        placed = {item["query"].casefold() for item in project.task_board_filters}
+        ordered = [(item, True) for item in pinned if item["query"].casefold() not in placed]
+        for item in project.task_board_filters:
+            hit = by_query.get(item["query"].casefold())
+            ordered.append((hit, True) if hit else (item, False))
         try:
             data = board_sources.resolve_board_data(
                 store, project_id, board_sources.BUILTIN_SOURCE_ID,
-                pinned + extras, group_by=project.task_board_group_by,
+                [item for item, _ in ordered], group_by=project.task_board_group_by,
                 scope=scope, view_group_by=view_group_by,
                 filter_query=filter_query, search=search,
                 filter_labels=filter_label, missing_properties=missing_property)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         if not data["group_by"]:   # 分组模式下列是属性取值,没有锁定概念
-            for index, column in enumerate(data["columns"]):
-                column["locked"] = index < len(pinned)
-        # 筛选配置带 locked 标记回传:锁定的状态列不可删,自定义列可增删
-        data["filters"] = ([{**item, "locked": True} for item in pinned]
-                           + [{**item, "locked": False} for item in extras])
+            for column, (_, locked) in zip(data["columns"], ordered):
+                column["locked"] = locked
+        # 筛选配置带 locked 标记回传:锁定的状态列不可删,自定义列可增删,两者都可排序
+        data["filters"] = [{**item, "locked": locked} for item, locked in ordered]
         return data
 
     def _resolve_widget_source(project_id: str, source: dict):

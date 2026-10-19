@@ -359,8 +359,8 @@ async function deleteTask(id) {
 
 /* ---------------- 看板配置与自动处理规则 ----------------
    内置看板 = 四个锁定状态列 + 项目自定义筛选列(task_board_filters,每列
-   一个标签表达式)+ 默认分列属性(task_board_group_by),共享列从看板「显示选项」
-   的管理对话框修改;日常筛选和显示偏好由 boards.js 独立管理。规则(task_auto_rules)的
+   一个标签表达式)+ 默认分列属性(task_board_group_by),共享列在看板分列选
+   「自定义表达式列」后从旁边的 ✎ 打开编辑对话框修改;日常筛选和显示偏好由 boards.js 独立管理。规则(task_auto_rules)的
    列表页与编辑器在 task-rules.js,列头 ⚡ 与面板组件打开同一个编辑器。 */
 
 function projTaskRules() {

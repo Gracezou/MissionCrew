@@ -3,7 +3,7 @@
    taskboard(任务看板:选数据源,独立筛选与属性分列)。日常只读渲染;
    编辑模式从侧栏面板列表的 ✎ 进入——widgets 面板可继续与主控在面板专属频道
    对话,或直接改布局 JSON;taskboard 面板改名称与数据源,日常筛选与显示选项
-   在看板工具条操作,共享表达式列在单独的管理对话框维护。
+   在看板工具条操作,共享表达式列在单独的编辑对话框维护。
    列定义与卡片由服务端数据源注册表统一解析(/boards/{id}/data),前端只做
    通用渲染,不感知数据来自任务还是脚本同步的外部列表(如 GitCode Issue)。
    内置任务看板(#board)用同一渲染器,见下方「任务看板渲染器」。 */
@@ -204,13 +204,17 @@ function compileLabelQuery(expr) {
   return matcher;
 }
 
-function matchLabelQuery(query, labels) {
-  const matcher = compileLabelQuery(query);
-  return matcher({
+// 编译后的匹配器接收的上下文;批量匹配时每个对象只需构造一次
+function labelQueryContext(labels) {
+  return {
     labels: new Set((labels || []).map(l => normalizeLabel(l).toLowerCase())),
     props: new Set((labels || []).map(l => splitLabel(l)[0].toLowerCase())
       .filter(Boolean)),
-  });
+  };
+}
+
+function matchLabelQuery(query, labels) {
+  return compileLabelQuery(query)(labelQueryContext(labels));
 }
 
 /* 看板通用卡片:所有卡片都是任务,点击打开任务详情;带 url 的另给外链 ↗。
@@ -252,7 +256,7 @@ function builtinTaskboardBinding() {
     visible: () => currentProject === projectId && currentTab === "board",
     dataUrl: () => `/api/projects/${encodeURIComponent(projectId)}/builtin_board/data`,
     save: patch => persistTaskBoardConfig({
-      task_board_filters: taskboardFilterPayload(patch.filters.filter(f => !f.locked)),
+      task_board_filters: builtinTaskboardFilterPayload(patch.filters),
     }),
   };
 }
@@ -303,6 +307,16 @@ function rememberTaskboardView(binding) {
 // 服务端只接受 {title,query,color};locked 等渲染标记不回传
 function taskboardFilterPayload(filters) {
   return filters.map(f => ({ title: f.title, query: f.query, color: f.color || "" }));
+}
+
+// 内置看板的锁定状态列按默认顺序排在最前时不入库;被挪动过才连同它们一起保存,
+// 服务端把与锁定列同表达式的条目当作该列的位置标记。
+function builtinTaskboardFilterPayload(filters) {
+  const defaults = sourceStatusValues("built-in").map(s => `status: ${s.value}`.toLowerCase());
+  const locked = filters.filter(f => f.locked).map(f => f.query.toLowerCase());
+  const untouched = filters.slice(0, locked.length).every(f => f.locked)
+    && locked.join("\n") === defaults.join("\n");
+  return taskboardFilterPayload(untouched ? filters.filter(f => !f.locked) : filters);
 }
 
 function taskboardBindingOf(element) {
@@ -416,7 +430,9 @@ function taskboardFilterBarHtml(binding, data) {
         onchange="setTaskboardOption(this, 'groupBy', this.value)">${taskboardGroupOptions(data, view)}</select>
     </label>
     ${view.groupBy ? "" : `<button class="ghost tb-edit-columns" data-tb-focus="edit-columns"
-      title="编辑自定义表达式列" onclick="openTaskboardColumns(this)">编辑表达式</button>`}
+      title="编辑自定义表达式列" aria-label="编辑自定义表达式列"
+      onclick="openTaskboardColumns(this)"><svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M11.2 2.3l2.5 2.5-7.9 7.9-3.2.7.7-3.2z M9.6 3.9l2.5 2.5"/></svg></button>`}
     <label class="tb-scope">显示
       <select aria-label="任务显示范围" data-tb-focus="scope"
         onchange="setTaskboardOption(this, 'scope', this.value)">
@@ -607,39 +623,316 @@ function setTaskboardCollapsed(element, collapsed) {
   drawTaskboard(binding);
 }
 
-// 表达式列是共享配置,放在单独的管理对话框,不再冒充日常筛选条件;
-// 入口只在分列选「自定义表达式列」时出现在分列旁。
+/* 表达式列是共享配置,放在单独的编辑对话框,不再冒充日常筛选条件;入口只在分列选
+   「自定义表达式列」时出现在分列旁。对话框编辑一份草稿(改名、改表达式、增删、拖动或
+   ↑↓ 排序),右侧按当前显示范围实时预览正在编辑的列命中哪些任务,保存时整体提交。
+   锁定的状态列与绑定了 ⚡ 规则的列只能排序:规则按表达式对应列,改表达式会让规则脱钩。 */
+let columnEditor = null;
+let columnEditorUid = 0;
+let columnDragRow = null;
+
+const LABEL_QUERY_SYNTAX = [
+  ["bug", "带有 bug 标签；与整个标签匹配，不区分大小写"],
+  ["priority: P0", "属性标签；冒号后的空格可省略"],
+  ["owner: *", "带有 owner 属性，取值任意"],
+  ["a & b", "同时满足，&& 等价"],
+  ["a | b", "满足其一，|| 等价"],
+  ["!a", "不满足"],
+  ["(a | b) & !c", "括号分组；优先级 ! 高于 &，& 高于 |"],
+];
+
+const COLUMN_PREVIEW_LIMIT = 6;
+const TASKBOARD_SCOPE_TITLES = { active: "活跃 Task", all: "全部 Task", archived: "已归档 Task" };
+
 function openTaskboardColumns(element) {
   const binding = taskboardBindingOf(element);
   if (!binding) return;
   binding.host()?.querySelectorAll(".tb-popover[open]").forEach(menu => { menu.open = false; });
   const filters = currentTaskboardFilters(binding);
-  const rows = filters.map((col, i) => `<div class="tb-column-setting">
-    <div><strong>${esc(col.title)}</strong><code>${esc(col.query)}</code></div>
-    ${col.locked ? '<span class="muted">固定状态列</span>' : `<button class="ghost"
-      data-index="${i}" onclick="removeTaskboardFilter(this, +this.dataset.index)"
-      aria-label="${esc("移除自定义列 " + col.title)}">移除</button>`}</div>`).join("");
+  const editor = columnEditor = {
+    source: binding.source, scope: taskboardState(binding).view.scope,
+    tasks: null, tasksError: "", showEmpty: false,
+    rows: filters.map(f => ({ ...f, uid: ++columnEditorUid, rule: Boolean(ruleForQuery(f.query)) })),
+  };
+  editor.active = editor.rows[0]?.uid ?? 0;
+  const syntax = LABEL_QUERY_SYNTAX.map(([example, meaning]) =>
+    `<tr><td><code>${esc(example)}</code></td><td>${esc(meaning)}</td></tr>`).join("");
   openFormDialog("编辑自定义表达式列", `<div class="tb-columns-editor"
       data-board-key="${esc(binding.key)}" data-filter-snapshot="${esc(JSON.stringify(filters))}">
-    <p class="tb-help">每个表达式生成一列；任务可以同时出现在多列中。
-      这里的修改会保存为共享看板配置，已有 ⚡ 自动处理规则保持原义。</p>
-    <div class="tb-column-settings">${rows}</div>
-    <label>新列名称（可选）<input class="tb-new-filter-title" maxlength="100" placeholder="例如 高优先级缺陷"></label>
-    <label>标签表达式<input class="tb-new-filter" maxlength="2000"
-      placeholder="例如 bug &amp; priority: P0"
-      onkeydown="if(event.key==='Enter'&&!imeComposing(event))addTaskboardFilter(this)"></label>
-    <div class="tb-query-error" role="alert"></div>
-    <button class="ghost" onclick="addTaskboardFilter(this)">＋ 添加表达式列</button>
-    </div>`, `<button class="action" onclick="fdlg.close()">完成</button>`);
+    <div class="tb-columns-main">
+      <p class="tb-help">每列一个标签表达式，任务可以同时出现在多列中。拖动 ⠿ 或用 ↑ ↓ 调整列顺序。
+        保存后更新共享看板配置，已有 ⚡ 自动处理规则保持原义。</p>
+      <div class="tb-column-settings" ondragover="columnRowDragOver(event)"
+        ondrop="event.preventDefault()"></div>
+      <button class="ghost tb-add-column" onclick="addTaskboardColumnRow()">＋ 添加列</button>
+      <div class="tb-query-error" role="alert"></div>
+    </div>
+    <aside class="tb-columns-side">
+      <section class="tb-column-preview" aria-live="polite"></section>
+      <details class="tb-syntax" open><summary>表达式语法</summary>
+        <table>${syntax}</table>
+        <p class="tb-help">状态也是标签，如 <code>status: 处理中 &amp; bug</code>。
+          标签文本不能包含 &amp; | ! ( ) 这些运算符。</p>
+      </details>
+    </aside>
+  </div>`, `<button class="action" data-board-key="${esc(binding.key)}"
+      onclick="saveTaskboardColumns(this)">保存</button>
+    <button class="ghost" onclick="fdlg.close()">取消</button>`, { size: "wide" });
+  renderTaskboardColumnRows();
+  loadColumnPreviewTasks(binding, editor);
+}
+
+// 预览候选取当前显示范围的全部任务:按 status 分列能覆盖范围内每个任务(含「未设置」列)。
+async function loadColumnPreviewTasks(binding, editor) {
+  const params = new URLSearchParams({ scope: editor.scope, view_group_by: "status" });
+  try {
+    const response = await fetch(`${binding.dataUrl()}?${params}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
+    const cards = new Map();
+    for (const col of data.columns || []) for (const card of col.cards) cards.set(card.id, card);
+    editor.tasks = [...cards.values()].map(card => ({ card, ctx: labelQueryContext(card.labels) }));
+  } catch (error) {
+    editor.tasksError = `无法加载预览任务：${error.message}`;
+  }
+  if (columnEditor === editor) refreshTaskboardColumnEditor();
+}
+
+function columnEditorNode() {
+  return columnEditor && fdlg.open ? fdlg.querySelector(".tb-columns-editor") : null;
+}
+
+function columnEditorRow(element) {
+  const uid = Number(element.closest(".tb-col-row")?.dataset.uid);
+  return columnEditor?.rows.find(row => row.uid === uid) || null;
+}
+
+function columnEditorRowHtml(row, index, total) {
+  const fields = row.locked
+    ? `<div class="tb-col-fixed"><strong>${esc(row.title)}</strong><code>${esc(row.query)}</code></div>`
+    : `<div class="tb-col-fields">
+        <input class="tb-col-title" maxlength="100" placeholder="列名（可选）" aria-label="列名"
+          value="${esc(row.title)}" oninput="editTaskboardColumnRow(this, 'title')">
+        <input class="tb-col-query" maxlength="2000" placeholder="标签表达式，如 bug &amp; priority: P0"
+          aria-label="标签表达式" spellcheck="false" value="${esc(row.query)}"${row.rule
+            ? ' readonly title="已绑定 ⚡ 自动处理规则，表达式不可修改"' : ""}
+          oninput="editTaskboardColumnRow(this, 'query')"></div>`;
+  const tag = row.locked ? '<span class="tb-col-tag locked">固定状态列</span>'
+    : row.rule ? '<span class="tb-col-tag" title="已绑定自动处理规则：表达式不可修改，列不可移除">⚡ 规则</span>' : "";
+  const fixedReason = row.locked ? "固定状态列不可移除" : "已绑定自动处理规则，请先在 ⚡ 设置中删除规则";
+  return `<div class="tb-col-row${row.uid === columnEditor.active ? " active" : ""}"
+      data-uid="${row.uid}" onfocusin="focusTaskboardColumnRow(this)"
+      onclick="focusTaskboardColumnRow(this)">
+    <span class="tb-col-handle" draggable="true" title="拖动排序"
+      ondragstart="columnRowDragStart(event)" ondragend="columnRowDragEnd()">⠿</span>
+    ${fields}
+    <span class="tb-col-count" title="当前显示范围内匹配的任务数"></span>
+    <div class="tb-col-actions">${tag}
+      <button class="ghost" title="上移" aria-label="上移" data-move="-1"${index === 0 ? " disabled" : ""}
+        onclick="moveTaskboardColumnRow(this, -1)">↑</button>
+      <button class="ghost" title="下移" aria-label="下移" data-move="1"${index === total - 1 ? " disabled" : ""}
+        onclick="moveTaskboardColumnRow(this, 1)">↓</button>
+      <button class="ghost" aria-label="移除列"${row.locked || row.rule
+        ? ` disabled title="${fixedReason}"` : ' title="移除列"'}
+        onclick="removeTaskboardColumnRow(this)">✕</button>
+    </div>
+    <div class="tb-col-error" role="alert"></div>
+  </div>`;
+}
+
+function renderTaskboardColumnRows() {
+  const list = columnEditorNode()?.querySelector(".tb-column-settings");
+  if (!list) return;
+  const rows = columnEditor.rows;
+  list.innerHTML = rows.map((row, index) => columnEditorRowHtml(row, index, rows.length)).join("");
+  refreshTaskboardColumnEditor();
+}
+
+// 草稿行的问题:空表达式只在保存时才算错(新行先给预览提示),其余随输入实时提示。
+function columnRowProblem(row, rows, saving) {
+  const query = row.query.trim();
+  if (!query) return saving || columnEditor?.showEmpty ? "表达式不能为空" : "";
+  try { compileLabelQuery(query); }
+  catch (error) { return `表达式不合法：${error.message}`; }
+  const first = rows.find(other => other.query.trim().toLowerCase() === query.toLowerCase());
+  return first === row ? "" : "与上方列的表达式重复";
+}
+
+function columnRowMatches(row) {
+  const query = row.query.trim();
+  if (!query || !columnEditor?.tasks) return null;
+  try {
+    const matcher = compileLabelQuery(query);
+    return columnEditor.tasks.filter(task => matcher(task.ctx)).map(task => task.card);
+  } catch (_) { return null; }
+}
+
+// 只更新各行计数/错误与预览,不重建输入框,保留焦点、光标与中文输入。
+function refreshTaskboardColumnEditor() {
+  const node = columnEditorNode();
+  if (!node) return;
+  const editor = columnEditor;
+  for (const element of node.querySelectorAll(".tb-col-row")) {
+    const row = columnEditorRow(element);
+    if (!row) continue;
+    const problem = columnRowProblem(row, editor.rows, false);
+    const matches = problem ? null : columnRowMatches(row);
+    element.classList.toggle("invalid", Boolean(problem));
+    element.querySelector(".tb-col-error").textContent = problem;
+    element.querySelector(".tb-col-count").textContent = matches
+      ? String(matches.length) : (editor.tasks || !row.query.trim() || problem ? "" : "…");
+  }
+  renderColumnPreview();
+}
+
+function renderColumnPreview() {
+  const panel = columnEditorNode()?.querySelector(".tb-column-preview");
+  if (!panel) return;
+  const editor = columnEditor;
+  const row = editor.rows.find(item => item.uid === editor.active);
+  const scope = `${TASKBOARD_SCOPE_TITLES[editor.scope] || "活跃 Task"}，不含个人筛选`;
+  let body;
+  if (!row) body = '<p class="tb-help">点击左侧某一列，在这里预览它会包含哪些任务。</p>';
+  else if (editor.tasksError) body = `<p class="tb-query-error">${esc(editor.tasksError)}</p>`;
+  else {
+    const problem = columnRowProblem(row, editor.rows, false);
+    const matches = problem ? null : columnRowMatches(row);
+    if (problem) body = `<p class="tb-query-error">${esc(problem)}</p>`;
+    else if (!row.query.trim()) body = '<p class="tb-help">输入标签表达式后，这里实时显示匹配的任务。</p>';
+    else if (!matches) body = '<p class="tb-help">正在加载任务…</p>';
+    else body = `<p class="tb-preview-count">匹配 <strong>${matches.length}</strong> 个任务</p>
+      ${matches.length ? `<ul class="tb-preview-list">${matches.slice(0, COLUMN_PREVIEW_LIMIT).map(card =>
+        `<li><span>${esc(card.title)}</span>${statusPillHtml(card.status, editor.source)}</li>`
+      ).join("")}</ul>` : ""}
+      ${matches.length > COLUMN_PREVIEW_LIMIT
+        ? `<p class="tb-help">还有 ${matches.length - COLUMN_PREVIEW_LIMIT} 个任务未列出</p>` : ""}`;
+  }
+  // 整体覆盖情况:按草稿中合法的列统计,反映排序/增删/改表达式后的效果。
+  let coverage = "";
+  if (editor.tasks) {
+    const matchers = editor.rows.filter(item => !columnRowProblem(item, editor.rows, false)
+      && item.query.trim()).map(item => compileLabelQuery(item.query.trim()));
+    const outside = editor.tasks.filter(task => !matchers.some(matcher => matcher(task.ctx))).length;
+    coverage = `<p class="tb-help tb-preview-coverage">范围内共 ${editor.tasks.length} 个任务${
+      outside ? `，其中 ${outside} 个不在任何列中` : "，都至少落入一列"}。</p>`;
+  }
+  panel.innerHTML = `<div class="tb-preview-head"><strong>预览：${esc(
+      row ? (row.title.trim() || row.query.trim() || "新列") : "未选择列")}</strong>
+    <span class="tb-help">${esc(scope)}</span></div>${body}${coverage}`;
+}
+
+function focusTaskboardColumnRow(element) {
+  const row = columnEditorRow(element);
+  if (!row || columnEditor.active === row.uid) return;
+  columnEditor.active = row.uid;
+  for (const item of element.parentNode.querySelectorAll(".tb-col-row"))
+    item.classList.toggle("active", item === element);
+  renderColumnPreview();
+}
+
+function editTaskboardColumnRow(input, field) {
+  const row = columnEditorRow(input);
+  if (!row) return;
+  row[field] = input.value;
+  refreshTaskboardColumnEditor();
+}
+
+function addTaskboardColumnRow() {
+  if (!columnEditorNode()) return;
+  const row = { uid: ++columnEditorUid, title: "", query: "", color: "", locked: false, rule: false };
+  columnEditor.rows.push(row);
+  columnEditor.active = row.uid;
+  renderTaskboardColumnRows();
+  columnEditorNode().querySelector(`.tb-col-row[data-uid="${row.uid}"] .tb-col-query`)?.focus();
+}
+
+function moveTaskboardColumnRow(button, delta) {
+  const row = columnEditorRow(button);
+  if (!row) return;
+  const rows = columnEditor.rows, from = rows.indexOf(row), to = from + delta;
+  if (to < 0 || to >= rows.length) return;
+  rows.splice(from, 1);
+  rows.splice(to, 0, row);
+  columnEditor.active = row.uid;
+  renderTaskboardColumnRows();
+  // 连续点击同一方向时焦点跟随该行;到顶/底后按钮禁用,改落到反方向按钮。
+  const moved = columnEditorNode().querySelector(`.tb-col-row[data-uid="${row.uid}"]`);
+  const same = moved?.querySelector(`[data-move="${delta}"]`);
+  (same && !same.disabled ? same : moved?.querySelector(`[data-move="${-delta}"]`))?.focus();
+}
+
+function removeTaskboardColumnRow(button) {
+  const row = columnEditorRow(button);
+  if (!row || row.locked || row.rule) return;
+  const rows = columnEditor.rows, index = rows.indexOf(row);
+  rows.splice(index, 1);
+  if (columnEditor.active === row.uid)
+    columnEditor.active = (rows[index] || rows[index - 1])?.uid ?? 0;
+  renderTaskboardColumnRows();
+}
+
+function columnRowDragStart(event) {
+  columnDragRow = event.target.closest(".tb-col-row");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", columnDragRow.dataset.uid);  // Firefox 必需
+  event.dataTransfer.setDragImage(columnDragRow, 16, 16);              // 拖影用整行而非手柄
+  columnDragRow.classList.add("dragging");
+}
+
+// 拖动中直接移动 DOM 行作为插入位置提示,松手后按 DOM 顺序重排草稿。
+function columnRowDragOver(event) {
+  if (!columnDragRow) return;
+  event.preventDefault();
+  const over = event.target.closest(".tb-col-row");
+  if (!over || over === columnDragRow) return;
+  const box = over.getBoundingClientRect();
+  over.parentNode.insertBefore(columnDragRow,
+    event.clientY > box.top + box.height / 2 ? over.nextSibling : over);
+}
+
+function columnRowDragEnd() {
+  if (!columnDragRow) return;
+  const order = [...columnDragRow.parentNode.querySelectorAll(".tb-col-row")]
+    .map(element => Number(element.dataset.uid));
+  columnDragRow.classList.remove("dragging");
+  columnDragRow = null;
+  if (!columnEditor) return;
+  columnEditor.rows.sort((a, b) => order.indexOf(a.uid) - order.indexOf(b.uid));
+  renderTaskboardColumnRows();
+}
+
+async function saveTaskboardColumns(button) {
+  const binding = taskboardBindingOf(button), form = columnEditorNode(), editor = columnEditor;
+  if (!binding || !form || binding.projectId !== currentProject) return;
+  const errorNode = form.querySelector(".tb-query-error");
+  // 名称和表达式都没填的新行视为未添加,直接丢弃。
+  const rows = editor.rows.filter(row => row.locked || row.title.trim() || row.query.trim());
+  if (!rows.length) { errorNode.textContent = "看板至少保留一列"; return; }
+  if (rows.some(row => columnRowProblem(row, rows, true))) {
+    editor.showEmpty = true;
+    refreshTaskboardColumnEditor();
+    errorNode.textContent = "请先修正标红的列";
+    return;
+  }
+  const filters = rows.map(row => ({ title: row.title.trim() || row.query.trim(),
+    query: row.query.trim(), color: row.color || "", locked: row.locked }));
+  if (JSON.stringify(taskboardFilterPayload(filters))
+      === JSON.stringify(taskboardFilterPayload(JSON.parse(form.dataset.filterSnapshot)))) {
+    fdlg.close();
+    return;
+  }
+  button.disabled = true;
+  try { await commitTaskboardColumns(binding, form, filters, "表达式列已保存"); }
+  finally { button.disabled = false; }
 }
 
 async function commitTaskboardColumns(binding, form, filters, message) {
   const state = taskboardState(binding);
   if (state.columnsSaving) return;
   const errorNode = form.querySelector(".tb-query-error");
-  // 对话框中的序号只对其快照有效,轮询发现共享配置改变时须重新确认列表。
+  // 草稿只对打开时的快照有效,轮询发现共享配置已被别处修改时须重新加载。
   if (form.dataset.filterSnapshot !== JSON.stringify(currentTaskboardFilters(binding))) {
-    errorNode.innerHTML = '列配置已发生变化，请重新加载后再修改。 '
+    errorNode.innerHTML = '列配置已被其他人修改，请重新加载后再编辑（会丢弃当前草稿）。 '
       + '<button class="tb-text-button" onclick="openTaskboardColumns(this)">重新加载列设置</button>';
     return;
   }
@@ -650,8 +943,8 @@ async function commitTaskboardColumns(binding, form, filters, message) {
     await binding.save({ filters });
     if (!binding.visible()) return;
     await renderTaskboard(taskboardBindings[binding.key] || binding);
-    // 保存期间可能已关闭对话框或切到其他表单,不能抢回焦点或覆盖新草稿。
-    if (fdlg.open && form.isConnected && !state.error) openTaskboardColumns(form);
+    // 保存期间可能已关闭对话框或切到其他表单,不能关掉别的对话框。
+    if (fdlg.open && form.isConnected) fdlg.close();
     toast(message, "success");
   } catch (error) {
     if (form.isConnected) errorNode.textContent = error.message;
@@ -659,38 +952,6 @@ async function commitTaskboardColumns(binding, form, filters, message) {
     state.columnsSaving = false;
     controls.forEach(control => { control.disabled = false; });
   }
-}
-
-async function addTaskboardFilter(element) {
-  const binding = taskboardBindingOf(element);
-  const form = element.closest(".tb-columns-editor");
-  const query = (form?.querySelector(".tb-new-filter")?.value || "").trim();
-  if (!binding || !query || binding.projectId !== currentProject) return;
-  const errorNode = form.querySelector(".tb-query-error");
-  try { compileLabelQuery(query); }
-  catch (error) { errorNode.textContent = `表达式不合法：${error.message}`; return; }
-  const filters = currentTaskboardFilters(binding);
-  if (filters.some(f => f.query.toLowerCase() === query.toLowerCase())) {
-    errorNode.textContent = "该表达式的列已经存在"; return;
-  }
-  const title = form.querySelector(".tb-new-filter-title").value.trim() || query;
-  await commitTaskboardColumns(binding, form,
-    [...filters, { title, query, color: "" }], "已添加表达式列");
-}
-
-async function removeTaskboardFilter(element, index) {
-  const binding = taskboardBindingOf(element);
-  if (!binding || binding.projectId !== currentProject) return;
-  const form = element.closest(".tb-columns-editor");
-  if (!form || taskboardState(binding).columnsSaving) return;
-  const filters = currentTaskboardFilters(binding), target = filters[index];
-  if (!target || target.locked) return;
-  if (filters.length <= 1) { uiAlert("看板至少保留一列"); return; }
-  if (ruleForQuery(target.query)) {
-    uiAlert("该列绑定了自动处理规则；请先在 ⚡ 设置中删除规则，再移除列。"); return;
-  }
-  filters.splice(index, 1);
-  await commitTaskboardColumns(binding, form, filters, "已移除表达式列");
 }
 
 // 列本身就是单个状态时不重复显示药丸;特殊值无可绑定表达式时仍显示状态。
@@ -1098,7 +1359,7 @@ function openNewBoardDialog() {
       <label>数据源</label>
       <select id="nb-source">${boardSourceOptionsHtml("built-in")}</select>
       <p class="muted">创建后默认按状态分列。顶部可搜索、多选筛选、切换分列属性；
-        分列选「自定义表达式列」后，可点旁边的「编辑表达式」维护共享表达式列。</p>
+        分列选「自定义表达式列」后，可点旁边的 ✎ 编辑共享表达式列。</p>
     </div>
     <div id="nb-agent" style="display:none">
       ${peerModeProject() ? `<label>交给哪个角色</label>
@@ -1169,7 +1430,7 @@ function openTaskboardDialog(boardId) {
     <input type="text" id="tbf-name" value="${esc(board.name || "")}">
     <label>数据源</label>
     <select id="tbf-source">${boardSourceOptionsHtml(board.source || "built-in")}</select>
-    <p class="muted">日常筛选与分列在看板顶部调整；共享表达式列在分列选「自定义表达式列」后，点旁边的「编辑表达式」维护。</p>`,
+    <p class="muted">日常筛选与分列在看板顶部调整；共享表达式列在分列选「自定义表达式列」后，点旁边的 ✎ 编辑。</p>`,
     `<button class="action" data-id="${esc(board.id)}"
        onclick="saveTaskboardDialog(this.dataset.id)">保存</button>
      <button class="danger" data-id="${esc(board.id)}"

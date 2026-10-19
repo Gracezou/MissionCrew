@@ -266,8 +266,8 @@ An orchestrator's turn:
   narrow it. Without filters, default columns are generated from the data source's status values.
   Search, quick filters, grouping, sorting and collapsed columns on the page are each viewer's
   personal view stored in their browser and never change the saved board; users maintain the
-  shared expression columns with the "Edit expressions" button shown next to the column
-  dropdown when custom expression columns are selected. Details:
+  shared expression columns (titles, expressions, order) with the ✎ button shown next to the
+  column dropdown when custom expression columns are selected. Details:
   `platform-docs/automation.md` (Task board filtering and columns).
 - `board_source.save` creates or updates a custom task data source: cards are synced by id as
   that source's tasks (added / updated / removed if absent this time; removal deletes the task and

@@ -11,6 +11,8 @@ external_id 整体同步卡片(适合定时同步 GitCode/GitHub Issue 这类外
 看板由 filters([{title,query,color}],每列一个标签表达式)分列;
 group_by 非空时改为按该属性的取值横向分列(每个取值一列,末尾追加「未设置」列),
 此时各筛选列的并集只用来划定进入看板的卡片范围。
+个人视图显式传 view_group_by 时,分列属性独立于旧筛选列范围;临时标签筛选与
+文字搜索只裁剪卡片,不改变列、保存的看板配置或自动处理规则。
 标签匹配在服务端完成,前端只做通用渲染。
 """
 from __future__ import annotations
@@ -26,6 +28,11 @@ from ..core.models import (BUILTIN_SOURCE_ID, BUILTIN_STATUS_VALUES,
                            with_status)
 
 MAX_BOARD_FILTERS = 20
+MAX_BOARD_VIEW_FILTERS = 100
+MAX_BOARD_VIEW_LABEL_LENGTH = 4096
+MAX_BOARD_VIEW_PROPERTY_LENGTH = 256
+MAX_BOARD_VIEW_QUERY_LENGTH = 2000
+MAX_BOARD_VIEW_SEARCH_LENGTH = 512
 MAX_SOURCE_STATUS_VALUES = 12
 # 看板显示范围:活跃 / 已归档 / 全部(counts 始终按全量口径统计)
 BOARD_SCOPES = ("active", "archived", "all")
@@ -398,6 +405,7 @@ def _task_card(task: Task) -> dict:
     card = {
         "id": task.id, "title": task.title, "summary": task.summary,
         "status": status_of(task.labels), "labels": list(task.labels),
+        "external_id": task.external_id, "created_at": task.created_at,
         "updated_at": task.updated_at, "meta": list(task.meta),
         "task_id": task.id, "archived": bool(task.archived),
     }
@@ -435,40 +443,140 @@ def resolve_taskboard_widget(store, project_id: str, content: dict) -> dict:
 
 
 def _property_columns(tasks: list[Task], prop: str,
-                      status_values: list[dict]) -> list[dict]:
+                      status_values: list[dict], exact: bool = False) -> list[dict]:
     """按属性取值动态分列;status 属性按数据源声明的顺序与颜色排前,
     其余取值按出现的值排序,末尾固定一列收纳缺少该属性的卡片。"""
     prop = str(prop or "").strip()
+    normalize = str.casefold if exact else str.lower
     declared = ([{"value": c["value"], "color": c.get("color") or ""}
                  for c in status_values]
-                if prop.lower() == STATUS_PROPERTY else [])
-    seen = {item["value"].lower() for item in declared}
+                if normalize(prop) == STATUS_PROPERTY else [])
+    seen = {normalize(item["value"]) for item in declared}
     extras = []
     for task in tasks:
         for label in task.labels:
             label_prop, value = label_query.split_label(label)
-            if label_prop.lower() == prop.lower() and value.lower() not in seen:
-                seen.add(value.lower())
+            if normalize(label_prop) == normalize(prop) and normalize(value) not in seen:
+                seen.add(normalize(value))
                 extras.append({"value": value, "color": ""})
     extras.sort(key=lambda item: item["value"])
-    columns = [{"title": item["value"], "query": f"{prop}: {item['value']}",
-                "color": item["color"]} for item in declared + extras]
+    columns = []
+    for item in declared + extras:
+        value = item["value"]
+        query = f"{prop}: {value}"
+        # 个人视图按实际属性值匹配;包含运算符或字面 * 的值无法安全复用为
+        # 自动处理表达式,query 留空,前端不为这种列提供规则入口。
+        if exact and (set(value) & _OPERATOR_CHARS or value == "*"):
+            query = ""
+        columns.append({"title": value, "query": query,
+                        "color": item["color"], "value": value})
     columns.append({"title": f"未设置 {prop}", "query": f"!{prop}: *",
-                    "color": ""})
+                    "color": "", "value": None})
     return columns
+
+
+def _view_property(raw) -> str:
+    """个人视图属性名:保留空串表示表达式列,限制用户输入长度。"""
+    prop = validate_group_by(raw)
+    if len(prop) > MAX_BOARD_VIEW_PROPERTY_LENGTH:
+        raise ValueError(f"分列属性名最多 {MAX_BOARD_VIEW_PROPERTY_LENGTH} 个字符")
+    return prop
+
+
+def _view_label_groups(filter_labels, missing_properties) -> tuple[dict, set]:
+    """多选值同属性取并集,不同属性取交集;普通标签共用一个筛选维度。
+
+    值按标签本身精确匹配,不经过表达式解析,因此 R&D、v1 (stable) 等标签
+    不会被误当作运算符。属性的「未设置」与该属性选中的取值取并集。
+    """
+    raw_labels = filter_labels or []
+    raw_missing = missing_properties or []
+    if not isinstance(raw_labels, list) or not isinstance(raw_missing, list):
+        raise ValueError("标签筛选和未设置属性必须是数组")
+    if len(raw_labels) + len(raw_missing) > MAX_BOARD_VIEW_FILTERS:
+        raise ValueError(f"筛选条件最多 {MAX_BOARD_VIEW_FILTERS} 个")
+    groups: dict[str, set[str]] = {}
+    missing = set()
+    for raw in raw_labels:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("筛选标签必须是非空字符串")
+        if len(raw) > MAX_BOARD_VIEW_LABEL_LENGTH:
+            raise ValueError(f"筛选标签最多 {MAX_BOARD_VIEW_LABEL_LENGTH} 个字符")
+        label = label_query.normalize_label(raw)
+        prop, _ = label_query.split_label(label)
+        groups.setdefault(prop.casefold(), set()).add(label.casefold())
+    for raw in raw_missing:
+        prop = _view_property(raw)
+        if not prop:
+            raise ValueError("未设置属性名不能为空")
+        key = prop.casefold()
+        groups.setdefault(key, set())
+        missing.add(key)
+    return groups, missing
+
+
+def _matches_view_labels(task: Task, groups: dict, missing: set) -> bool:
+    if not groups:
+        return True
+    labels = {label_query.normalize_label(label).casefold()
+              for label in task.labels}
+    properties = {label_query.split_label(label)[0].casefold()
+                  for label in task.labels if label_query.split_label(label)[0]}
+    return all(bool(values & labels) or (prop in missing and prop not in properties)
+               for prop, values in groups.items())
+
+
+def _matches_search(task: Task, search: str) -> bool:
+    """只搜索卡片信息,不读取/扫描任务正文;外部编号也可直接搜索。"""
+    if not search:
+        return True
+    fields = [task.id, task.external_id, task.title, task.summary,
+              *task.labels, *task.meta]
+    return any(search in value.casefold() for value in fields)
+
+
+def _matches_property_column(task: Task, prop: str, value: Optional[str]) -> bool:
+    values = {text.casefold() for name, text in map(label_query.split_label, task.labels)
+              if name.casefold() == prop.casefold()}
+    return value.casefold() in values if value is not None else not values
 
 
 def resolve_board_data(store, project_id: str, source_id: str,
                        filters: Optional[list] = None,
-                       group_by: str = "", scope: str = "active") -> dict:
+                       group_by: str = "", scope: str = "active", *,
+                       view_group_by: Optional[str] = None,
+                       filter_query: str = "", search: str = "",
+                       filter_labels: Optional[list[str]] = None,
+                       missing_properties: Optional[list[str]] = None) -> dict:
     """解析看板数据:按源取任务 -> 按筛选列分列,或按 group_by 属性取值分列。
 
     scope 决定显示范围(活跃/已归档/全部),counts 始终按该源全量统计。
     卡片可命中多列(列是标签视角,不是互斥状态);表达式非法抛 ValueError。
-    响应里的 filters 始终是筛选列配置,分组模式下前端据此增删范围列。
+    缺省 view_group_by 时保留原有范围语义;显式传值时作为个人视图的分列
+    覆盖(空串为表达式列,非空按整个数据源当前 scope 的属性值分列)。标签与
+    文字筛选只裁剪卡片,动态列和标签建议始终基于快筛前的范围。
+    matched_count 按通过快筛的任务去重,表达式模式包含未命中任何列的任务。
     """
     if scope not in BOARD_SCOPES:
         raise ValueError("scope 只能是 active/archived/all")
+    independent_view = view_group_by is not None
+    if independent_view:
+        view_group_by = _view_property(view_group_by)
+    filter_query = str(filter_query or "").strip()
+    search = str(search or "").strip()
+    if len(filter_query) > MAX_BOARD_VIEW_QUERY_LENGTH:
+        raise ValueError(f"筛选表达式最多 {MAX_BOARD_VIEW_QUERY_LENGTH} 个字符")
+    if len(search) > MAX_BOARD_VIEW_SEARCH_LENGTH:
+        raise ValueError(f"搜索文字最多 {MAX_BOARD_VIEW_SEARCH_LENGTH} 个字符")
+    # 表达式递归解析/匹配,同时限制运算符数量,避免短而极深的表达式越过长度限制。
+    if sum(char in _OPERATOR_CHARS for char in filter_query) > 200:
+        raise ValueError("筛选表达式过于复杂")
+    try:
+        view_ast = label_query.parse(filter_query) if filter_query else None
+    except ValueError as exc:
+        raise ValueError(f"筛选表达式不合法: {exc}") from exc
+    groups, missing = _view_label_groups(filter_labels, missing_properties)
+    search_term = search.casefold()
     source_id = normalize_source_id(source_id)
     if source_id == BUILTIN_SOURCE_ID:
         source_info = {"id": source_id, "name": "项目任务"}
@@ -496,29 +604,52 @@ def resolve_board_data(store, project_id: str, source_id: str,
         if not task.meta:
             task.meta = _default_meta(store, task)
 
-    group_by = str(group_by or "").strip()
+    group_by = (view_group_by if independent_view
+                else str(group_by or "").strip())
     column_filters = (validate_filters(filters) if filters
                       else default_filters(status_values))
     filter_asts = [label_query.parse(item["query"]) for item in column_filters]
     if group_by:
-        # 分组模式:筛选列的并集划定卡片范围,列改为该属性的各个取值。
-        scoped = [task for task in tasks
-                  if any(label_query.matches(ast, task.labels)
-                         for ast in filter_asts)]
-        columns = _property_columns(scoped, group_by, status_values)
+        # 旧分组以表达式列并集划范围;个人分列与旧列解耦,从当前 scope 全集取值。
+        scoped = (tasks if independent_view else
+                  [task for task in tasks
+                   if any(label_query.matches(ast, task.labels)
+                          for ast in filter_asts)])
+        columns = _property_columns(scoped, group_by, status_values,
+                                    exact=independent_view)
         key_prefix = "g"
     else:
         scoped, columns, key_prefix = tasks, column_filters, "f"
+    scoped = [task for task in scoped
+              if (view_ast is None or label_query.matches(view_ast, task.labels))
+              and _matches_view_labels(task, groups, missing)
+              and _matches_search(task, search_term)]
     out_columns = []
+    seen_keys: dict[str, int] = {}
     for index, item in enumerate(columns):
-        ast = label_query.parse(item["query"])
+        if independent_view and group_by:
+            value = item["value"]
+            # 匹配实际属性值,而非再次解析生成的表达式;带运算符的值也能准确分列。
+            cards = [task for task in scoped
+                     if _matches_property_column(task, group_by, value)]
+            identity = f"{group_by.casefold()}:{value.casefold() if value is not None else ''}"
+        else:
+            ast = label_query.parse(item["query"])
+            cards = [task for task in scoped if label_query.matches(ast, task.labels)]
+            identity = item["query"].casefold()
+        key = f"{key_prefix}{index}"
+        if independent_view:
+            # query/value 是稳定身份;重排或新增其他列不会把滚动位置/折叠状态串列。
+            # 同表达式允许重复,只在相同身份内编号,不依赖全局列下标。
+            occurrence = seen_keys.get(identity, 0)
+            seen_keys[identity] = occurrence + 1
+            key = f"{key_prefix}:{len(identity)}:{identity}:{occurrence}"
         out_columns.append({
-            "key": f"{key_prefix}{index}", "title": item["title"],
+            "key": key, "title": item["title"],
             "query": item["query"], "color": item["color"] or "var(--muted)",
-            "cards": [_task_card(task) for task in scoped
-                      if label_query.matches(ast, task.labels)],
+            "cards": [_task_card(task) for task in cards],
         })
-    # 可筛选标签全集(整个数据源,不受分组范围影响),供前端做筛选输入建议
+    # 当前 scope 的可筛选标签全集,不受分组范围与快筛影响。
     labels = {label for task in tasks for label in task.labels}
     labels.update(f"{STATUS_PROPERTY}: {c['value']}" for c in status_values)
     labels.discard("")
@@ -528,4 +659,5 @@ def resolve_board_data(store, project_id: str, source_id: str,
             "filters": column_filters,
             "group_by": group_by,
             "scope": scope,
-            "counts": counts}
+            "counts": counts,
+            "matched_count": len({task.id for task in scoped})}

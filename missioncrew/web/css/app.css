@@ -588,7 +588,7 @@
   #board-view { flex: 1; display: none; flex-direction: column;
                 min-width: 0; min-height: 0; overflow: hidden; }
   /* 两块任务看板同一宿主形态:工具条 + 横向排列的列;内置看板占满 #board-view */
-  .taskboard-host { display: flex; flex-direction: column; min-height: 0; }
+  .taskboard-host { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   #board-view > .taskboard-host { flex: 1; padding: 14px 22px 16px; }
   .col { display: flex; flex-direction: column; min-height: 0; min-width: 0;
          overflow: hidden; background: var(--bg-soft); border-radius: 14px;
@@ -630,25 +630,173 @@
      (.custom-grid 的 grid 布局在后面声明,这里要以更高特异性盖掉) */
   .custom-grid.taskboard-host { display: flex; flex-direction: column;
                                 margin-top: 16px; height: calc(100dvh - 152px); }
-  .tb-filter-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center;
-                   gap: 8px; margin-bottom: 12px; }
-  .tb-filter-bar input { width: 220px; }
-  .tb-chip { display: inline-flex; align-items: center; gap: 4px;
-             padding: 2px 6px 2px 10px; border-radius: 999px;
-             background: var(--bg-soft); border: 1px solid var(--line);
-             font-size: 12px; color: var(--text-2); }
-  .tb-chip-x { border: none; background: none; cursor: pointer;
-               color: var(--muted); font-size: 13px; padding: 0 2px; }
-  .tb-chip-x:hover { color: var(--bad); }
-  .tb-chip-locked { padding-right: 10px; }
-  .tb-scope { margin-left: auto; display: flex; align-items: center; gap: 6px;
-              color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .tb-scope select { background: var(--card); color: var(--text);
-                     border: 1px solid var(--line); border-radius: 8px;
-                     padding: 6px 9px; font: inherit; }
-  .taskboard-grid { flex: 1; min-height: 0; display: grid; grid-auto-flow: column;
-                    grid-auto-columns: 320px; gap: 14px; align-items: stretch;
-                    overflow-x: auto; overscroll-behavior-x: contain; }
+  /* 个人视图:第一行搜索/控制,第二行已选条件/结果数。桌面弹层贴近各自入口。 */
+  .tb-filter-bar { position: relative; z-index: 8; flex: none; display: flex;
+                   flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0;
+                   margin-bottom: 8px; }
+  .tb-search { flex: 1 1 200px; min-width: 160px; display: flex; align-items: center;
+               gap: 7px; min-height: 34px; padding: 0 10px; border: 1px solid var(--line);
+               border-radius: 8px; background: var(--card); color: var(--muted); }
+  .tb-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .tb-search > span { flex: none; font-size: 21px; line-height: 1; }
+  .tb-search .tb-search-input { flex: 1; width: 100%; min-width: 0; height: 32px;
+                               padding: 0; margin: 0; border: 0; border-radius: 0;
+                               outline: none; box-shadow: none; background: transparent;
+                               color: var(--text); font: inherit; font-size: 12.5px; }
+  .tb-search-input::placeholder, .tb-facet-search::placeholder,
+  .tb-advanced-query::placeholder { color: var(--muted); opacity: 1; }
+  .tb-control, .tb-scope { display: flex; align-items: center; gap: 6px;
+                          min-width: 0; margin: 0; color: var(--muted);
+                          font-size: 12px; white-space: nowrap; }
+  .tb-control { flex: 0 1 170px; }
+  .tb-scope { flex: 0 1 130px; }
+  .tb-control select, .tb-scope select, .tb-display-row select {
+    width: 100%; min-width: 0; min-height: 34px; padding: 6px 8px; margin: 0;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+    color: var(--text); font: inherit; cursor: pointer; }
+  .tb-filter-bar > .tb-new-task { flex: none; min-height: 34px;
+                                 padding: 6px 12px; white-space: nowrap; }
+  .tb-popover { position: relative; flex: none; min-width: 0; }
+  .tb-popover > summary { display: flex; align-items: center; justify-content: center;
+                          gap: 6px; min-height: 34px; padding: 6px 10px; list-style: none;
+                          border: 1px solid var(--line); border-radius: 8px;
+                          color: var(--text-2); background: var(--card); font-size: 12.5px;
+                          line-height: 20px; cursor: pointer; white-space: nowrap; user-select: none; }
+  .tb-popover > summary::-webkit-details-marker { display: none; }
+  .tb-popover > summary::after { content: ""; width: 6px; height: 6px;
+                                 margin: -3px 0 0 3px; border-right: 1.5px solid currentColor;
+                                 border-bottom: 1.5px solid currentColor; transform: rotate(45deg); }
+  .tb-popover > summary:hover, .tb-popover[open] > summary {
+    color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .tb-popover > summary:focus-visible, .tb-advanced > summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tb-counter { min-width: 18px; padding: 0 5px; border-radius: 999px;
+                color: var(--accent); background: var(--accent-soft); font-size: 11px;
+                font-weight: 600; line-height: 18px; text-align: center; }
+  .tb-popover-panel { position: absolute; z-index: 20; top: calc(100% + 6px);
+                      width: min(360px, var(--tb-menu-max-width, calc(100vw - 28px)));
+                      max-height: min(600px, calc(100dvh - 150px));
+                      transform: translateX(var(--tb-menu-shift-x, 0px));
+                      padding: 14px; overflow-y: auto; overscroll-behavior: contain;
+                      border: 1px solid var(--line-strong); border-radius: 12px;
+                      background: var(--card); color: var(--text); box-shadow: var(--shadow-lg); }
+  .tb-filter-panel { left: auto; right: 0; display: flex; flex-direction: column; gap: 8px; }
+  .tb-display-panel { right: 0; display: flex; flex-direction: column;
+                      gap: 12px; width: min(310px, var(--tb-menu-max-width, calc(100vw - 28px))); }
+  .tb-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .tb-panel-heading strong, .tb-display-panel > strong { font-size: 13px; }
+  .tb-help { margin: 0; color: var(--muted); font-size: 11.5px;
+             font-weight: 400; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; }
+  .tb-facet-search, .tb-advanced-query, .tb-columns-editor input {
+    width: 100%; min-width: 0; min-height: 34px; margin: 0; padding: 6px 9px;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--card-2);
+    color: var(--text); font: inherit; font-size: 12.5px; }
+  .tb-facet-search { flex: none; }
+  .tb-facet-list { flex: 1 1 auto; min-height: 72px; max-height: min(330px, 42dvh);
+                   padding-right: 3px; overflow: auto; overscroll-behavior: contain;
+                   scrollbar-width: thin; scrollbar-gutter: stable; }
+  .tb-facet { min-inline-size: 0; padding: 0; margin: 0 0 10px; border: 0; }
+  .tb-facet:last-child { margin-bottom: 0; }
+  .tb-facet legend { width: 100%; padding: 5px 8px; color: var(--muted);
+                     font-size: 11.5px; font-weight: 600; overflow-wrap: anywhere; }
+  .tb-option { display: flex; align-items: flex-start; gap: 8px; min-width: 0;
+               margin: 0; padding: 6px 8px; border-radius: 6px; color: var(--text-2);
+               font-size: 12.5px; font-weight: 400; line-height: 1.5;
+               white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
+  .tb-option:hover { background: var(--bg-soft); }
+  .tb-option:has(input:checked) { color: var(--accent); background: var(--accent-soft); }
+  .tb-option > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  /* 不继承文本框的宽度、内边距或 flex 伸缩;仅重置本看板复选框。 */
+  .tb-option > input[type="checkbox"] { appearance: auto; flex: 0 0 16px;
+    width: 16px; min-width: 16px; max-width: 16px; height: 16px; min-height: 16px;
+    margin: 2px 0 0; padding: 0; border: initial; border-radius: 3px;
+    background: initial; box-shadow: none; accent-color: var(--accent); cursor: pointer; }
+  .tb-option[hidden], .tb-facet[hidden] { display: none; }
+  .tb-advanced { flex: none; border-top: 1px solid var(--line); padding-top: 9px; }
+  .tb-advanced > summary { color: var(--text-2); font-size: 12px; cursor: pointer; }
+  .tb-advanced[open] > summary { margin-bottom: 7px; }
+  .tb-advanced-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  .tb-advanced-row > input { flex: 1; }
+  .tb-advanced-row > button { flex: none; padding: 6px 9px; white-space: nowrap; }
+  .tb-query-error { margin-top: 6px; color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+  .tb-query-error:empty { display: none; }
+  .tb-display-row { display: flex; align-items: center; gap: 12px; min-width: 0;
+                    margin: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; }
+  .tb-display-row select { flex: 1; }
+  .tb-display-actions { display: flex; gap: 8px; }
+  .tb-display-actions > button { flex: 1; min-width: 0; padding: 6px 8px; font-size: 12px; }
+  .tb-display-panel hr { width: 100%; margin: 0; border: 0; border-top: 1px solid var(--line); }
+  .tb-menu-button { display: block; width: 100%; padding: 6px 8px;
+                    border: 0; border-radius: 6px; text-align: left;
+                    background: transparent; color: var(--text-2); font-size: 12.5px; cursor: pointer; }
+  .tb-menu-button:hover { background: var(--accent-soft); color: var(--accent); }
+  .tb-text-button { flex: none; padding: 2px 4px; border: 0; border-radius: 4px;
+                    background: transparent; color: var(--accent); font-size: 12px;
+                    line-height: 1.6; white-space: nowrap; cursor: pointer; }
+  .tb-text-button:hover { text-decoration: underline; }
+  .tb-view-summary { flex: none; display: flex; align-items: flex-start; gap: 12px;
+                     min-width: 0; min-height: 26px; margin-bottom: 10px; }
+  .tb-active-filters { display: flex; flex: 1; flex-wrap: wrap; align-items: flex-start;
+                       gap: 6px; min-width: 0; max-height: 112px; overflow-y: auto;
+                       scrollbar-width: thin; }
+  .tb-active-filters:empty { display: none; }
+  .tb-chip { display: inline-flex; align-items: flex-start; gap: 5px; max-width: 100%;
+             padding: 3px 6px 3px 9px; border-radius: 7px;
+             background: var(--accent-soft); border: 1px solid var(--line);
+             font-size: 11.5px; color: var(--text-2); line-height: 1.5; }
+  .tb-chip > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+  .tb-chip-x { flex: none; display: grid; place-items: center; width: 18px; height: 18px;
+               padding: 0; border: 0; border-radius: 4px; background: transparent;
+               color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+  .tb-chip-x:hover { background: var(--bad-soft); color: var(--bad); }
+  .tb-results-count { flex: none; margin-left: auto; padding-top: 3px; color: var(--muted);
+                      font-size: 11.5px; line-height: 20px; white-space: nowrap; }
+  .taskboard-grid { flex: 1; min-width: 0; min-height: 0; display: flex;
+                    gap: 14px; align-items: stretch; padding-bottom: 4px;
+                    overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
+  .taskboard-grid > .col { flex: 0 0 320px; width: 320px; }
+  .tb-col-title { flex: 1; min-width: 0; padding: 2px 0; border: 0; border-radius: 4px;
+                  background: transparent; color: inherit; font: inherit; font-weight: 600;
+                  text-align: left; text-transform: none; letter-spacing: 0;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .tb-col-title:hover { color: var(--accent); }
+  .taskboard-grid .col h2 .tb-collapse-button { display: grid; place-items: center;
+    width: 23px; height: 23px; padding: 0; font-size: 19px; }
+  .taskboard-grid > .tb-col-collapsed { flex-basis: 52px; width: 52px; padding: 10px 6px; }
+  .tb-col-collapsed > h2 { flex: 1; min-height: 0; flex-direction: column; gap: 10px;
+                          margin: 0; text-transform: none; letter-spacing: 0; }
+  .tb-col-collapsed > h2 .tb-collapse-button { order: -1; }
+  .tb-col-collapsed > h2 .col-count { order: 1; flex: none; margin: 0; padding: 0 6px; }
+  .tb-col-collapsed .tb-col-title { order: 2; flex: 0 1 auto; width: 28px;
+    min-height: 0; max-height: min(320px, 50dvh); padding: 0 4px;
+    writing-mode: vertical-rl; text-orientation: mixed; }
+  .tb-column-empty { margin: 2px 0 10px; padding: 18px 8px;
+                     border: 1px dashed var(--line-strong); border-radius: 8px;
+                     color: var(--muted); text-align: center; font-size: 12px; }
+  .tb-empty-state { flex: none; margin-bottom: 12px; padding: 18px 14px;
+                    border: 1px solid var(--line); border-radius: 10px;
+                    background: var(--card); text-align: center; overflow-wrap: anywhere; }
+  .tb-empty-state strong { font-size: 13px; }
+  .tb-empty-state p { margin: 5px 0 10px; color: var(--muted); font-size: 12px; }
+  .tb-grid-empty { justify-content: center; align-items: center; min-height: 160px;
+                   border: 1px dashed var(--line-strong); border-radius: 12px; }
+  .tb-grid-empty > .tb-empty-state { flex: 0 1 440px; margin: 0; border: 0; background: transparent; }
+  .tb-notice, .tb-error { flex: none; display: flex; flex-wrap: wrap; align-items: center;
+                          gap: 4px 8px; margin-bottom: 10px; padding: 8px 11px;
+                          border: 1px solid var(--line); border-radius: 8px;
+                          background: var(--warn-soft); color: var(--text-2);
+                          font-size: 12px; overflow-wrap: anywhere; }
+  .tb-error { color: var(--bad); background: var(--bad-soft); }
+  .tb-columns-editor > label { display: block; margin: 12px 0 6px;
+                               color: var(--text-2); font-size: 12.5px; }
+  .tb-columns-editor > label > input { display: block; margin-top: 5px; }
+  .tb-column-settings { max-height: 280px; margin-top: 8px; overflow-y: auto; scrollbar-width: thin; }
+  .tb-column-setting { display: flex; align-items: center; gap: 10px; padding: 10px 0;
+                       border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .tb-column-setting > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tb-column-setting code { display: block; margin-top: 3px; color: var(--muted);
+                            font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tb-column-setting > button, .tb-column-setting > .muted { flex: none; font-size: 11.5px; }
   .taskboard-grid::-webkit-scrollbar { height: 10px; }
   .taskboard-grid::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--line); }
   .new-board-kinds { display: grid; gap: 6px; margin: 4px 0 10px; }
@@ -1474,11 +1622,27 @@
     dialog { width: 96vw; }
   }
   @media (max-width: 760px) {
-    /* 窄屏:一屏约一列,横向滑动切换并按列吸附 */
+    /* 窄屏:工具栏换行,列保持可读宽度并横向滑动,折叠列仍只占 52px。 */
     #board-view > .taskboard-host { padding: 12px 14px; }
-    .taskboard-grid { grid-auto-columns: minmax(84vw, 1fr);
-                      scroll-snap-type: x proximity; }
-    .col { scroll-snap-align: start; }
+    .tb-filter-bar { gap: 7px; }
+    .tb-search { order: 0; flex: 1 1 150px; min-width: 100px; }
+    .tb-filter-bar > .tb-new-task { order: 1; margin-left: auto; padding-inline: 10px; }
+    .tb-filter-bar::after { content: ""; order: 2; flex-basis: 100%; height: 0; margin-top: -7px; }
+    .tb-filter-bar > .tb-popover { order: 3; }
+    .tb-control { order: 4; flex: 1 1 156px; }
+    .tb-scope { order: 5; flex: 1 1 124px; }
+    .tb-filter-bar > .tb-display-menu { order: 6; }
+    .tb-view-summary { flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }
+    .tb-active-filters { flex-basis: 100%; max-height: 96px; }
+    .tb-results-count { margin-left: auto; padding-top: 0; }
+    .tb-popover-panel { position: fixed; inset: auto 12px max(12px, env(safe-area-inset-bottom));
+                        width: auto; max-height: min(70dvh, 580px); border-radius: 14px;
+                        transform: none; }
+    .tb-facet-list { max-height: 38dvh; }
+    .taskboard-grid { gap: 11px; scroll-snap-type: x proximity; }
+    .taskboard-grid > .col { flex-basis: min(320px, 84vw); width: min(320px, 84vw);
+                            scroll-snap-align: start; }
+    .taskboard-grid > .tb-col-collapsed { flex-basis: 52px; width: 52px; }
   }
 
 /* ---- Task 派发弹窗:复用聊天输入框形态,选择器改为向下展开 ---- */

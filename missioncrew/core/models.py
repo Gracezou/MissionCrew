@@ -457,8 +457,7 @@ class Project:
     task_auto_rules: list[TaskAutoRule] = field(default_factory=list)
     # 内置任务看板在四个锁定状态列之后追加的自定义筛选列 [{title,query,color}]
     task_board_filters: list[dict] = field(default_factory=list)
-    # 内置任务看板的分列属性:非空时按取值横向分列,筛选列并集只划定范围
-    # (与自定义任务看板 Board.group_by 同语义)
+    # 内置任务看板的默认分列属性(与自定义任务看板 Board.group_by 同语义)
     task_board_group_by: str = ""
 
     def __post_init__(self):
@@ -886,8 +885,9 @@ class Board:
     # taskboard:筛选列 [{title,query,color}],每列一个标签表达式;
     # 空列表 = 按数据源状态取值分列(创建看板时默认物化为状态筛选列)
     filters: list[dict] = field(default_factory=list)
-    # taskboard:非空时按该属性取值横向分列(末尾「未设置」列),filters 退为
-    # 卡片范围(各筛选列并集),不改变 filters 配置本身
+    # taskboard:页面默认的分列属性,按取值横向分列(末尾「未设置」列),覆盖当前
+    # 显示范围的全部任务;页面首次打开用它,之后以浏览器里的个人视图为准。
+    # 只有省略 view_group_by 的旧 API 读取仍以各筛选列并集划定卡片范围
     group_by: str = ""
 
     def to_dict(self) -> dict:

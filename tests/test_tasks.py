@@ -795,7 +795,8 @@ def test_task_board_exposes_activity_order_and_archive_filter(seeded):
 
     # 显示范围选择器在两块任务看板共用的工具条里,不再是内置看板独有的静态控件
     assert 'id="task-filter"' not in html and 'id="board"' in html
-    assert 'class="tb-scope"' in boards and "setTaskFilter(this.value)" in boards
+    assert 'class="tb-scope"' in boards
+    assert "setTaskboardOption(this, 'scope', this.value)" in boards
     assert all(label in boards for label in (
         "活跃 Task", "全部 Task", "已归档 Task"))
     assert "taskActivity(right) - taskActivity(left)" in ui

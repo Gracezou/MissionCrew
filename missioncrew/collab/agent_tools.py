@@ -329,9 +329,10 @@ ACTION_DEFINITIONS = {
                         "expression (& | ! and parentheses; `property: *` matches tasks with "
                         "that property); when creating, defaults to status columns generated "
                         "from the data source's status values"),
-            "group_by": ("optional property name to split columns by; when set, columns are "
-                         "that property's values (plus a trailing \"unset\" column) and the "
-                         "union of filters only scopes the cards"),
+            "group_by": ("optional property name the board page groups columns by by default: "
+                         "one column per value plus a trailing \"unset\" column, covering every "
+                         "task in the board's scope (filters do not narrow it); viewers can "
+                         "switch grouping and filters for themselves without changing it"),
         },
     },
     "dashboard.delete": {

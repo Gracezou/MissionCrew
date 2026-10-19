@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from ..collab import board_sources
 from ..collab.documents import library_for
@@ -32,8 +32,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return board_sources.describe_sources(store, project_id)
 
     @app.get("/api/projects/{project_id}/boards/{board_id}/data")
-    def taskboard_data(project_id: str, board_id: str, scope: str = "active"):
-        """解析任务看板数据:数据源取数 + 服务端按筛选列分列。"""
+    def taskboard_data(project_id: str, board_id: str, scope: str = "active",
+                       view_group_by: Optional[str] = None,
+                       filter_query: str = "", search: str = "",
+                       filter_label: list[str] = Query(default=[]),
+                       missing_property: list[str] = Query(default=[])):
+        """解析任务看板数据,可用临时视图参数独立筛选/分列,不修改保存的配置。"""
         ctx.must_project(project_id)
         full_id = ctx.namespaced_id(project_id, board_id, "面板")
         board = store.get_board(full_id)
@@ -44,12 +48,19 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         try:
             return board_sources.resolve_board_data(
                 store, project_id, board.source, board.filters,
-                group_by=board.group_by, scope=scope)
+                group_by=board.group_by, scope=scope,
+                view_group_by=view_group_by, filter_query=filter_query,
+                search=search, filter_labels=filter_label,
+                missing_properties=missing_property)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
     @app.get("/api/projects/{project_id}/builtin_board/data")
-    def builtin_board_data(project_id: str, scope: str = "active"):
+    def builtin_board_data(project_id: str, scope: str = "active",
+                           view_group_by: Optional[str] = None,
+                           filter_query: str = "", search: str = "",
+                           filter_label: list[str] = Query(default=[]),
+                           missing_property: list[str] = Query(default=[])):
         """内置任务看板:与自定义任务看板同一渲染协议,只差数据源固定为 built-in、
         四个状态筛选列锁定不可删,以及配置(自定义列/分列属性)存在项目对象上。"""
         project = ctx.must_project(project_id)
@@ -61,7 +72,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             data = board_sources.resolve_board_data(
                 store, project_id, board_sources.BUILTIN_SOURCE_ID,
                 pinned + extras, group_by=project.task_board_group_by,
-                scope=scope)
+                scope=scope, view_group_by=view_group_by,
+                filter_query=filter_query, search=search,
+                filter_labels=filter_label, missing_properties=missing_property)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         if not data["group_by"]:   # 分组模式下列是属性取值,没有锁定概念

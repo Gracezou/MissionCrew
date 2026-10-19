@@ -1,9 +1,9 @@
 /* ---------------- 自定义面板 ----------------
    两种形态:widgets(主控 Agent 通过 dashboard.save 创建维护的组件网格)与
-   taskboard(任务看板:选数据源,按标签筛选列分列)。日常只读渲染;
+   taskboard(任务看板:选数据源,独立筛选与属性分列)。日常只读渲染;
    编辑模式从侧栏面板列表的 ✎ 进入——widgets 面板可继续与主控在面板专属频道
-   对话,或直接改布局 JSON;taskboard 面板改名称与数据源,筛选列/分组/显示范围
-   在看板页顶部工具条直接操作(每列一个标签表达式,卡片状态也是可筛选标签)。
+   对话,或直接改布局 JSON;taskboard 面板改名称与数据源,日常筛选与显示选项
+   在看板工具条操作,共享表达式列在单独的管理对话框维护。
    列定义与卡片由服务端数据源注册表统一解析(/boards/{id}/data),前端只做
    通用渲染,不感知数据来自任务还是脚本同步的外部列表(如 GitCode Issue)。
    内置任务看板(#board)用同一渲染器,见下方「任务看板渲染器」。 */
@@ -235,44 +235,47 @@ function boardCardHtml(card, { showStatus = false, source = "built-in" } = {}) {
   </div>`;
 }
 
-/* ---------------- 任务看板渲染器(内置任务看板与自定义任务看板共用) ----------------
-   两块看板样式与功能完全一致,只差「绑定」:数据端点、配置保存方式、新建任务所属的数据源。
-   列定义与卡片由服务端解析(内置 /builtin_board/data,自定义 /boards/{id}/data),
-   这里只做通用渲染:筛选列工具条(每列一个标签表达式,锁定列不可删)、分组属性
-   (设置后改为按取值横向分列,筛选列退为卡片范围)、显示范围(活跃/全部/已归档)
-   与卡片。工具条按钮经 this 找回所在看板的绑定,两块看板可同时存在于 DOM。 */
-const taskboardBindings = {};   // key -> 绑定
-const taskboardStates = {};     // key -> { data: 最近一次 /data 响应, token }
+/* ---------------- 任务看板:个人筛选/显示与共享表达式列分开 ----------------
+   服务端负责匹配和分列;taskboard-view.js 负责纯视图状态,此处只负责 DOM 与请求。
+   绑定捕获项目/数据源,避免切换项目后迟到响应覆盖新看板。 */
+const taskboardBindings = {};
+const taskboardStates = {};
 
 function builtinTaskboardBinding() {
+  const projectId = currentProject, project = projObj();
   return {
-    key: "builtin",
+    key: JSON.stringify([projectId, "builtin", "built-in"]),
+    projectId, boardId: "builtin", source: "built-in",
+    defaultGroupBy: project?.task_board_group_by
+      || (project?.task_board_filters?.length ? "" : "status"),
     host: () => document.getElementById("board"),
-    visible: () => currentTab === "board",
-    dataUrl: () => `/api/projects/${encodeURIComponent(currentProject)}/builtin_board/data`,
-    source: "built-in",
-    // 配置存在项目对象上:自定义筛选列(锁定的状态列不存)与分列属性
+    visible: () => currentProject === projectId && currentTab === "board",
+    dataUrl: () => `/api/projects/${encodeURIComponent(projectId)}/builtin_board/data`,
     save: patch => persistTaskBoardConfig({
-      ...("filters" in patch
-        ? { task_board_filters: taskboardFilterPayload(patch.filters.filter(f => !f.locked)) }
-        : {}),
-      ...("group_by" in patch ? { task_board_group_by: patch.group_by } : {}),
+      task_board_filters: taskboardFilterPayload(patch.filters.filter(f => !f.locked)),
     }),
   };
 }
 
 function customTaskboardBinding(board) {
-  const shortId = board.id.replace(`${currentProject}:`, "");
+  const projectId = currentProject;
+  const shortId = board.id.replace(`${projectId}:`, "");
+  const source = board.source || "built-in";
+  const statusQueries = sourceStatusValues(source).map(s => `status: ${s.value}`.toLowerCase());
+  const configured = (board.filters || []).map(f => f.query.toLowerCase());
+  const standardColumns = !configured.length || (configured.length === statusQueries.length
+    && configured.every(q => statusQueries.includes(q)));
   return {
-    key: board.id,
+    key: JSON.stringify([projectId, board.id, source]),
+    projectId, boardId: board.id, source,
+    defaultGroupBy: board.group_by || (standardColumns ? "status" : ""),
     host: () => document.getElementById("custom-board-preview"),
-    visible: () => currentTab === "custom" && currentCustomBoard === board.id,
-    dataUrl: () => `/api/projects/${encodeURIComponent(currentProject)}/boards/${encodeURIComponent(shortId)}/data`,
-    source: board.source || "built-in",
-    save: patch => saveTaskboardConfig(board, {
-      ...("filters" in patch ? { filters: taskboardFilterPayload(patch.filters) } : {}),
-      ...("group_by" in patch ? { group_by: patch.group_by } : {}),
-    }),
+    visible: () => currentProject === projectId && currentTab === "custom"
+      && currentCustomBoard === board.id && projBoards().some(item =>
+        item.id === board.id && item.kind === "taskboard"
+        && (item.source || "built-in") === source),
+    dataUrl: () => `/api/projects/${encodeURIComponent(projectId)}/boards/${encodeURIComponent(shortId)}/data`,
+    save: patch => saveTaskboardConfig(board, { filters: taskboardFilterPayload(patch.filters) }),
     afterData: data => {
       const desc = document.getElementById("custom-board-desc");
       const updated = data.source.updated_at
@@ -280,6 +283,21 @@ function customTaskboardBinding(board) {
       if (desc) desc.textContent = `数据源:${data.source.name}${updated}`;
     },
   };
+}
+
+function taskboardState(binding) {
+  return taskboardStates[binding.key] ||= {
+    data: null, token: 0, loading: false, error: "", timer: null,
+    view: loadTaskboardView(binding.projectId, binding.boardId, binding.source,
+      defaultTaskboardView(binding.defaultGroupBy, taskFilter)),
+  };
+}
+
+function rememberTaskboardView(binding) {
+  const state = taskboardState(binding);
+  state.view = normalizeTaskboardView(state.view,
+    defaultTaskboardView(binding.defaultGroupBy, taskFilter));
+  saveTaskboardView(binding.projectId, binding.boardId, binding.source, state.view);
 }
 
 // 服务端只接受 {title,query,color};locked 等渲染标记不回传
@@ -293,7 +311,7 @@ function taskboardBindingOf(element) {
 }
 
 function currentTaskboardFilters(binding) {
-  return (taskboardStates[binding.key]?.data?.filters || [])
+  return (taskboardState(binding).data?.filters || [])
     .map(f => ({ title: f.title, query: f.query, color: f.color || "",
                  locked: Boolean(f.locked) }));
 }
@@ -306,85 +324,379 @@ async function saveTaskboardConfig(board, patch) {
   renderCustomBoards(true);
 }
 
+function taskboardActiveFilterCount(view) {
+  return view.facets.length + (view.advanced ? 1 : 0) + (view.search.trim() ? 1 : 0);
+}
+
+function taskboardFacetHtml(data, view, source) {
+  // 状态优先沿用工作流声明顺序,其余候选与后端给出的标签全集一致。
+  const labels = [...sourceStatusValues(source).map(s => `status: ${s.value}`),
+    ...(data.labels || [])];
+  return taskboardFacetGroups(labels, view).map(group => `
+    <fieldset class="tb-facet" data-facet-field="${esc(group.field)}">
+      <legend>${esc(group.title)}</legend>
+      ${group.options.map(option => `<label class="tb-option"
+          data-option-search="${esc((group.title + " " + option.label).toLowerCase())}">
+        <input type="checkbox" ${option.selected ? "checked" : ""}
+          data-field="${esc(group.field)}" data-value="${esc(option.value)}"
+          data-missing="${Boolean(option.missing)}"
+          data-tb-focus="${esc(JSON.stringify(["facet", group.field, option.value, option.missing]))}"
+          onchange="toggleTaskboardFacet(this)">
+        <span>${esc(option.label)}</span></label>`).join("")}
+    </fieldset>`).join("");
+}
+
+function taskboardGroupOptions(data, view) {
+  const props = new Map([["status", "status"]]);
+  for (const label of data.labels || []) {
+    const prop = splitLabel(label)[0];
+    if (prop && taskboardViewProperty(prop) !== null && !props.has(prop.toLowerCase()))
+      props.set(prop.toLowerCase(), prop);
+  }
+  if (view.groupBy) props.set(view.groupBy.toLowerCase(), view.groupBy);
+  const choices = [...props.values()].map(prop => ({
+    value: prop, title: prop.toLowerCase() === "status" ? "状态" : prop,
+  }));
+  choices.push({ value: "", title: "自定义表达式列" });
+  return choices.map(item => `<option value="${esc(item.value)}"${
+    item.value.toLowerCase() === view.groupBy.toLowerCase() ? " selected" : ""}>${esc(item.title)}</option>`).join("");
+}
+
+function taskboardFilterChipsHtml(view) {
+  const chip = (text, kind, field = "") => `<span class="tb-chip">
+    <span title="${esc(text)}">${esc(text)}</span><button class="tb-chip-x"
+      aria-label="${esc("移除筛选 " + text)}" data-kind="${kind}" data-field="${esc(field)}"
+      onclick="removeTaskboardViewFilter(this)">×</button></span>`;
+  const chips = view.facets.map(f => {
+    const title = f.field.toLowerCase() === "status" ? "状态" : (f.field || "标签");
+    return chip(`${title}：${[...f.values, ...(f.missing ? ["未设置"] : [])].join("、")}`, "facet", f.field);
+  });
+  if (view.search.trim()) chips.unshift(chip(`搜索：${view.search.trim()}`, "search"));
+  if (view.advanced) chips.push(chip(`表达式：${view.advanced}`, "advanced"));
+  return chips.length ? chips.join("") + `<button class="tb-text-button"
+    onclick="clearTaskboardFilters(this)">清除筛选</button>` : "";
+}
+
 function taskboardFilterBarHtml(binding, data) {
-  const grouped = Boolean(data.group_by);
-  const options = (data.labels || [])
-    .map(l => `<option value="${esc(l)}"></option>`).join("");
-  const chips = (data.filters || []).map((col, i) =>
-    `<span class="tb-chip${col.locked ? " tb-chip-locked" : ""}" title="${esc(col.query)}">${esc(col.title)}${
-      col.locked ? "" : `<button class="tb-chip-x" data-index="${i}" title="移除此列"
-       onclick="removeTaskboardFilter(this, +this.dataset.index)">×</button>`}</span>`).join("");
-  const listId = `tb-labels-${binding.key.replace(/[^\w-]/g, "_")}`;   // datalist id 全局唯一
-  const counts = data.counts || {};
-  const scopeOption = (value, label) =>
-    `<option value="${value}"${taskFilter === value ? " selected" : ""}>${label}</option>`;
+  const view = taskboardState(binding).view;
+  const count = taskboardActiveFilterCount(view);
+  const option = (value, label, current) =>
+    `<option value="${value}"${current === value ? " selected" : ""}>${label}</option>`;
   return `<div class="tb-filter-bar">
-    <button class="action" data-source="${esc(binding.source)}"
-      onclick="openNewTask(this.dataset.source)">+ 新建任务</button>
-    <span class="muted" title="${grouped ? "分组时各筛选列的并集决定进入看板的卡片" : ""}">${
-      grouped ? "范围:" : "筛选列:"}</span>${chips}
-    <input class="tb-new-filter" list="${listId}"
-      placeholder="标签表达式,如 status: 处理中 & bug 或 owner: *"
-      onkeydown="if(event.key==='Enter')addTaskboardFilter(this)">
-    <datalist id="${listId}">${options}</datalist>
-    <button class="ghost" onclick="addTaskboardFilter(this)">${grouped ? "＋加范围" : "＋加列"}</button>
-    <input class="tb-group-by" placeholder="按属性取值分列,如 owner" value="${esc(data.group_by || "")}"
-      onkeydown="if(event.key==='Enter')setTaskboardGroupBy(this, this.value)">
-    <button class="ghost"
-      onclick="setTaskboardGroupBy(this, this.closest('.tb-filter-bar').querySelector('.tb-group-by').value)">分组</button>
-    <button class="ghost" onclick="setTaskboardGroupBy(this, '')"${grouped ? "" : " disabled"}>清除分组</button>
-    <label class="tb-scope">显示
-      <select onchange="setTaskFilter(this.value)">
-        ${scopeOption("active", "活跃 Task")}${scopeOption("all", "全部 Task")}${scopeOption("archived", "已归档 Task")}
-      </select>
-      <span>活跃 ${counts.active ?? 0} · 已归档 ${counts.archived ?? 0}</span>
+    <label class="tb-search"><span aria-hidden="true">⌕</span>
+      <input type="search" class="tb-search-input" aria-label="搜索任务"
+        placeholder="搜索任务标题、编号、标签…" maxlength="512"
+        value="${esc(view.search)}" data-tb-focus="search"
+        oninput="searchTaskboard(this)"></label>
+    <details class="tb-popover" data-tb-menu="filters">
+      <summary class="ghost" data-tb-focus="filters-menu">筛选${
+        count ? ` <span class="tb-counter">${count}</span>` : ""}</summary>
+      <div class="tb-popover-panel tb-filter-panel">
+        <div class="tb-panel-heading"><strong>筛选任务</strong>
+          <button class="tb-text-button" onclick="clearTaskboardFilters(this)">清空</button></div>
+        <p class="tb-help">同一条件任选其一，不同条件同时满足。</p>
+        <input type="search" class="tb-facet-search" placeholder="查找筛选值…"
+          aria-label="查找筛选值" data-tb-focus="facet-search"
+          oninput="filterTaskboardFacetOptions(this)">
+        <div class="tb-facet-list" data-scroll-key="tb:facets">${taskboardFacetHtml(data, view, binding.source)}</div>
+        <details class="tb-advanced" data-tb-menu="advanced">
+          <summary data-tb-focus="advanced-menu">高级标签表达式</summary>
+          <p class="tb-help">支持 &amp;、|、! 和括号，与上方条件同时生效。</p>
+          <div class="tb-advanced-row"><input class="tb-advanced-query"
+            aria-label="高级标签表达式" placeholder="例如 bug &amp; !wontfix"
+            maxlength="2000" value="${esc(view.advanced)}" data-tb-focus="advanced"
+            onkeydown="if(event.key==='Enter'&&!imeComposing(event))applyTaskboardAdvanced(this)">
+            <button class="ghost" data-tb-focus="apply-advanced" onclick="applyTaskboardAdvanced(this)">应用</button></div>
+          <div class="tb-query-error" role="alert"></div>
+        </details>
+      </div>
+    </details>
+    <label class="tb-control">分列
+      <select class="tb-group-by" aria-label="分列依据" data-tb-focus="group"
+        onchange="setTaskboardOption(this, 'groupBy', this.value)">${taskboardGroupOptions(data, view)}</select>
     </label>
+    <label class="tb-scope">显示
+      <select aria-label="任务显示范围" data-tb-focus="scope"
+        onchange="setTaskboardOption(this, 'scope', this.value)">
+        ${option("active", "活跃 Task", view.scope)}${option("all", "全部 Task", view.scope)}${option("archived", "已归档 Task", view.scope)}
+      </select>
+    </label>
+    <details class="tb-popover tb-display-menu" data-tb-menu="display">
+      <summary class="ghost" data-tb-focus="display-menu">显示选项</summary>
+      <div class="tb-popover-panel tb-display-panel">
+        <strong>显示选项</strong>
+        <label class="tb-display-row">列内排序<select aria-label="列内排序" data-tb-focus="sort"
+          onchange="setTaskboardOption(this, 'sort', this.value)">
+          ${option("updated_desc", "最近更新", view.sort)}${option("updated_asc", "最早更新", view.sort)}
+          ${option("created_desc", "最近创建", view.sort)}${option("title_asc", "标题 A–Z", view.sort)}
+        </select></label>
+        <label class="tb-option"><input type="checkbox" ${view.hideEmpty ? "checked" : ""}
+          data-tb-focus="hide-empty" onchange="setTaskboardOption(this, 'hideEmpty', this.checked)">隐藏空列</label>
+        <div class="tb-display-actions">
+          <button class="ghost" data-tb-focus="collapse-all" onclick="setTaskboardCollapsed(this, true)">折叠所有列</button>
+          <button class="ghost" data-tb-focus="expand-all" onclick="setTaskboardCollapsed(this, false)">展开所有列</button>
+        </div>
+        <hr>
+        <button class="tb-menu-button" onclick="openTaskboardColumns(this)">管理自定义表达式列…</button>
+        <button class="tb-menu-button" data-tb-focus="reset-view" onclick="resetTaskboardView(this)">重置当前视图</button>
+        <p class="tb-help">视图偏好在此浏览器中按项目和看板分别记住。</p>
+      </div>
+    </details>
+    <button class="action tb-new-task" data-source="${esc(binding.source)}"
+      onclick="openNewTask(this.dataset.source)">+ 新建任务</button>
+  </div><div class="tb-view-summary">
+    <div class="tb-active-filters">${taskboardFilterChipsHtml(view)}</div>
+    <span class="tb-results-count" role="status" aria-live="polite"></span>
   </div>`;
+}
+
+// 多选立即生效,但弹层、候选搜索和键盘焦点在响应后继续保留。
+function toggleTaskboardFacet(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  const view = taskboardState(binding).view;
+  const field = element.dataset.field, value = element.dataset.value;
+  if (element.checked && view.facets.reduce((n, f) => n + f.values.length + Number(f.missing), 0) >= 100) {
+    element.checked = false;
+    toast("最多同时选择 100 个筛选值", "warning");
+    return;
+  }
+  let facet = view.facets.find(f => f.field.toLowerCase() === field.toLowerCase());
+  if (!facet) { facet = { field, values: [], missing: false }; view.facets.push(facet); }
+  if (element.dataset.missing === "true") facet.missing = element.checked;
+  else if (element.checked && !facet.values.some(v => v.toLowerCase() === value.toLowerCase()))
+    facet.values.push(value);
+  else if (!element.checked)
+    facet.values = facet.values.filter(v => v.toLowerCase() !== value.toLowerCase());
+  view.facets = view.facets.filter(f => f.values.length || f.missing);
+  rememberTaskboardView(binding);
+  renderTaskboard(binding);
+}
+
+function filterTaskboardFacetOptions(input) {
+  const panel = input.closest(".tb-filter-panel");
+  const query = input.value.trim().toLowerCase();
+  panel?.querySelectorAll(".tb-facet").forEach(group => {
+    let found = false;
+    group.querySelectorAll("[data-option-search]").forEach(option => {
+      option.hidden = !option.dataset.optionSearch.includes(query);
+      found ||= !option.hidden;
+    });
+    group.hidden = !found;
+  });
+}
+
+function taskboardSearchComposition(input, composing) {
+  const binding = taskboardBindingOf(input);
+  if (!binding) return;
+  taskboardState(binding).composing = composing;
+  if (!composing) searchTaskboard(input);
+}
+
+function taskboardDraftComposition(input, composing) {
+  const binding = taskboardBindingOf(input);
+  if (!binding) return;
+  taskboardState(binding).composing = composing;
+  if (!composing) drawTaskboard(binding);
+}
+
+function searchTaskboard(input) {
+  const binding = taskboardBindingOf(input);
+  if (!binding) return;
+  const state = taskboardState(binding);
+  if (state.composing) return;
+  state.view.search = input.value;
+  rememberTaskboardView(binding);
+  // 输入一变就作废旧请求,避免防抖期间旧搜索结果覆盖新条件。
+  ++state.token;
+  state.controller?.abort();
+  clearTimeout(state.timer);
+  state.loading = true;
+  updateTaskboardResultCount(binding);
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (binding.visible()) renderTaskboard(binding);
+  }, 250);
+}
+
+function applyTaskboardAdvanced(element) {
+  const binding = taskboardBindingOf(element);
+  const panel = element.closest(".tb-advanced");
+  const input = panel?.querySelector(".tb-advanced-query");
+  if (!binding || !input) return;
+  const value = input.value.trim(), errorNode = panel.querySelector(".tb-query-error");
+  try { if (value) compileLabelQuery(value); }
+  catch (error) { errorNode.textContent = `表达式不合法：${error.message}`; return; }
+  errorNode.textContent = "";
+  taskboardState(binding).view.advanced = value;
+  rememberTaskboardView(binding);
+  renderTaskboard(binding);
+}
+
+function removeTaskboardViewFilter(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  const view = taskboardState(binding).view;
+  if (element.dataset.kind === "facet")
+    view.facets = view.facets.filter(f => f.field !== element.dataset.field);
+  else if (["search", "advanced"].includes(element.dataset.kind)) {
+    view[element.dataset.kind] = "";
+    if (element.dataset.kind === "advanced") {
+      const input = binding.host().querySelector(".tb-advanced-query");
+      if (input) input.value = "";
+    }
+  }
+  rememberTaskboardView(binding);
+  drawTaskboard(binding);
+  renderTaskboard(binding);
+}
+
+function clearTaskboardFilters(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  const view = taskboardState(binding).view;
+  view.facets = []; view.search = ""; view.advanced = "";
+  rememberTaskboardView(binding);
+  // 清空主动丢弃高级表达式草稿,轮询才保留未应用草稿。
+  const input = binding.host().querySelector(".tb-advanced-query");
+  if (input) input.value = "";
+  drawTaskboard(binding);
+  renderTaskboard(binding);
+}
+
+function setTaskboardOption(element, field, value) {
+  const binding = taskboardBindingOf(element);
+  if (!binding || !["groupBy", "scope", "sort", "hideEmpty"].includes(field)) return;
+  const state = taskboardState(binding);
+  state.view[field] = value;
+  rememberTaskboardView(binding);
+  if (field === "groupBy" || field === "scope") renderTaskboard(binding);
+  else drawTaskboard(binding);
+}
+
+function resetTaskboardView(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  taskboardState(binding).view = defaultTaskboardView(binding.defaultGroupBy, "active");
+  rememberTaskboardView(binding);
+  const input = binding.host().querySelector(".tb-advanced-query");
+  if (input) input.value = "";
+  drawTaskboard(binding);
+  renderTaskboard(binding);
+}
+
+function toggleTaskboardColumn(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  const view = taskboardState(binding).view, key = element.dataset.columnKey;
+  view.collapsed = view.collapsed.includes(key)
+    ? view.collapsed.filter(k => k !== key) : [...view.collapsed, key];
+  rememberTaskboardView(binding);
+  drawTaskboard(binding);
+}
+
+function setTaskboardCollapsed(element, collapsed) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  const state = taskboardState(binding);
+  state.view.collapsed = collapsed ? (state.data?.columns || []).map(c => c.key) : [];
+  rememberTaskboardView(binding);
+  drawTaskboard(binding);
+}
+
+// 表达式列是共享配置,放在单独的管理对话框,不再冒充日常筛选条件。
+function openTaskboardColumns(element) {
+  const binding = taskboardBindingOf(element);
+  if (!binding) return;
+  binding.host()?.querySelectorAll(".tb-popover[open]").forEach(menu => { menu.open = false; });
+  const filters = currentTaskboardFilters(binding);
+  const rows = filters.map((col, i) => `<div class="tb-column-setting">
+    <div><strong>${esc(col.title)}</strong><code>${esc(col.query)}</code></div>
+    ${col.locked ? '<span class="muted">固定状态列</span>' : `<button class="ghost"
+      data-index="${i}" onclick="removeTaskboardFilter(this, +this.dataset.index)"
+      aria-label="${esc("移除自定义列 " + col.title)}">移除</button>`}</div>`).join("");
+  openFormDialog("管理自定义表达式列", `<div class="tb-columns-editor"
+      data-board-key="${esc(binding.key)}" data-filter-snapshot="${esc(JSON.stringify(filters))}">
+    <p class="tb-help">每个表达式生成一列；任务可以同时出现在多列中。
+      这里的修改会保存为共享看板配置，已有 ⚡ 自动处理规则保持原义。</p>
+    <div class="tb-column-settings">${rows}</div>
+    <label>新列名称（可选）<input class="tb-new-filter-title" maxlength="100" placeholder="例如 高优先级缺陷"></label>
+    <label>标签表达式<input class="tb-new-filter" maxlength="2000"
+      placeholder="例如 bug &amp; priority: P0"
+      onkeydown="if(event.key==='Enter'&&!imeComposing(event))addTaskboardFilter(this)"></label>
+    <div class="tb-query-error" role="alert"></div>
+    <button class="ghost" onclick="addTaskboardFilter(this)">＋ 添加表达式列</button>
+    </div>`, `<button class="action" data-board-key="${esc(binding.key)}"
+      onclick="useTaskboardExpressionColumns(this)">查看表达式列</button>
+      <button class="ghost" onclick="fdlg.close()">完成</button>`);
+}
+
+function useTaskboardExpressionColumns(element) {
+  setTaskboardOption(element, "groupBy", "");
+  fdlg.close();
+}
+
+async function commitTaskboardColumns(binding, form, filters, message) {
+  const state = taskboardState(binding);
+  if (state.columnsSaving) return;
+  const errorNode = form.querySelector(".tb-query-error");
+  // 对话框中的序号只对其快照有效,轮询发现共享配置改变时须重新确认列表。
+  if (form.dataset.filterSnapshot !== JSON.stringify(currentTaskboardFilters(binding))) {
+    errorNode.innerHTML = '列配置已发生变化，请重新加载后再修改。 '
+      + '<button class="tb-text-button" onclick="openTaskboardColumns(this)">重新加载列设置</button>';
+    return;
+  }
+  state.columnsSaving = true;
+  const controls = [...form.querySelectorAll("input, button")];
+  controls.forEach(control => { control.disabled = true; });
+  try {
+    await binding.save({ filters });
+    if (!binding.visible()) return;
+    await renderTaskboard(taskboardBindings[binding.key] || binding);
+    // 保存期间可能已关闭对话框或切到其他表单,不能抢回焦点或覆盖新草稿。
+    if (fdlg.open && form.isConnected && !state.error) openTaskboardColumns(form);
+    toast(message, "success");
+  } catch (error) {
+    if (form.isConnected) errorNode.textContent = error.message;
+  } finally {
+    state.columnsSaving = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
 }
 
 async function addTaskboardFilter(element) {
   const binding = taskboardBindingOf(element);
-  const input = element.closest(".tb-filter-bar")?.querySelector(".tb-new-filter");
-  const query = (input?.value || "").trim();
-  if (!binding || !query) return;
+  const form = element.closest(".tb-columns-editor");
+  const query = (form?.querySelector(".tb-new-filter")?.value || "").trim();
+  if (!binding || !query || binding.projectId !== currentProject) return;
+  const errorNode = form.querySelector(".tb-query-error");
   try { compileLabelQuery(query); }
-  catch (error) { uiAlert(`标签表达式不合法:${error.message}`); return; }
+  catch (error) { errorNode.textContent = `表达式不合法：${error.message}`; return; }
   const filters = currentTaskboardFilters(binding);
   if (filters.some(f => f.query.toLowerCase() === query.toLowerCase())) {
-    uiAlert("该表达式的列已经存在"); return;
+    errorNode.textContent = "该表达式的列已经存在"; return;
   }
-  await binding.save({ filters: [...filters, { title: query, query, color: "" }] });
-  toast("已添加筛选列", "success");
+  const title = form.querySelector(".tb-new-filter-title").value.trim() || query;
+  await commitTaskboardColumns(binding, form,
+    [...filters, { title, query, color: "" }], "已添加表达式列");
 }
 
 async function removeTaskboardFilter(element, index) {
   const binding = taskboardBindingOf(element);
-  if (!binding) return;
-  const filters = currentTaskboardFilters(binding);
-  const target = filters[index];
+  if (!binding || binding.projectId !== currentProject) return;
+  const form = element.closest(".tb-columns-editor");
+  if (!form || taskboardState(binding).columnsSaving) return;
+  const filters = currentTaskboardFilters(binding), target = filters[index];
   if (!target || target.locked) return;
   if (filters.length <= 1) { uiAlert("看板至少保留一列"); return; }
   if (ruleForQuery(target.query)) {
-    uiAlert("该列的表达式绑定了自动处理规则;请先在 ⚡ 设置中删除规则,再移除列。");
-    return;
+    uiAlert("该列绑定了自动处理规则；请先在 ⚡ 设置中删除规则，再移除列。"); return;
   }
   filters.splice(index, 1);
-  await binding.save({ filters });
-  toast("已移除筛选列", "success");
+  await commitTaskboardColumns(binding, form, filters, "已移除表达式列");
 }
 
-async function setTaskboardGroupBy(element, value) {
-  const binding = taskboardBindingOf(element);
-  const prop = String(value || "").trim();
-  if (!binding) return;
-  if (/[:&|!()]/.test(prop)) {
-    uiAlert("分组属性名不能包含冒号或表达式运算符"); return;
-  }
-  await binding.save({ group_by: prop });
-  toast(prop ? `已按属性「${prop}」的取值分列` : "已恢复按筛选列分列", "success");
-}
-
-// 列本身就是单个状态(status: X)时,卡片上不再重复状态药丸
+// 列本身就是单个状态时不重复显示药丸;特殊值无可绑定表达式时仍显示状态。
 function isStatusColumnQuery(query) {
   const text = String(query || "").trim();
   if (/[&|!()]/.test(text)) return false;
@@ -392,73 +704,205 @@ function isStatusColumnQuery(query) {
   return prop.toLowerCase() === "status" && value !== "*";
 }
 
-function taskboardColumnHtml(col, source) {
+function taskboardColumnHtml(col, source, view) {
+  const collapsed = view.collapsed.includes(col.key);
   const showStatus = !isStatusColumnQuery(col.query);
-  const cards = col.cards.map(card => boardCardHtml(card, { showStatus, source })).join("")
-    || `<div class="empty" style="padding:6px 4px">暂无条目</div>`;
-  const rule = ruleForQuery(col.query);
+  const rule = col.query ? ruleForQuery(col.query) : null;
   const ruleState = rule ? (rule.enabled ? "rule-on" : "rule-off") : "";
-  const ruleTitle = rule
-    ? (rule.enabled ? "自动处理规则已启用,点击修改" : "自动处理规则已停用,点击修改")
-    : "为该列的标签表达式设置自动处理规则";
-  return `<section class="col"><h2><span class="col-dot" style="background:${esc(col.color || "var(--muted)")}"></span>
-    ${esc(col.title)}<span class="col-count">${col.cards.length}</span>
-    <button class="col-tool col-rule ${ruleState}" title="${esc(ruleTitle)}"
-      data-query="${esc(col.query)}"
-      onclick="openColumnRule(this.dataset.query)">⚡</button></h2>
-    <div class="col-list" data-scroll-key="tb:${esc(col.key)}">${cards}</div></section>`;
+  const ruleTitle = rule ? (rule.enabled ? "自动处理规则已启用，点击修改" : "自动处理规则已停用，点击修改")
+    : "为该列设置自动处理规则（不包含当前个人筛选条件）";
+  const cards = collapsed ? "" : taskboardSortedCards(col.cards, view.sort)
+    .map(card => boardCardHtml(card, { showStatus, source })).join("")
+      || '<div class="tb-column-empty">暂无任务</div>';
+  return `<section class="col${collapsed ? " tb-col-collapsed" : ""}"
+      data-column-key="${esc(col.key)}" aria-label="${esc(col.title)}">
+    <h2><span class="col-dot" style="background:${esc(col.color || "var(--muted)")}"></span>
+      <button class="tb-col-title" title="${esc((collapsed ? "展开 " : "折叠 ") + col.title)}"
+        aria-expanded="${!collapsed}" data-column-key="${esc(col.key)}"
+        data-tb-focus="${esc("column:" + col.key)}"
+        onclick="toggleTaskboardColumn(this)">${esc(col.title)}</button>
+      <span class="col-count">${col.cards.length}</span>
+      ${!collapsed && col.query ? `<button class="col-tool col-rule ${ruleState}"
+        aria-label="${esc(col.title + " 自动处理规则")}" title="${esc(ruleTitle)}"
+        data-query="${esc(col.query)}" onclick="openColumnRule(this.dataset.query)">⚡</button>` : ""}
+      <button class="col-tool tb-collapse-button" aria-label="${esc((collapsed ? "展开 " : "折叠 ") + col.title)}"
+        data-tb-focus="${esc("collapse:" + col.key)}"
+        data-column-key="${esc(col.key)}" onclick="toggleTaskboardColumn(this)">${collapsed ? "›" : "‹"}</button>
+    </h2>${collapsed ? "" : `<div class="col-list" data-scroll-key="tb:${esc(col.key)}">${cards}</div>`}
+  </section>`;
+}
+
+function updateTaskboardResultCount(binding) {
+  const state = taskboardState(binding), data = state.data, host = binding.host();
+  host?.setAttribute("aria-busy", String(state.loading));
+  const counter = host?.querySelector(".tb-results-count");
+  if (!counter) return;
+  if (state.loading) { counter.textContent = "正在筛选…"; return; }
+  const shown = new Set((data?.columns || []).flatMap(c => c.cards.map(card => card.id))).size;
+  const total = data?.counts?.[state.view.scope] ?? 0;
+  counter.textContent = `显示 ${shown} / ${total} 个任务`;
+}
+
+function drawTaskboard(binding) {
+  const host = binding.host(), state = taskboardState(binding), data = state.data;
+  if (!host || !data || !binding.visible()) return;
+  if (state.composing) { updateTaskboardResultCount(binding); return; }
+  const sameBoard = host.dataset.boardKey === binding.key;
+  const scrollState = sameBoard ? captureKeyedScrollPositions(host) : [];
+  const openMenus = sameBoard ? [...host.querySelectorAll("details[open][data-tb-menu]")]
+    .map(e => e.dataset.tbMenu) : [];
+  const active = sameBoard && host.contains(document.activeElement) ? document.activeElement : null;
+  const focus = active?.dataset.tbFocus;
+  const selection = active && typeof active.selectionStart === "number"
+    ? [active.selectionStart, active.selectionEnd] : null;
+  const drafts = sameBoard ? ["facet-search", "advanced"].map(key => {
+    const input = [...host.querySelectorAll("[data-tb-focus]")].find(e => e.dataset.tbFocus === key);
+    return [key, input?.value];
+  }) : [];
+  host.dataset.boardKey = binding.key;
+  host.classList.add("taskboard-host");
+  const view = state.view;
+  const columns = (data.columns || []).filter(c => !view.hideEmpty || c.cards.length);
+  const shown = new Set((data.columns || []).flatMap(c => c.cards.map(card => card.id))).size;
+  const unmatched = Math.max(0, (data.matched_count ?? shown) - shown);
+  const empty = !shown ? `<div class="tb-empty-state">
+    <strong>${taskboardActiveFilterCount(view) ? "没有符合条件的任务" : "当前范围暂无任务"}</strong>
+    <p>${view.scope === "archived" ? "已归档的任务会显示在这里。" : "调整筛选条件或显示范围，也可以创建新任务。"}</p>
+    ${taskboardActiveFilterCount(view) ? '<button class="ghost" onclick="clearTaskboardFilters(this)">清除筛选</button>' : ""}
+  </div>` : "";
+  const result = columns.length
+    ? `<div class="taskboard-grid" data-scroll-key="tb:grid">${columns.map(col =>
+        taskboardColumnHtml(col, binding.source, view)).join("")}</div>`
+    : `<div class="taskboard-grid tb-grid-empty" data-scroll-key="tb:grid">${empty}</div>`;
+  // 不变的轮询响应不替换 DOM,避免打断选择器、滚动与中文输入。
+  const signature = JSON.stringify([data, view, state.error]);
+  if (sameBoard && signature === state.signature) { updateTaskboardResultCount(binding); return; }
+  state.signature = signature;
+  host.innerHTML = taskboardFilterBarHtml(binding, data)
+    + (state.error ? `<div class="tb-error" role="alert">${esc(state.error)}
+        <button class="tb-text-button" onclick="retryTaskboard(this)">重试</button></div>` : "")
+    + (unmatched ? `<div class="tb-notice">还有 ${unmatched} 个匹配任务未落入自定义表达式列。
+        <button class="tb-text-button" onclick="setTaskboardOption(this, 'groupBy', 'status')">按状态查看全部</button></div>` : "")
+    + (columns.length ? empty : "") + result;
+  for (const menu of host.querySelectorAll("[data-tb-menu]")) menu.open = openMenus.includes(menu.dataset.tbMenu);
+  const controls = [...host.querySelectorAll("[data-tb-focus]")];
+  for (const [key, value] of drafts) {
+    const input = controls.find(e => e.dataset.tbFocus === key);
+    if (input && value !== undefined) input.value = value;
+  }
+  const facetSearch = host.querySelector(".tb-facet-search");
+  if (facetSearch?.value) filterTaskboardFacetOptions(facetSearch);
+  const restored = controls.find(e => e.dataset.tbFocus === focus);
+  if (restored) {
+    restored.focus({ preventScroll: true });
+    if (selection && typeof restored.setSelectionRange === "function")
+      restored.setSelectionRange(...selection);
+  }
+  restoreKeyedScrollPositions(host, scrollState);
+  positionTaskboardMenus(host);
+  updateTaskboardResultCount(binding);
+}
+
+function positionTaskboardMenus(host) {
+  for (const menu of host.querySelectorAll(".tb-popover[open]")) {
+    const panel = menu.querySelector(".tb-popover-panel");
+    const viewport = document.documentElement.clientWidth;
+    if (!panel || viewport <= 760) continue;
+    const bounds = host.getBoundingClientRect();
+    const left = Math.max(12, bounds.left), right = Math.min(viewport - 12, bounds.right);
+    panel.style.setProperty("--tb-menu-max-width", `${Math.max(0, right - left)}px`);
+    panel.style.setProperty("--tb-menu-shift-x", "0px");
+    const rect = panel.getBoundingClientRect();
+    const shift = Math.max(left - rect.left, Math.min(0, right - rect.right));
+    panel.style.setProperty("--tb-menu-shift-x", `${shift}px`);
+  }
+}
+
+function retryTaskboard(element) {
+  const binding = taskboardBindingOf(element);
+  if (binding) renderTaskboard(binding);
 }
 
 async function renderTaskboard(binding) {
   const host = binding.host();
-  if (!host || !currentProject) return;
+  if (!host || !currentProject || !binding.visible()) return;
+  // 自定义看板与实时组件共用宿主,接管时作废此前尚未返回的 widget 请求。
+  if (host.id === "custom-board-preview") ++boardWidgetRenderToken;
   taskboardBindings[binding.key] = binding;
-  const state = taskboardStates[binding.key] ||= { data: null, token: 0 };
-  if (!binding.visible()) return;   // 隐藏时不取数;切回页签时整绘
+  const state = taskboardState(binding);
+  clearTimeout(state.timer); state.timer = null;
+  state.controller?.abort();
+  const controller = new AbortController();
+  state.controller = controller;
   const token = ++state.token;
-  let data;
-  try {   // 服务端解析:数据源取数 + 分列;失败保留上一帧,首帧才提示
-    const r = await fetch(`${binding.dataUrl()}?scope=${encodeURIComponent(taskFilter)}`);
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error(err.detail || `请求失败 (${r.status})`);
+  state.loading = true;
+  if (host.dataset.boardKey !== binding.key) {
+    host.dataset.boardKey = binding.key;
+    host.classList.add("taskboard-host");
+    host.innerHTML = '<div class="empty" role="status">正在加载任务看板…</div>';
+    state.signature = null;
+  }
+  updateTaskboardResultCount(binding);
+  try {
+    const response = await fetch(`${binding.dataUrl()}?${taskboardViewParams(state.view)}`,
+      { signal: controller.signal });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(typeof error.detail === "string" ? error.detail : `请求失败 (${response.status})`);
     }
-    data = await r.json();
+    const data = await response.json();
+    if (token !== state.token || !binding.visible()) return;
+    state.data = data; state.error = "";
+    binding.afterData?.(data);
   } catch (error) {
-    if (token !== state.token) return;
-    if (!host.querySelector(".taskboard-grid"))
-      host.innerHTML = `<div class="empty">看板数据不可用:${esc(error.message)}</div>`;
-    return;
-  }
-  if (token !== state.token || !binding.visible()) return;
-  const previousData = state.data;
-  state.data = data;
-  host.dataset.boardKey = binding.key;
-  host.classList.add("taskboard-host");
-  binding.afterData?.(data);
-  const scrollState = captureKeyedScrollPositions(host);
-  // 轮询重绘会整体替换 DOM:筛选与分组输入框都需要保留草稿和焦点。
-  const inputState = [".tb-new-filter", ".tb-group-by"].flatMap(selector => {
-    // 分组配置刚变化时用新值,避免「清除分组」后又恢复旧输入
-    if (selector === ".tb-group-by" && previousData?.group_by !== data.group_by) return [];
-    const input = host.querySelector(selector);
-    return input ? [{ selector, value: input.value, focused: document.activeElement === input,
-      start: input.selectionStart, end: input.selectionEnd }] : [];
-  });
-  host.innerHTML = taskboardFilterBarHtml(binding, data)
-    + `<div class="taskboard-grid" data-scroll-key="tb:grid">${
-        data.columns.map(col => taskboardColumnHtml(col, binding.source)).join("")}</div>`;
-  for (const item of inputState) {
-    const input = host.querySelector(item.selector);
-    if (!input) continue;
-    input.value = item.value;
-    if (item.focused) {
-      input.focus();
-      input.setSelectionRange(item.start, item.end);
+    if (token !== state.token || !binding.visible() || error.name === "AbortError") return;
+    state.error = `看板更新失败：${error.message}${state.data ? "（保留上次结果）" : ""}`;
+    // 首次加载失败也提供重试/重置入口,坏的本地筛选不会把看板锁死。
+    if (!state.data) state.data = { columns: [], labels: [], filters: [], counts: {} };
+  } finally {
+    if (token === state.token && binding.visible()) {
+      state.loading = false;
+      drawTaskboard(binding);
     }
   }
-  restoreKeyedScrollPositions(host, scrollState);
 }
+
+// composition 事件需显式监听,浏览器不会执行 HTML oncompositionstart 属性。
+for (const type of ["compositionstart", "compositionend"]) {
+  document.addEventListener(type, event => {
+    const input = event.target;
+    if (!input.closest?.(".taskboard-host")) return;
+    if (input.matches(".tb-search-input")) taskboardSearchComposition(input, type === "compositionstart");
+    else if (input.matches(".tb-facet-search, .tb-advanced-query"))
+      taskboardDraftComposition(input, type === "compositionstart");
+  });
+}
+
+// 原生 details 支持键盘;点击外侧关闭浮层,Esc 关闭当前层并把焦点还给入口。
+document.addEventListener("toggle", event => {
+  if (!event.target.matches?.(".tb-popover[open]")) return;
+  const host = event.target.closest(".taskboard-host");
+  if (host) positionTaskboardMenus(host);
+}, true);
+document.defaultView?.addEventListener("resize", () => {
+  document.querySelectorAll(".taskboard-host").forEach(positionTaskboardMenus);
+});
+document.addEventListener("click", event => {
+  document.querySelectorAll(".taskboard-host .tb-popover[open]").forEach(menu => {
+    if (!menu.contains(event.target)) menu.open = false;
+  });
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || imeComposing(event) || fdlg.open) return;
+  const menu = document.activeElement?.closest(".tb-popover[open]")
+    || document.querySelector(".taskboard-host .tb-popover[open]");
+  if (menu) {
+    menu.open = false;
+    menu.querySelector("summary")?.focus();
+    event.preventDefault();
+    event.stopPropagation();
+  }
+});
 
 let _previewTimer = null;
 function previewBoardDraft() {
@@ -656,8 +1100,8 @@ function openNewBoardDialog() {
       <label>名称</label><input type="text" id="nb-name" placeholder="例如 缺陷追踪">
       <label>数据源</label>
       <select id="nb-source">${boardSourceOptionsHtml("built-in")}</select>
-      <p class="muted">创建后按数据源状态列分列;可在看板顶部用标签表达式增删筛选列,
-        状态(待处理/处理中/已阻塞/已完成)也是可筛选标签。</p>
+      <p class="muted">创建后默认按状态分列。顶部可搜索、多选筛选、切换分列属性；
+        「显示选项」中可调整排序、折叠列或管理自定义表达式列。</p>
     </div>
     <div id="nb-agent" style="display:none">
       ${peerModeProject() ? `<label>交给哪个角色</label>
@@ -728,7 +1172,7 @@ function openTaskboardDialog(boardId) {
     <input type="text" id="tbf-name" value="${esc(board.name || "")}">
     <label>数据源</label>
     <select id="tbf-source">${boardSourceOptionsHtml(board.source || "built-in")}</select>
-    <p class="muted">筛选列在看板顶部工具条直接增删,每列一个标签表达式。</p>`,
+    <p class="muted">日常筛选与分列在看板顶部调整；共享表达式列在「显示选项 → 管理自定义表达式列」中维护。</p>`,
     `<button class="action" data-id="${esc(board.id)}"
        onclick="saveTaskboardDialog(this.dataset.id)">保存</button>
      <button class="danger" data-id="${esc(board.id)}"

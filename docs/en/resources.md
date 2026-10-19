@@ -88,9 +88,13 @@ The source of truth for a custom dashboard is a `Board` in the platform database
 
 The built-in task board is not a deletable `Board` record but a special dashboard that the platform generates live from the project's tasks, so it uses the reserved address `/dashboards/tasks`. The code still uses the `boards` name internally for the model and API, but public URLs consistently use the user-facing `dashboards`.
 
+Standalone task board pages support search, multi-select filters, property grouping, sorting within columns and column collapsing. Personal views are stored in the current browser separately for each project, board and data source, without writing back to shared configuration. Custom expression columns and automatic handling rules remain shared configuration. See [Task board filtering and columns](automation.md#task-board-filtering-and-columns) for interactions, label matching and read-only query parameters.
+
 Main APIs:
 
 - `GET /api/projects/<project>/boards`
+- `GET /api/projects/<project>/builtin_board/data`
+- `GET /api/projects/<project>/boards/<board-id>/data`
 - `POST /api/projects/<project>/boards`
 - `DELETE /api/projects/<project>/boards/<board-id>`
 - `POST /api/projects/<project>/widget_data`

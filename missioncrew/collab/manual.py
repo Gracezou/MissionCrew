@@ -261,10 +261,13 @@ An orchestrator's turn:
   `filters`, each `{"title","query","color"}`, where query is a label expression (& | ! and
   parentheses; `property: *` matches tasks with a label of that property); the status is just a
   label such as `status: 待处理`, so `status: 处理中 & bug` works. You can also pass `group_by`
-  (e.g. `"owner"`) to split columns by that property's values instead (one column per value plus a
-  trailing "unset" column); then the union of filters only scopes which cards enter the board.
-  Without filters, default columns are generated from the data source's status values, and users
-  can add or remove filter columns on the board page.
+  (e.g. `"owner"`) as the page's default grouping by that property's values (one column per value
+  plus a trailing "unset" column); it covers every task in the board's scope, and filters do not
+  narrow it. Without filters, default columns are generated from the data source's status values.
+  Search, quick filters, grouping, sorting and collapsed columns on the page are each viewer's
+  personal view stored in their browser and never change the saved board; users maintain the
+  shared expression columns under "Manage custom expression columns". Details:
+  `platform-docs/automation.md` (Task board filtering and columns).
 - `board_source.save` creates or updates a custom task data source: cards are synced by id as
   that source's tasks (added / updated / removed if absent this time; removal deletes the task and
   its briefs permanently, without the recycle bin); each card needs id (and title when it creates

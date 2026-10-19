@@ -88,9 +88,13 @@ Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 
 
 内置任务看板不是可删除的 `Board` 记录，而是平台根据项目任务实时生成的特殊面板，因此使用保留地址 `/dashboards/tasks`。代码内部仍使用 `boards` 命名模型和 API，但公开 URL 统一使用面向用户的 `dashboards`。
 
+独立任务看板页面支持搜索、多选筛选、属性分列、列内排序及列折叠；个人视图按项目、看板和数据源保存在当前浏览器，不回写共享配置。自定义表达式列和自动处理规则仍是共享配置。交互、标签匹配与只读查询参数见[任务看板筛选与分列](automation.md#任务看板筛选与分列)。
+
 主要 API：
 
 - `GET /api/projects/<project>/boards`
+- `GET /api/projects/<project>/builtin_board/data`
+- `GET /api/projects/<project>/boards/<board-id>/data`
 - `POST /api/projects/<project>/boards`
 - `DELETE /api/projects/<project>/boards/<board-id>`
 - `POST /api/projects/<project>/widget_data`

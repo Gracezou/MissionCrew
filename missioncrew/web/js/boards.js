@@ -415,6 +415,8 @@ function taskboardFilterBarHtml(binding, data) {
       <select class="tb-group-by" aria-label="分列依据" data-tb-focus="group"
         onchange="setTaskboardOption(this, 'groupBy', this.value)">${taskboardGroupOptions(data, view)}</select>
     </label>
+    ${view.groupBy ? "" : `<button class="ghost tb-edit-columns" data-tb-focus="edit-columns"
+      title="编辑自定义表达式列" onclick="openTaskboardColumns(this)">编辑表达式</button>`}
     <label class="tb-scope">显示
       <select aria-label="任务显示范围" data-tb-focus="scope"
         onchange="setTaskboardOption(this, 'scope', this.value)">
@@ -437,7 +439,6 @@ function taskboardFilterBarHtml(binding, data) {
           <button class="ghost" data-tb-focus="expand-all" onclick="setTaskboardCollapsed(this, false)">展开所有列</button>
         </div>
         <hr>
-        <button class="tb-menu-button" onclick="openTaskboardColumns(this)">管理自定义表达式列…</button>
         <button class="tb-menu-button"
           onclick="this.closest('details').open=false;openTaskRuleEditor()">新建自动处理规则…</button>
         <button class="tb-menu-button" data-tb-focus="reset-view" onclick="resetTaskboardView(this)">重置当前视图</button>
@@ -606,7 +607,8 @@ function setTaskboardCollapsed(element, collapsed) {
   drawTaskboard(binding);
 }
 
-// 表达式列是共享配置,放在单独的管理对话框,不再冒充日常筛选条件。
+// 表达式列是共享配置,放在单独的管理对话框,不再冒充日常筛选条件;
+// 入口只在分列选「自定义表达式列」时出现在分列旁。
 function openTaskboardColumns(element) {
   const binding = taskboardBindingOf(element);
   if (!binding) return;
@@ -617,7 +619,7 @@ function openTaskboardColumns(element) {
     ${col.locked ? '<span class="muted">固定状态列</span>' : `<button class="ghost"
       data-index="${i}" onclick="removeTaskboardFilter(this, +this.dataset.index)"
       aria-label="${esc("移除自定义列 " + col.title)}">移除</button>`}</div>`).join("");
-  openFormDialog("管理自定义表达式列", `<div class="tb-columns-editor"
+  openFormDialog("编辑自定义表达式列", `<div class="tb-columns-editor"
       data-board-key="${esc(binding.key)}" data-filter-snapshot="${esc(JSON.stringify(filters))}">
     <p class="tb-help">每个表达式生成一列；任务可以同时出现在多列中。
       这里的修改会保存为共享看板配置，已有 ⚡ 自动处理规则保持原义。</p>
@@ -628,14 +630,7 @@ function openTaskboardColumns(element) {
       onkeydown="if(event.key==='Enter'&&!imeComposing(event))addTaskboardFilter(this)"></label>
     <div class="tb-query-error" role="alert"></div>
     <button class="ghost" onclick="addTaskboardFilter(this)">＋ 添加表达式列</button>
-    </div>`, `<button class="action" data-board-key="${esc(binding.key)}"
-      onclick="useTaskboardExpressionColumns(this)">查看表达式列</button>
-      <button class="ghost" onclick="fdlg.close()">完成</button>`);
-}
-
-function useTaskboardExpressionColumns(element) {
-  setTaskboardOption(element, "groupBy", "");
-  fdlg.close();
+    </div>`, `<button class="action" onclick="fdlg.close()">完成</button>`);
 }
 
 async function commitTaskboardColumns(binding, form, filters, message) {
@@ -1103,7 +1098,7 @@ function openNewBoardDialog() {
       <label>数据源</label>
       <select id="nb-source">${boardSourceOptionsHtml("built-in")}</select>
       <p class="muted">创建后默认按状态分列。顶部可搜索、多选筛选、切换分列属性；
-        「显示选项」中可调整排序、折叠列或管理自定义表达式列。</p>
+        分列选「自定义表达式列」后，可点旁边的「编辑表达式」维护共享表达式列。</p>
     </div>
     <div id="nb-agent" style="display:none">
       ${peerModeProject() ? `<label>交给哪个角色</label>
@@ -1174,7 +1169,7 @@ function openTaskboardDialog(boardId) {
     <input type="text" id="tbf-name" value="${esc(board.name || "")}">
     <label>数据源</label>
     <select id="tbf-source">${boardSourceOptionsHtml(board.source || "built-in")}</select>
-    <p class="muted">日常筛选与分列在看板顶部调整；共享表达式列在「显示选项 → 管理自定义表达式列」中维护。</p>`,
+    <p class="muted">日常筛选与分列在看板顶部调整；共享表达式列在分列选「自定义表达式列」后，点旁边的「编辑表达式」维护。</p>`,
     `<button class="action" data-id="${esc(board.id)}"
        onclick="saveTaskboardDialog(this.dataset.id)">保存</button>
      <button class="danger" data-id="${esc(board.id)}"

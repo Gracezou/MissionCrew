@@ -656,6 +656,10 @@
     color: var(--text); font: inherit; cursor: pointer; }
   .tb-filter-bar > .tb-new-task { flex: none; min-height: 34px;
                                  padding: 6px 12px; white-space: nowrap; }
+  /* 与「筛选」「显示选项」入口同款底色;button.ghost 默认透明,需提高特异性覆盖 */
+  .tb-filter-bar > button.tb-edit-columns { flex: none; min-height: 34px; padding: 6px 10px;
+                     border-radius: 8px; background: var(--card); font-size: 12.5px;
+                     white-space: nowrap; }
   .tb-popover { position: relative; flex: none; min-width: 0; }
   .tb-popover > summary { display: flex; align-items: center; justify-content: center;
                           gap: 6px; min-height: 34px; padding: 6px 10px; list-style: none;
@@ -1631,6 +1635,7 @@
     .tb-filter-bar::after { content: ""; order: 2; flex-basis: 100%; height: 0; margin-top: -7px; }
     .tb-filter-bar > .tb-popover { order: 3; }
     .tb-control { order: 4; flex: 1 1 156px; }
+    .tb-edit-columns { order: 4; }
     .tb-scope { order: 5; flex: 1 1 124px; }
     .tb-filter-bar > .tb-display-menu { order: 6; }
     .tb-view-summary { flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }

@@ -17,7 +17,7 @@ group_by 非空时改为按该属性的取值横向分列(每个取值一列,末
 """
 from __future__ import annotations
 
-import time
+from datetime import datetime
 from typing import Optional
 
 from ..core import label_query
@@ -109,6 +109,43 @@ def declares_status(store, project_id: str, source_id: str, text: str) -> bool:
 def clean_url(value) -> str:
     """外部条目链接:去掉首尾空白,空串表示没有(同步卡片与 task.* 同一口径)。"""
     return str(value or "").strip()
+
+
+# 大于它的数值多半是毫秒时间戳(约公元 5138 年),直接拒绝而不是存成遥远的未来
+_MAX_UNIX_SECONDS = 1e11
+
+
+def clean_timestamp(value, what: str) -> float:
+    """外部更新时间:Unix 秒或带时区的 ISO 8601 字符串;None/空串/0 表示没有。
+
+    不带时区的日期时间会因时区猜错差出数小时,要求调用方写明时区。
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        raise ValueError(f"{what} 必须是 Unix 秒或 ISO 8601 时间")
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError:
+                raise ValueError(
+                    f"{what} 不是合法时间: {text}(用 Unix 秒或 ISO 8601,"
+                    "如 2026-10-19T08:00:00Z)") from None
+            if parsed.tzinfo is None:
+                raise ValueError(
+                    f"{what} 缺少时区: {text}(如 2026-10-19T16:00:00+08:00)")
+            seconds = parsed.timestamp()
+    elif isinstance(value, (int, float)):
+        seconds = float(value)
+    else:
+        raise ValueError(f"{what} 必须是 Unix 秒或 ISO 8601 时间")
+    if not 0 <= seconds < _MAX_UNIX_SECONDS:
+        raise ValueError(f"{what} 超出范围: {value}(需 Unix 秒,不是毫秒)")
+    return seconds
 
 
 def clean_meta(value, owner: str = "") -> list[str]:
@@ -271,8 +308,10 @@ def validate_source_cards(raw) -> list[dict]:
             raise ValueError(f"卡片 id 重复: {card_id}")
         seen.add(card_id)
         given = {key: value for key, value in item.items() if value is not None}
-        card = {"id": card_id,
-                "updated_at": float(given.get("updated_at") or time.time())}
+        card = {"id": card_id}
+        if "updated_at" in given:   # 外部系统的更新时间,写入 Task.external_updated_at
+            card["updated_at"] = clean_timestamp(
+                given["updated_at"], f"卡片 {card_id} 的 updated_at")
         if "title" in given:
             card["title"] = str(given["title"]).strip()
             if not card["title"]:
@@ -340,7 +379,8 @@ def sync_source_tasks(store, project_id: str, source_id: str,
 
     卡片按 external_id 匹配既有任务:命中则只更新卡片带了的字段与属性,
     没带的保持本地值(本地改过的状态、Agent 加的属性不会被下一次同步冲掉;
-    内容没有变化时不写库,不刷新 updated_at);未命中则新建,没带状态时落到
+    内容没有变化时不写库,不刷新系统 updated_at);卡片的 updated_at 是外部
+    系统的更新时间,存进 external_updated_at;未命中则新建,没带状态时落到
     第一个状态取值,新任务会走项目自动处理规则(auto_process 回调);本次
     未出现的 external_id 任务连带简报删除。用 task.create 建进本源的任务带了
     external_id 就同样参与匹配与删除,没带的不参与匹配,也不会被删除。
@@ -377,20 +417,24 @@ def sync_source_tasks(store, project_id: str, source_id: str,
                 source_id=source_id, external_id=external_id,
                 summary=card.get("summary", ""), labels=labels,
                 url=card.get("url", ""), meta=card.get("meta", []),
-                created_at=card["updated_at"], updated_at=card["updated_at"],
+                external_updated_at=card.get("updated_at", 0.0),
             )
             store.put_task(task)
             created += 1
             if auto_process is not None:
                 auto_process(task)
         else:
-            before = (task.title, task.summary, task.url, task.meta, task.labels)
+            def snapshot():
+                return (task.title, task.summary, task.url, task.meta, task.labels,
+                        task.external_updated_at)
+            before = snapshot()
             for key in ("title", "summary", "url", "meta"):
                 if key in card:
                     setattr(task, key, card[key])
+            if "updated_at" in card:
+                task.external_updated_at = card["updated_at"]
             task.labels = _merge_card_labels(task.labels, card, status_text)
-            if (task.title, task.summary, task.url, task.meta,
-                    task.labels) != before:
+            if snapshot() != before:
                 store.put_task(task)
                 updated += 1
     removed = 0
@@ -406,7 +450,8 @@ def _task_card(task: Task) -> dict:
         "id": task.id, "title": task.title, "summary": task.summary,
         "status": status_of(task.labels), "labels": list(task.labels),
         "external_id": task.external_id, "created_at": task.created_at,
-        "updated_at": task.updated_at, "meta": list(task.meta),
+        "updated_at": task.updated_at,
+        "external_updated_at": task.external_updated_at, "meta": list(task.meta),
         "task_id": task.id, "archived": bool(task.archived),
     }
     if task.url:

@@ -610,7 +610,10 @@ class Task:
     meta: list[str] = field(default_factory=list)   # 纯展示性附注文本
     archived: bool = False
     archived_at: float = 0.0
+    # 外部系统里的更新时间(Unix 秒,0 = 未提供),由同步卡片或 Agent 设置
+    external_updated_at: float = 0.0
     created_at: float = field(default_factory=now)
+    # MissionCrew 系统更新时间:每次写库自动刷新,不接受外部设置,兼作乐观锁版本
     updated_at: float = field(default_factory=now)
 
     @property
@@ -655,6 +658,7 @@ class Task:
             meta=[str(item) for item in raw.get("meta", []) or []],
             archived=bool(raw.get("archived", False)),
             archived_at=float(raw.get("archived_at", 0.0)),
+            external_updated_at=float(raw.get("external_updated_at") or 0.0),
             created_at=float(raw.get("created_at", now())),
             updated_at=float(raw.get("updated_at", now())),
         )

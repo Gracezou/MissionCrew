@@ -47,6 +47,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 body=body.body, labels=body.labels, channel_ids=body.channel_ids,
                 status=body.status, source=body.source, url=body.url,
                 meta=body.meta, external_id=body.external_id,
+                external_updated_at=body.external_updated_at,
             )
         except TaskConflictError as exc:
             raise HTTPException(409, str(exc)) from exc

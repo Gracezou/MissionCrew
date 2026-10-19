@@ -159,7 +159,10 @@ An orchestrator's turn:
   `task.delete`, never a partial `board_source.save` card list: that whole sync deletes every
   task with an `external_id` missing from it.
 - When a task copies an external item (such as an issue), pass `external_id` (the id the sync
-  cards use, e.g. the issue number) and `url` to `task.create`, in either kind of source. In a
+  cards use, e.g. the issue number), `url` and `external_updated_at` (the item's update time in
+  the external system: Unix seconds or ISO 8601 with a time zone) to `task.create`, in either
+  kind of source; boards show and sort by that time. `updated_at` is MissionCrew's own system
+  time, set on every write and never by you. In a
   custom source the next whole sync then updates that task instead of creating a duplicate, and
   deletes it once the item leaves the card list. `external_id` is unique within a source:
   `already_exists` returns the existing task in `error.details.task`, so update that one instead.
@@ -274,8 +277,9 @@ An orchestrator's turn:
 - `board_source.save` creates or updates a custom task data source: cards are synced by id as
   that source's tasks (added / updated / removed if absent this time; removal deletes the task and
   its briefs permanently, without the recycle bin); each card needs id (and title when it creates
-  a task), optionally summary, status, labels, properties, updated_at (Unix seconds), meta (an
-  array of strings) and url (external link). An existing task only changes what its card carries: omit status to
+  a task), optionally summary, status, labels, properties, updated_at (the item's update time in
+  the external system, stored as the task's `external_updated_at`), meta (an array of strings)
+  and url (external link). An existing task only changes what its card carries: omit status to
   keep the status set locally (new tasks default to the first status value); plain labels in
   `labels` replace the task's plain labels as a set (an empty or property-only `labels` clears
   them; omit `labels` to leave them alone), while `property: value` labels and

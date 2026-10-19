@@ -948,6 +948,9 @@
   .task-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
                       color: var(--muted); }
   .task-detail-meta a { color: var(--accent); text-decoration: none; }
+  .task-detail-times { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px;
+                       color: var(--muted); font-size: 12px; }
+  .task-detail-times b { color: var(--text-2); font-weight: 500; }
   .task-summary { color: var(--text-2); white-space: pre-wrap; }
   .task-body { padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px;
                background: var(--bg-soft); }

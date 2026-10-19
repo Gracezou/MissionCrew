@@ -240,3 +240,20 @@ const sorted = modes.map(mode => taskboardSortedCards(cards, mode));
     ]
     assert result["unchanged"] and result["copies"] and result["references"]
     assert result["empty"] == []
+
+
+def test_update_sorts_prefer_external_time_and_system_sort_ignores_it():
+    result = evaluate("""
+const cards = [
+  { id: 'a', updated_at: 50, external_updated_at: 10 },
+  { id: 'b', updated_at: 20, external_updated_at: 0 },
+  { id: 'c', updated_at: 5, external_updated_at: 40 },
+];
+({ updated: taskboardSortedCards(cards, 'updated_desc').map(card => card.id),
+   oldest: taskboardSortedCards(cards, 'updated_asc').map(card => card.id),
+   system: taskboardSortedCards(cards, 'system_updated_desc').map(card => card.id),
+   kept: normalizeTaskboardView({ sort: 'system_updated_desc' }, defaultTaskboardView('status')).sort });
+""")
+    # 外部时间优先,未提供(0)时退回系统更新时间:c=40, b=20, a=10
+    assert result == {"updated": ["c", "b", "a"], "oldest": ["a", "b", "c"],
+                      "system": ["a", "b", "c"], "kept": "system_updated_desc"}

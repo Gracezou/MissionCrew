@@ -18,6 +18,8 @@ class TaskCreate(BaseModel):
     url: Optional[str] = None      # 外部条目链接
     meta: Optional[list[str]] = None   # 看板卡片附注
     external_id: Optional[str] = None  # 外部条目 id(同源唯一,自定义源的整体同步键)
+    # 外部系统更新时间:Unix 秒或带时区的 ISO 8601;系统 updated_at 不可设置
+    external_updated_at: Optional[Union[float, str]] = None
 
 
 class TaskUpdate(BaseModel):
@@ -33,6 +35,7 @@ class TaskUpdate(BaseModel):
     url: Optional[str] = None
     meta: Optional[list[str]] = None
     external_id: Optional[str] = None   # "" 去掉同步键
+    external_updated_at: Optional[Union[float, str]] = None   # 0 或 "" 清空
 
 
 class TaskBriefInput(BaseModel):

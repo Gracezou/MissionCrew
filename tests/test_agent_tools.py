@@ -825,6 +825,19 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     task_file = Path(_config.env["MISSIONCREW_TASKS_DIR"]) / f"{task['id']}.md"
     assert "title: 补齐接口与权限测试" in task_file.read_text(encoding="utf-8")
 
+    # 外部更新时间可由 Agent 设置并出现在快照里;系统 updated_at 仍是版本号
+    stamped = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-external-time",
+        "arguments": {
+            "id": task["id"],
+            "snapshot_updated_at": updated.json()["result"]["task"]["updated_at"],
+            "external_updated_at": "1970-01-01T00:16:40Z",
+        },
+    })
+    assert stamped.status_code == 200, stamped.text
+    assert stamped.json()["result"]["task"]["external_updated_at"] == 1000.0
+    assert "external_updated_at: 1000.0" in task_file.read_text(encoding="utf-8")
+
     briefed = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "task.brief", "run_id": run_id, "request_id": "task-brief",
         "arguments": {

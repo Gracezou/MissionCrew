@@ -406,6 +406,8 @@ def _render_task(task: Task, briefs: list[dict] | None = None) -> str:
         **({"external_id": task.external_id} if task.external_id else {}),
         **({"url": task.url} if task.url else {}),
         **({"meta": task.meta} if task.meta else {}),
+        **({"external_updated_at": task.external_updated_at}
+           if task.external_updated_at else {}),
         "snapshot_updated_at": task.updated_at,
         "status_briefs": [
             {key: brief.get(key) for key in

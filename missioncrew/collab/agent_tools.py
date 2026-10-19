@@ -144,21 +144,29 @@ ACTION_DEFINITIONS = {
                             "external_id updates this task instead of creating another, and a "
                             "later card list without it deletes the task. Tasks without "
                             "external_id are never touched by the whole sync"),
+            "external_updated_at": ("optional update time of the item in the external "
+                                    "system: Unix seconds or ISO 8601 with a time zone "
+                                    "(e.g. 2026-10-19T08:00:00Z); the board shows it as the "
+                                    "task's update time and sorts by it. Distinct from "
+                                    "updated_at, which MissionCrew sets itself on every "
+                                    "write and cannot be set"),
         },
     },
     "task.update": {
         "description": ("Update a task's requirement fields with optimistic concurrency; the "
-                        "result's task carries the new updated_at for the next update"),
+                        "result's task carries the new updated_at (MissionCrew's own system "
+                        "update time, the version) for the next update"),
         "orchestrator_only": False,
         "arguments": {
             "id": "task id",
             "snapshot_updated_at": ("the task's updated_at as last read (tasks/ snapshot or a "
                                     "previous result); on version_conflict, error.details.task "
                                     "is the current task"),
-            "title/summary/body/status/labels/channel_ids/url/meta/external_id": (
+            "title/summary/body/status/labels/channel_ids/url/meta/external_id/"
+            "external_updated_at": (
                 "fields to update; labels replaces the whole label list; channel_ids [] "
-                "unbinds all; external_id \"\" removes the sync key (same rules as "
-                "task.create)"),
+                "unbinds all; external_id \"\" removes the sync key; external_updated_at "
+                "null clears it (same rules as task.create)"),
             "properties": ("set individual `property: value` labels without touching the rest, "
                            "e.g. {\"owner\": \"张三\", \"priority\": null}; a value may be a "
                            "string or an array, null clears the property; status wins if "
@@ -369,7 +377,9 @@ ACTION_DEFINITIONS = {
                       "tasks' external_id: tasks with an external_id absent from the list are "
                       "deleted, tasks without one are left alone. Each card needs id (title too when it creates a task), "
                       "optionally summary, status (status text), labels, properties, "
-                      "updated_at (Unix seconds), meta (array of strings) and url (external "
+                      "updated_at (the item's update time in the external system, stored as "
+                      "the task's external_updated_at: Unix seconds or ISO 8601 with a time "
+                      "zone), meta (array of strings) and url (external "
                       "link). Existing tasks only change "
                       "what a card carries: omit status to keep the local status (new tasks "
                       "default to the first status value); plain labels in labels replace the "
@@ -539,11 +549,12 @@ PEER_MESSAGE_PUBLISH = {
 ACTION_ARGUMENTS = {
     "task.create": {
         "title", "summary", "body", "labels", "channel_ids", "status", "source",
-        "url", "meta", "external_id",
+        "url", "meta", "external_id", "external_updated_at",
     },
     "task.update": {
         "id", "snapshot_updated_at", "title", "summary", "body", "status",
         "labels", "properties", "channel_ids", "url", "meta", "external_id",
+        "external_updated_at",
     },
     "task.brief": {"id", "content", "status"},
     "task.delete": {"id"},

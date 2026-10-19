@@ -84,7 +84,8 @@ function normalizeTaskboardView(raw, defaults) {
         groupBy: taskboardViewProperty(value.groupBy) ?? fallback.groupBy,
         scope: ["active", "archived", "all"].includes(value.scope)
           ? value.scope : fallback.scope,
-        sort: ["updated_desc", "updated_asc", "created_desc", "title_asc"].includes(value.sort)
+        sort: ["updated_desc", "updated_asc", "system_updated_desc", "created_desc", "title_asc"]
+          .includes(value.sort)
           ? value.sort : fallback.sort,
         hideEmpty: typeof value.hideEmpty === "boolean" ? value.hideEmpty : fallback.hideEmpty,
         collapsed,
@@ -181,6 +182,12 @@ function taskboardViewParams(view) {
   return params;
 }
 
+// 卡片的「更新时间」:外部系统提供的时间优先,没提供(0)时退回 MissionCrew 系统更新时间
+function taskboardCardUpdatedAt(card) {
+  const external = Number(card?.external_updated_at);
+  return Number.isFinite(external) && external > 0 ? external : card?.updated_at;
+}
+
 function taskboardSortedCards(cards, sort) {
   const items = Array.isArray(cards) ? [...cards] : [];
   const timestamp = value => {
@@ -188,14 +195,15 @@ function taskboardSortedCards(cards, sort) {
     const number = typeof value === "number" || typeof value === "string" ? Number(value) : NaN;
     return Number.isFinite(number) ? number : null;
   };
+  const time = card => sort === "created_desc" ? card?.created_at
+    : sort === "system_updated_desc" ? card?.updated_at : taskboardCardUpdatedAt(card);
   return items.sort((a, b) => {
     let order = 0;
     if (sort === "title_asc") {
       order = String(a?.title ?? "").localeCompare(String(b?.title ?? ""), "zh-CN",
         { sensitivity: "base", numeric: true });
     } else {
-      const field = sort === "created_desc" ? "created_at" : "updated_at";
-      const left = timestamp(a?.[field]), right = timestamp(b?.[field]);
+      const left = timestamp(time(a)), right = timestamp(time(b));
       // 缺少时间的卡片在两种时间方向下都置后,避免把坏值当成刚刚更新。
       order = left === null ? (right === null ? 0 : 1)
         : (right === null ? -1 : (sort === "updated_asc" ? left - right : right - left));

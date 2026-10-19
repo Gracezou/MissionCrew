@@ -97,9 +97,10 @@ def create_task(store: Store, project_id: str, *, title: object,
                 summary: object = "", body: object = "", labels: object = None,
                 channel_ids: object = None, status: object = None,
                 source: object = None, url: object = None, meta: object = None,
-                external_id: object = None, actor: str = "human",
-                fallback_channel_id: str = "") -> Task:
-    """新建 Task;url/meta/external_id 与同步卡片同一口径,内置源与自定义源都可带。
+                external_id: object = None, external_updated_at: object = None,
+                actor: str = "human", fallback_channel_id: str = "") -> Task:
+    """新建 Task;url/meta/external_id/external_updated_at 与同步卡片同一口径,
+    内置源与自定义源都可带。
 
     自定义源里带 external_id 的任务归整体同步管理:同 id 的卡片更新它,
     卡片列表里没有它时被删除。
@@ -108,6 +109,8 @@ def create_task(store: Store, project_id: str, *, title: object,
         raise ValueError("项目不存在")
     source_id = board_sources.require_source(store, project_id, source)
     external_id = _external_id(store, project_id, source_id, external_id)
+    external_time = board_sources.clean_timestamp(
+        external_updated_at, "external_updated_at")
     channels = task_channels(
         store, project_id, channel_ids if channel_ids is not None else [],
         fallback_channel_id=fallback_channel_id,
@@ -127,7 +130,7 @@ def create_task(store: Store, project_id: str, *, title: object,
         channel_ids=[channel.id for channel in channels],
         url=board_sources.clean_url(_text(url, "url")) if url is not None else "",
         meta=board_sources.clean_meta(meta) if meta is not None else [],
-        external_id=external_id,
+        external_id=external_id, external_updated_at=external_time,
     )
     store.put_task(task)
     store.audit(actor, "task_created", task.id, f"project={project_id}"
@@ -144,11 +147,16 @@ def update_task(store: Store, task: Task, *, snapshot_updated_at: object,
             or isinstance(snapshot_updated_at, bool)
             or abs(float(snapshot_updated_at) - task.updated_at) > 1e-6):
         raise ValueError("任务已被其他执行更新，请重新读取后再修改")
-    # 先校验会冲突的同步键,冲突时不留下改了一半的对象
+    # 先校验会冲突的同步键与时间格式,出错时不留下改了一半的对象
+    if "external_updated_at" in changes:   # null/空串/0 清空
+        external_time = board_sources.clean_timestamp(
+            changes["external_updated_at"], "external_updated_at")
     if "external_id" in changes:
         external_id = _external_id(store, task.project_id, task.source_id,
                                    changes["external_id"], exclude_task_id=task.id)
         task.external_id = external_id
+    if "external_updated_at" in changes:
+        task.external_updated_at = external_time
     if "url" in changes:
         task.url = board_sources.clean_url(_text(changes["url"], "url"))
     if "meta" in changes:

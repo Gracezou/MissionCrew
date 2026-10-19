@@ -474,7 +474,7 @@ def test_legacy_staged_task_is_migrated_to_issue(store):
     assert set(migrated.to_dict()) == {
         "id", "project_id", "title", "source_id", "external_id",
         "summary", "body", "labels", "channel_ids", "url", "meta",
-        "archived", "archived_at", "created_at", "updated_at",
+        "archived", "archived_at", "external_updated_at", "created_at", "updated_at",
     }
 
 
@@ -804,3 +804,52 @@ def test_task_board_exposes_activity_order_and_archive_filter(seeded):
     assert "function archiveTask" in tasks and "function restoreTask" in tasks
     assert "/archive" in tasks and "/restore" in tasks
     assert ".tb-filter-bar" in css and ".taskboard-host" in css and ".card.task-archived" in css
+
+
+def test_external_update_time_accepts_unix_seconds_and_zoned_iso_only():
+    clean = board_sources.clean_timestamp
+    assert clean(None, "t") == clean("", "t") == clean(0, "t") == 0.0
+    assert clean(1760860800, "t") == clean("1760860800", "t") == 1760860800.0
+    assert clean("2026-10-19T08:00:00Z", "t") == clean("2026-10-19T16:00:00+08:00", "t")
+    # 不带时区会差出数小时、毫秒会变成遥远的未来:都直接报错
+    for bad, message in [("2026-10-19 16:00:00", "缺少时区"), ("昨天", "不是合法时间"),
+                         (1760860800000, "不是毫秒"), (True, "Unix 秒"), (-1, "超出范围")]:
+        with pytest.raises(ValueError, match=message):
+            clean(bad, "t")
+
+
+def test_sync_stores_card_time_as_external_update_time_apart_from_system_time(seeded):
+    def sync(*cards):
+        return board_sources.sync_source_tasks(
+            seeded, "webshop", "gh", board_sources.validate_source_cards(list(cards)))
+
+    sync({"id": "gh-1", "title": "Issue", "updated_at": 1000})
+    task = seeded.list_tasks("webshop", source_id="gh")[0]
+    # 卡片时间不再被写库时间覆盖;系统更新时间由 MissionCrew 自己记录
+    assert task.external_updated_at == 1000.0 and task.updated_at > 1000.0
+    system = task.updated_at
+    assert sync({"id": "gh-1", "updated_at": 1000})["updated"] == 0
+    assert seeded.get_task(task.id).updated_at == system
+    # 只有外部时间变化也要写入;卡片不带 updated_at 时保留原值
+    assert sync({"id": "gh-1", "updated_at": "1970-01-01T00:33:20+00:00"})["updated"] == 1
+    assert sync({"id": "gh-1"})["updated"] == 0
+    assert seeded.get_task(task.id).external_updated_at == 2000.0
+
+
+def test_external_update_time_is_settable_but_system_time_is_not(seeded):
+    task = create_task(seeded, "webshop", title="外部 Issue",
+                       external_updated_at="1970-01-01T00:16:40Z")
+    assert task.external_updated_at == 1000.0
+    with pytest.raises(ValueError, match="缺少时区"):
+        update_task(seeded, task, snapshot_updated_at=task.updated_at,
+                    changes={"external_updated_at": "2026-10-19 08:00"})
+    update_task(seeded, task, snapshot_updated_at=task.updated_at,
+                changes={"external_updated_at": None})
+    assert seeded.get_task(task.id).external_updated_at == 0.0
+    with TestClient(create_app()) as client:
+        created = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "REST", "external_updated_at": 1000,
+            "updated_at": 5})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["external_updated_at"] == 1000.0 and body["updated_at"] > 5

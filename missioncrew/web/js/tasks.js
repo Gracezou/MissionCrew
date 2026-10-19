@@ -91,6 +91,20 @@ function renderBoard() {
   renderTaskboard(builtinTaskboardBinding());
 }
 
+// 两种更新时间分开展示:外部系统的时间由同步或 Agent 设置;系统更新时间由 MissionCrew
+// 在每次写入时自动记录,只读,也是编辑时的乐观锁版本。
+function taskTimesHtml(task) {
+  const time = seconds => new Date(seconds * 1000).toLocaleString();
+  const external = Number(task.external_updated_at) > 0;
+  return `<div class="task-detail-times">
+    <span title="外部系统里的更新时间，由数据源同步或 Agent 设置；看板按它排序">更新时间
+      <b>${external ? time(task.external_updated_at) : "未提供"}</b></span>
+    <span title="MissionCrew 自动记录：任务有任何修改或新简报都会刷新，不能手动设置">系统更新时间
+      <b>${time(task.updated_at)}</b></span>
+    <span title="任务在 MissionCrew 中创建的时间">创建时间 <b>${time(task.created_at)}</b></span>
+  </div>`;
+}
+
 async function openTask(id, updateRoute = true) {
   const detail = await api("GET", `/api/tasks/${id}`);
   const task = detail.task;
@@ -120,6 +134,7 @@ async function openTask(id, updateRoute = true) {
       <span>${channels || "未绑定 Channel"}</span>
       ${taskDisplayLabels(task).map(label => `<span class="badge">${esc(label)}</span>`).join("")}
     </div>
+    ${taskTimesHtml(task)}
     <h3>简介</h3><div class="task-summary">${esc(task.summary) || "暂无简介"}</div>
     <h3>正文</h3>
     <article class="task-body markdown-body">${task.body ? markdownPreviewHtml(task.body, { showFrontmatter: false }) : '<span class="empty">暂无正文</span>'}</article>

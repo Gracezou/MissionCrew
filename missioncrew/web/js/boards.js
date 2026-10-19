@@ -220,12 +220,15 @@ function matchLabelQuery(query, labels) {
 }
 
 /* 看板通用卡片:所有卡片都是任务,点击打开任务详情;带 url 的另给外链 ↗。
-   showStatus 时在标题后加状态药丸(列不是单个状态时才有信息量),颜色取 source 数据源的声明。 */
+   showStatus 时在标题后加状态药丸(列不是单个状态时才有信息量),颜色取 source 数据源的声明。
+   时间优先显示外部系统的更新时间,没有时显示 MissionCrew 系统更新时间并注明。 */
 function boardCardHtml(card, { showStatus = false, source = "built-in" } = {}) {
   const click = card.task_id
     ? `data-task-id="${esc(card.task_id)}" onclick="openTask(this.dataset.taskId)"`
     : (card.url ? `data-url="${esc(card.url)}" onclick="window.open(this.dataset.url,'_blank','noopener')"` : "");
-  const meta = [`更新 ${new Date(card.updated_at * 1000).toLocaleString()}`,
+  const external = Number(card.external_updated_at) > 0;
+  const updated = new Date((external ? card.external_updated_at : card.updated_at) * 1000);
+  const meta = [`${external ? "更新" : "系统更新"} ${updated.toLocaleString()}`,
                 ...(card.meta || [])];
   const labels = (card.labels || []).filter(l =>
     splitLabel(l)[0].toLowerCase() !== "status");
@@ -448,6 +451,7 @@ function taskboardFilterBarHtml(binding, data) {
         <label class="tb-display-row">列内排序<select aria-label="列内排序" data-tb-focus="sort"
           onchange="setTaskboardOption(this, 'sort', this.value)">
           ${option("updated_desc", "最近更新", view.sort)}${option("updated_asc", "最早更新", view.sort)}
+          ${option("system_updated_desc", "系统最近更新", view.sort)}
           ${option("created_desc", "最近创建", view.sort)}${option("title_asc", "标题 A–Z", view.sort)}
         </select></label>
         <label class="tb-option"><input type="checkbox" ${view.hideEmpty ? "checked" : ""}

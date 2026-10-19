@@ -139,7 +139,8 @@ function renderBoardContent(board) {
 }
 
 /* ---- 标签表达式:与 & 或 | 非 ! 与括号;标签不区分大小写,&&/|| 同义。
-   项与整串标签匹配(高级标签经归一化),`属性: *` 匹配带该属性的对象;
+   项与整串标签匹配(高级标签经归一化),不带冒号的项还命中以它为属性名的
+   高级标签(`owner` ≈ `owner | owner: *`),`属性: *` 匹配带该属性的对象;
    与服务端 core/label_query.py 同一套语义。 ---- */
 function compileLabelQuery(expr) {
   const tokens = [];
@@ -197,7 +198,8 @@ function compileLabelQuery(expr) {
       return ctx => ctx.props.has(wanted);
     }
     const wanted = normalizeLabel(token.raw).toLowerCase();
-    return ctx => ctx.labels.has(wanted);
+    // 属性名不含冒号,只有不带冒号的项可能命中 props
+    return ctx => ctx.labels.has(wanted) || ctx.props.has(wanted);
   };
   const matcher = parseOr();
   if (pos !== tokens.length) throw new Error("表达式有多余内容");
@@ -632,12 +634,12 @@ let columnEditorUid = 0;
 let columnDragRow = null;
 
 const LABEL_QUERY_SYNTAX = [
-  ["bug", "带有 bug 标签；与整个标签匹配，不区分大小写"],
+  ["bug", "带有 bug 标签，或带有 bug 属性（如 bug: P0）；不区分大小写"],
   ["priority: P0", "属性标签；冒号后的空格可省略"],
   ["owner: *", "带有 owner 属性，取值任意"],
   ["a & b", "同时满足，&& 等价"],
   ["a | b", "满足其一，|| 等价"],
-  ["!a", "不满足"],
+  ["!a", "不满足；如 !owner 筛出没有任何 owner 标签的任务"],
   ["(a | b) & !c", "括号分组；优先级 ! 高于 &，& 高于 |"],
 ];
 

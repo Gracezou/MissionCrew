@@ -259,8 +259,10 @@ An orchestrator's turn:
 - Task boards: `dashboard.save` with `kind: "taskboard"` and `source` (data source id: the
   built-in `built-in` or a custom source's short id). The board is split into columns by
   `filters`, each `{"title","query","color"}`, where query is a label expression (& | ! and
-  parentheses; `property: *` matches tasks with a label of that property); the status is just a
-  label such as `status: 待处理`, so `status: 处理中 & bug` works. You can also pass `group_by`
+  parentheses; `property: *` matches tasks with a label of that property, and a bare term
+  without a colon such as `owner` matches the plain label or any `owner: ...` label, so
+  `!owner` means "no owner"); the status is just a label such as `status: 待处理`, so
+  `status: 处理中 & bug` works. You can also pass `group_by`
   (e.g. `"owner"`) as the page's default grouping by that property's values (one column per value
   plus a trailing "unset" column); it covers every task in the board's scope, and filters do not
   narrow it. Without filters, default columns are generated from the data source's status values.

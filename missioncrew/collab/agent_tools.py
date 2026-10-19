@@ -327,7 +327,8 @@ ACTION_DEFINITIONS = {
                        "short id)"),
             "filters": ("taskboard filter column array [{title,query,color}]; query is a label "
                         "expression (& | ! and parentheses; `property: *` matches tasks with "
-                        "that property); when creating, defaults to status columns generated "
+                        "that property, and a bare term like `owner` also matches any "
+                        "`owner: ...` label); when creating, defaults to status columns generated "
                         "from the data source's status values"),
             "group_by": ("optional property name the board page groups columns by by default: "
                          "one column per value plus a trailing \"unset\" column, covering every "

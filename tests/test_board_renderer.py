@@ -275,6 +275,15 @@ return [builtinTaskboardFilterPayload([open, bug]),
     ]
 
 
+def test_frontend_label_query_matches_backend_semantics():
+    from missioncrew.core.label_query import matches
+    cases = [("owner", ["owner: 张三"]), ("!owner", ["owner: 张三"]), ("!owner", ["bug"]),
+             ("! 责任人 & ! agent-ready", ["bug"]), ("! 责任人 & ! agent-ready", ["责任人: 李四"]),
+             ("owner:", ["owner: x"]), ("owner: *", ["Owner: x"]), ("bug | crash", ["CRASH"])]
+    result = evaluate(f"return {json.dumps(cases)}.map(([q, labels]) => matchLabelQuery(q, labels));")
+    assert result == [matches(query, labels) for query, labels in cases]
+
+
 def test_column_draft_problems_flag_syntax_duplicates_and_empty_only_when_saving():
     result = evaluate("""
 const rows = [{ title: '', query: 'bug' }, { title: '', query: 'BUG ' },

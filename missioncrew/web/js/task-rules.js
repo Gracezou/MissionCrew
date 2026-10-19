@@ -248,8 +248,8 @@ function renderRuleConditionEditor() {
     host.innerHTML = `<textarea id="rule-expression-input" class="tb-advanced-query rule-expression-input"
         rows="3" spellcheck="false" maxlength="2000" aria-label="条件表达式"
         placeholder="例如 bug &amp; !status: 已完成" oninput="ruleExpressionInput(this)">${esc(state.expression)}</textarea>
-      <p class="tb-help">整串标签匹配（<code>bug</code>、<code>owner: 张三</code>），<code>属性: *</code>
-        表示已设置该属性；用 &amp;（且）、|（或）、!（非）与括号组合。</p>`;
+      <p class="tb-help">整串标签匹配（<code>bug</code>、<code>owner: 张三</code>）；不带冒号的
+        <code>owner</code> 还命中任意 owner 属性，<code>属性: *</code> 表示已设置该属性；用 &amp;（且）、|（或）、!（非）与括号组合。</p>`;
   }
   updateRuleExpression();
 }

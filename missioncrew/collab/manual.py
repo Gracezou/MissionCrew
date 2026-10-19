@@ -343,12 +343,14 @@ An orchestrator's turn:
   partial list, because tasks missing from `board_source.save` are deleted; keep card ids stable
   across runs (for example, the issue number).
 - `message.publish` inside a script triggers roles only when mentions is passed explicitly.
-  Automatic handling rules are separate from scripts: a human sets them with the ⚡ icon on a
-  task board column header (label query, instructions and roles). There is no Agent Tool action
-  for rules, so when asked to set one up, tell the human where it is. Every newly created Task
-  (by a human, `task.create` or a data source sync) whose labels match an enabled rule is
-  dispatched immediately, except tasks already in the 已完成 status; `task.create` then returns
-  `auto_dispatch`. Delete scripts with `automation.delete`.
+  Automatic handling rules are separate from scripts: a human sets them on the page (label
+  query, instructions and roles), either from the ⚡ icon on a task board column header or on the
+  "自动处理规则" page under the built-in task board in the sidebar. There is no Agent Tool action
+  for rules, so when asked to set one up, tell the human where it is and suggest the expression
+  and instructions. Rules cover every data source in the project; each newly created Task (by a
+  human, `task.create` or a data source sync) is dispatched by the first enabled rule, in list
+  order, whose expression matches its labels, except tasks already in the 已完成 status;
+  `task.create` then returns `auto_dispatch`. Delete scripts with `automation.delete`.
 
 ## 12. Recycle Bin (recycle.*)
 

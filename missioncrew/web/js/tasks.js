@@ -360,8 +360,8 @@ async function deleteTask(id) {
 /* ---------------- 看板配置与自动处理规则 ----------------
    内置看板 = 四个锁定状态列 + 项目自定义筛选列(task_board_filters,每列
    一个标签表达式)+ 默认分列属性(task_board_group_by),共享列从看板「显示选项」
-   的管理对话框修改;日常筛选和显示偏好由 boards.js 独立管理。规则(task_auto_rules)按表达式配置,从
-   列头的 ⚡ 图标进入(自定义面板的 taskboard 组件同入口)。 */
+   的管理对话框修改;日常筛选和显示偏好由 boards.js 独立管理。规则(task_auto_rules)的
+   列表页与编辑器在 task-rules.js,列头 ⚡ 与面板组件打开同一个编辑器。 */
 
 function projTaskRules() {
   return projObj()?.task_auto_rules || [];
@@ -371,10 +371,9 @@ function projTaskBoardFilters() {
   return projObj()?.task_board_filters || [];
 }
 
+// 看板列与规则按条件对应:比较规范写法,空格、&& 等书写差异不影响
 function ruleForQuery(query) {
-  return projTaskRules().find(rule =>
-    (rule.query || "").toLowerCase() === String(query || "").toLowerCase())
-    || null;
+  return projTaskRules().find(rule => sameRuleQuery(rule.query, query)) || null;
 }
 
 // 看板/规则配置都持久化在项目对象上,复用项目保存端点(未传字段保留现值)
@@ -391,83 +390,4 @@ async function persistTaskBoardConfig(patch) {
   });
   await loadOverview();
   renderBoard();
-}
-
-function openColumnRule(query) {
-  const rule = ruleForQuery(query);
-  openFormDialog(`自动处理规则 · ${query}`, `
-    <p class="muted" style="margin-top:0">新建 Task(含脚本同步的 Task)的标签
-      命中表达式「${esc(query)}」时,按下面的处理要求自动派发。输入 @ 从列表选择角色:
-      ${peerModeProject() ? "本项目没有主控,必须 @ 至少一个角色,多个角色各自启动。"
-                          : "单个角色直接执行(不经主控),多个角色由主控协调;不 @ 任何角色则交给项目主控。"}</p>
-    <div class="composer-wrap task-dispatch-wrap">
-      <div id="task-rule-input" class="task-dispatch-input" contenteditable="true"
-        role="textbox" aria-multiline="true" aria-label="处理要求"
-        data-placeholder="处理要求,可 @指定角色…(Enter 保存,Shift+Enter 换行)"></div>
-      <div id="task-rule-picker" class="task-dispatch-picker" role="listbox" hidden></div>
-    </div>
-    <label><input type="checkbox" id="tr-enabled"
-      ${rule ? (rule.enabled ? "checked" : "") : "checked"}> 启用本规则</label>`,
-    `<button class="action" data-query="${esc(query)}"
-       onclick="saveColumnRule(this.dataset.query)">保存规则</button>
-     ${rule ? `<button class="danger" data-query="${esc(query)}"
-       onclick="deleteColumnRule(this.dataset.query)">删除规则</button>` : ""}
-     <button class="ghost" onclick="cancelColumnRule()">取消</button>`);
-  bindComposerEvents("task-rule-input", "task-rule-picker",
-    () => saveColumnRule(query));
-  const box = document.getElementById("task-rule-input");
-  if (rule) {
-    // 旧规则只有 role_ids:合成 "@角色 " 前缀提及,保存后自然升级成结构化提及
-    let content = rule.prompt || "";
-    let mentions = rule.mentions || [];
-    if (!mentions.length && rule.role_ids?.length) {
-      let prefix = "";
-      mentions = rule.role_ids.map(id => {
-        const start = Array.from(prefix).length;
-        prefix += `@${id} `;
-        return { role_id: id, start, end: start + id.length + 1 };
-      });
-      content = prefix + content;
-    }
-    restoreComposerPayload(content, mentions, box);
-  } else {
-    setTimeout(() => box?.focus(), 60);
-  }
-}
-
-function cancelColumnRule() {
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-}
-
-async function saveColumnRule(query) {
-  const box = document.getElementById("task-rule-input");
-  const { content, mentions } = composerPayload(box);
-  const rules = projTaskRules().map(rule => ({ ...rule }));
-  const index = rules.findIndex(rule =>
-    (rule.query || "").toLowerCase() === query.toLowerCase());
-  const rule = {
-    query,
-    prompt: content,
-    mentions,
-    role_ids: [...new Set(mentions.map(item => item.role_id))],
-    enabled: document.getElementById("tr-enabled").checked,
-  };
-  if (index >= 0) rules[index] = rule; else rules.push(rule);
-  await persistTaskBoardConfig({ task_auto_rules: rules });
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-  toast(`表达式「${query}」的自动处理规则已保存`, "success");
-}
-
-async function deleteColumnRule(query) {
-  if (!await uiConfirm(`删除表达式「${query}」的自动处理规则?`)) return;
-  await persistTaskBoardConfig({
-    task_auto_rules: projTaskRules()
-      .filter(rule => (rule.query || "").toLowerCase() !== query.toLowerCase())
-      .map(rule => ({ ...rule })),
-  });
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-  toast("自动处理规则已删除", "success");
 }

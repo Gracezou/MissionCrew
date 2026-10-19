@@ -95,6 +95,7 @@ Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 
 - `GET /api/projects/<project>/boards`
 - `GET /api/projects/<project>/builtin_board/data`
 - `GET /api/projects/<project>/boards/<board-id>/data`
+- `GET /api/projects/<project>/task_rules/preview?query=<条件>&rule=<原条件>`
 - `POST /api/projects/<project>/boards`
 - `DELETE /api/projects/<project>/boards/<board-id>`
 - `POST /api/projects/<project>/widget_data`

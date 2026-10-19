@@ -438,6 +438,8 @@ function taskboardFilterBarHtml(binding, data) {
         </div>
         <hr>
         <button class="tb-menu-button" onclick="openTaskboardColumns(this)">管理自定义表达式列…</button>
+        <button class="tb-menu-button"
+          onclick="this.closest('details').open=false;openTaskRuleEditor()">新建自动处理规则…</button>
         <button class="tb-menu-button" data-tb-focus="reset-view" onclick="resetTaskboardView(this)">重置当前视图</button>
         <p class="tb-help">视图偏好在此浏览器中按项目和看板分别记住。</p>
       </div>

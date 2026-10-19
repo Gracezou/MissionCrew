@@ -1,6 +1,6 @@
 /* ---- URL 路由:/<项目>/<视图>[/<频道>](History API,干净 URL),
    刷新与前进后退都能还原;服务端对非 API 路径统一返回本页面 ---- */
-const TABS = ["chat", "board", "custom", "docs", "guidelines", "skills",
+const TABS = ["chat", "board", "custom", "task-rules", "docs", "guidelines", "skills",
               "automations", "recycle-bin", "proj", "runtime-status", "settings"];
 let routeApplying = false;
 
@@ -25,7 +25,9 @@ function parsePath() {
     } else if (resource.type === "tasks") {
       route.tab = "board"; route.task = id || null;
     } else if (resource.type === "dashboards") {
-      route.tab = !id || id === "tasks" ? "board" : "custom";
+      // 自动处理规则页挂在内置任务看板下:/dashboards/tasks/auto-rules
+      route.tab = !id || id === "tasks"
+        ? (id === "tasks" && rest[0] === "auto-rules" ? "task-rules" : "board") : "custom";
       route.dashboard = id || "tasks";
     } else if (resource.type === "guidelines") {
       route.tab = "guidelines"; route.guideline = id || null;
@@ -72,6 +74,7 @@ function currentTitleItem() {
       const board = projBoards().find(item => item.id === currentCustomBoard);
       return board ? (board.name || shortId(board.id)) : "自定义面板";
     }
+    case "task-rules": return "自动处理规则";
     case "docs":
       return docSelected ? docSelected.split("/").pop() : "文档";
     case "guidelines":
@@ -114,6 +117,8 @@ function syncUrl(push = true) {
     path = currentTaskId
       ? missionCrewResourceUrl(currentProject, "tasks", currentTaskId)
       : missionCrewResourceUrl(currentProject, "dashboards", "tasks");
+  if (currentTab === "task-rules")
+    path = missionCrewResourceUrl(currentProject, "dashboards", "tasks", "auto-rules");
   if (currentTab === "custom")
     path = missionCrewResourceUrl(currentProject, "dashboards",
       ...(currentCustomBoard ? [currentCustomBoard.replace(`${currentProject}:`, "")] : []));
@@ -303,7 +308,7 @@ async function setProject(id, updateRoute = true) {
   docViewer.reset();
   docExpanded.clear();
   closeTaskDialog(false);
-  renderSidebar(); renderBoard(); renderCustomBoards();
+  renderSidebar(); renderBoard(); renderCustomBoards(); renderTaskRulesPage();
   if (currentTab === "proj") renderProjSettings();
   if (currentTab === "docs") renderDocuments();
   else if (currentTab === "automations") renderAutomationPage(true);
@@ -328,6 +333,8 @@ function switchTab(tab) {
   document.getElementById("chat-view").style.display = tab === "chat" ? "flex" : "none";
   document.getElementById("board-view").style.display = tab === "board" ? "flex" : "none";
   document.getElementById("custom-view").style.display = tab === "custom" ? "block" : "none";
+  document.getElementById("task-rules-view").style.display =
+    tab === "task-rules" ? "block" : "none";
   document.getElementById("docs-view").style.display = tab === "docs" ? "block" : "none";
   document.getElementById("guidelines-view").style.display = tab === "guidelines" ? "block" : "none";
   document.getElementById("skills-view").style.display = tab === "skills" ? "block" : "none";
@@ -340,7 +347,7 @@ function switchTab(tab) {
     tab === "runtime-status" ? "block" : "none";
   document.getElementById("settings-view").style.display = tab === "settings" ? "block" : "none";
   // 全局设置是独立导航项；项目设置是 ⚙；项目内容位于可折叠分区。
-  // 任务看板是面板分区中的内置项，因此 board/custom 都激活面板标题。
+  // 任务看板是面板分区中的内置项，因此 board/custom/task-rules 都激活面板标题。
   document.getElementById("nav-settings").classList.toggle("active", tab === "settings");
   document.getElementById("nav-recycle-bin").classList.toggle(
     "active", tab === "recycle-bin");
@@ -349,7 +356,7 @@ function switchTab(tab) {
   document.getElementById("proj-cfg").classList.toggle("active", tab === "proj");
   document.getElementById("sec-channels").classList.toggle("active", tab === "chat");
   document.getElementById("sec-boards").classList.toggle(
-    "active", tab === "board" || tab === "custom");
+    "active", tab === "board" || tab === "custom" || tab === "task-rules");
   document.getElementById("sec-docs").classList.toggle("active", tab === "docs");
   document.getElementById("sec-guides").classList.toggle("active", tab === "guidelines");
   document.getElementById("sec-skills").classList.toggle("active", tab === "skills");
@@ -357,6 +364,7 @@ function switchTab(tab) {
   if (tab === "chat") void refreshChannelTasks();
   if (tab === "proj") renderProjSettings();
   if (tab === "custom") renderCustomBoards(true);
+  if (tab === "task-rules") renderTaskRulesPage(true);
   if (tab === "docs") renderDocuments();
   if (tab === "automations") renderAutomationPage(true);
   if (tab === "recycle-bin") renderRecycleBin();
@@ -449,7 +457,7 @@ async function loadOverview() {
   sel.innerHTML = overview.projects.map(p =>
     `<option value="${esc(p.id)}" ${p.id === currentProject ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("");
   roleColor = Object.fromEntries(projRoles().map(r => [r.id, r.color || "#888"]));
-  renderSidebar(); renderBoard(); renderCustomBoards();
+  renderSidebar(); renderBoard(); renderCustomBoards(); renderTaskRulesPage();
   if (currentTab === "docs" && docMode !== "new") renderDocuments(true);
   else if (currentTab === "automations") renderAutomationPage(true);
   else loadDocFiles().then(changed => { if (changed) renderSidebar(); });
@@ -503,11 +511,18 @@ function renderSidebar() {
   // 面板 -> 内置任务看板 + 项目自定义面板。
   const panels = projPanels();
   if (!_secState("boards", "board-list", "cnt-boards", panels.length)) {
+    // 自动处理规则是项目级配置,挂在内置任务看板下;有规则时才显示入口
+    const ruleCount = projTaskRules().length;
+    const rulesItem = ruleCount
+      ? `<div class="side-item panel-item panel-subitem ${currentTab === "task-rules" ? "selected" : ""}"
+              onclick="openTaskRulesPage()" title="新建任务命中条件时自动派发的规则">
+           <span class="panel-name">⚡ 自动处理规则</span><span class="panel-count">${ruleCount}</span></div>`
+      : "";
     const panelItems = panels.map(panel => panel.builtin
       ? `<div class="side-item panel-item ${currentTab === "board" ? "selected" : ""}"
               data-kind="tasks" data-id="${esc(panel.id)}"
               onclick="openPanelFromSidebar(this.dataset.kind,this.dataset.id)"
-              title="${esc(panel.description)}"><span class="panel-name">▦ ${esc(panel.name)}</span><span class="builtin-badge">内置</span></div>`
+              title="${esc(panel.description)}"><span class="panel-name">▦ ${esc(panel.name)}</span><span class="builtin-badge">内置</span></div>${rulesItem}`
       : `<div class="side-item panel-item ${panel.id === currentCustomBoard && currentTab === "custom" ? "selected" : ""}"
               data-kind="custom" data-id="${esc(panel.id)}"
               onclick="openPanelFromSidebar(this.dataset.kind,this.dataset.id)"

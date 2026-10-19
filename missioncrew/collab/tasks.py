@@ -348,6 +348,73 @@ def matching_auto_rule(project, task: Task):
     return None
 
 
+RULE_PREVIEW_LIMIT = 50
+MAX_RULE_QUERY_LENGTH = 2000
+
+
+def preview_auto_rule(store: Store, project, query: str,
+                      original_query: str = "",
+                      limit: int = RULE_PREVIEW_LIMIT) -> dict:
+    """规则编辑器预览:用当前未归档任务演示条件命中范围与实际处理归属。
+
+    规则只在任务新建时触发,这里按新建时同一口径标注每个命中任务的去向:
+    已完成的不派发;排在前面的启用规则先命中时由那条规则处理(取第一条命中)。
+    original_query 是正在编辑的规则原条件,决定它在规则列表中的位置;
+    新规则追加在末尾。labels 是本项目各数据源的标签全集,供条件编辑提示。
+    """
+    query = str(query or "").strip()
+    if len(query) > MAX_RULE_QUERY_LENGTH:
+        raise ValueError(f"条件最多 {MAX_RULE_QUERY_LENGTH} 个字符")
+    ast = label_query.parse(query) if query else None
+    rules = list(getattr(project, "task_auto_rules", []))
+    original = str(original_query or "").strip().lower()
+    position = next((index for index, rule in enumerate(rules)
+                     if original and rule.query.strip().lower() == original),
+                    len(rules))
+    earlier = []
+    for index, rule in enumerate(rules[:position]):
+        if not (rule.enabled and rule.query):
+            continue
+        try:
+            earlier.append((index, rule.query, label_query.parse(rule.query)))
+        except ValueError:
+            continue   # 与 matching_auto_rule 一致:非法表达式的规则永不命中
+
+    sources = board_sources.describe_sources(store, project.id, stats=False)
+    source_names = {item["id"]: item["name"] for item in sources}
+    tasks = store.list_tasks(project.id, include_archived=False)
+    labels = {label for task in tasks for label in task.labels}
+    labels.update(f"status: {value['value']}"
+                  for item in sources for value in item["status_values"])
+    labels.discard("")
+
+    matched, handled = [], 0
+    for task in tasks if ast is not None else []:
+        if not label_query.matches(ast, task.labels):
+            continue
+        outcome, shadowed_by = "handled", None
+        if status_of(task.labels) == DONE_STATUS:
+            outcome = "done"
+        else:
+            hit = next(((index, rule_query) for index, rule_query, rule_ast in earlier
+                        if label_query.matches(rule_ast, task.labels)), None)
+            if hit:
+                outcome = "shadowed"
+                shadowed_by = {"index": hit[0] + 1, "query": hit[1]}
+        handled += outcome == "handled"
+        matched.append({
+            "id": task.id, "title": task.title, "status": status_of(task.labels),
+            "labels": list(task.labels), "source": task.source_id,
+            "source_name": source_names.get(task.source_id, task.source_id),
+            "external_id": task.external_id, "updated_at": task.updated_at,
+            "outcome": outcome, "shadowed_by": shadowed_by,
+        })
+    return {"query": query, "position": position + 1,
+            "matched": len(matched), "handled": handled,
+            "tasks": matched[:limit], "truncated": len(matched) > limit,
+            "labels": sorted(labels, key=str.lower)}
+
+
 def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
     """新建 Task 命中自动处理规则时立即派发;派发失败不影响 Task 创建。"""
     project = store.get_project(task.project_id)

@@ -10,7 +10,8 @@ from ..collab.resource_urls import channel_resource_url, task_resource_url
 from ..core.models import BUILTIN_SOURCE_ID
 from ..collab.tasks import (TaskConflictError, TaskDispatchError, add_task_brief,
                             archive_task, auto_process_task, create_task,
-                            dispatch_task, restore_task, update_task)
+                            dispatch_task, preview_auto_rule, restore_task,
+                            update_task)
 from .context import ApiContext, etag_json_response
 from .schemas import TaskBriefInput, TaskCreate, TaskProcessInput, TaskUpdate
 
@@ -56,6 +57,16 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 "resource_url": task_resource_url(task.project_id, task.id),
                 "auto_dispatch": auto and {
                     "rule_query": auto["rule_query"], "sent": auto["sent"]}}
+
+    @app.get("/api/projects/{project_id}/task_rules/preview")
+    def task_rule_preview(project_id: str, query: str = "", rule: str = ""):
+        """自动处理规则编辑器预览(只读):命中条件的未归档任务及其实际处理归属;
+        rule 是正在编辑的规则原条件,缺省按新规则追加在末尾计算先后。"""
+        project = ctx.must_project(project_id)
+        try:
+            return preview_auto_rule(store, project, query, original_query=rule)
+        except ValueError as exc:
+            raise HTTPException(400, f"条件不合法: {exc}") from exc
 
     @app.get("/api/projects/{project_id}/tasks")
     def project_tasks(project_id: str, request: Request,

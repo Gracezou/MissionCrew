@@ -34,6 +34,8 @@ missioncrew/
                       任务看板渲染器同时服务内置任务看板与自定义任务看板,两者只差
                       绑定(数据端点/配置保存),个人视图状态(筛选/分列/折叠,存浏览器)
                       的纯数据转换在 taskboard-view.js,须先于 boards.js 加载;
+                      task-rules.js 是项目级自动处理规则的列表页与编辑器(看板 ⚡ 共用),
+                      条件与标签表达式互转的纯函数在 rule-condition.js;
                       tasks.js 只留任务详情与配置持久化;markdown.js
                       是共用的 Markdown 渲染,diagrams.js 按需加载 Mermaid 渲染其中的
                       图表)+ css/ + vendor/(第三方浏览器库原样落库,不走 CDN)

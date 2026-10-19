@@ -54,7 +54,9 @@ function uiPrompt(message, { value = "", placeholder = "", title = "请输入" }
     setTimeout(() => document.getElementById("udlg-input")?.focus(), 60);
   });
 }
-function openFormDialog(title, bodyHtml, actionsHtml) {
+// size: "wide" 给规则编辑器这类左右分栏的表单加宽,其余表单保持默认宽度
+function openFormDialog(title, bodyHtml, actionsHtml, { size = "" } = {}) {
+  fdlg.classList.toggle("dlg-wide", size === "wide");
   document.getElementById("fdlg-title").textContent = title;
   document.getElementById("fdlg-body").innerHTML = bodyHtml;
   document.getElementById("fdlg-actions").innerHTML = actionsHtml;

@@ -191,6 +191,18 @@
       </div>
     </div>
 
+    <!-- 自动处理规则:项目级规则列表,挂在内置任务看板下;只新建/编辑,不筛选分组 -->
+    <div id="task-rules-view" class="page">
+      <div class="section task-rules-head">
+        <div>
+          <h2>自动处理规则 <span class="muted" id="task-rules-count"></span></h2>
+          <p class="muted">新建任务（页面创建、Agent 的 task.create、数据源同步）时，按下面的顺序取第一条命中的启用规则自动派发；状态已是「已完成」的新任务不派发，已有任务改标签不会触发。规则对本项目所有数据源生效。</p>
+        </div>
+        <button class="action" onclick="openTaskRuleEditor()">＋ 新建规则</button>
+      </div>
+      <div class="section" id="task-rules-list"></div>
+    </div>
+
     <div id="proj-view" class="page">
       <div class="subnav">
         <a onclick="scrollToSec('sec-proj-info')">项目信息</a>
@@ -478,7 +490,9 @@
 <script src="/assets/js/sidebar.js"></script>
 <script src="/assets/js/tasks.js"></script>
 <script src="/assets/js/taskboard-view.js"></script>
+<script src="/assets/js/rule-condition.js"></script>
 <script src="/assets/js/boards.js"></script>
+<script src="/assets/js/task-rules.js"></script>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/projects.js"></script>
 <script src="/assets/js/settings-project.js"></script>

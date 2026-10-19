@@ -95,6 +95,7 @@ Main APIs:
 - `GET /api/projects/<project>/boards`
 - `GET /api/projects/<project>/builtin_board/data`
 - `GET /api/projects/<project>/boards/<board-id>/data`
+- `GET /api/projects/<project>/task_rules/preview?query=<condition>&rule=<original condition>`
 - `POST /api/projects/<project>/boards`
 - `DELETE /api/projects/<project>/boards/<board-id>`
 - `POST /api/projects/<project>/widget_data`

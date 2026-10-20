@@ -40,7 +40,7 @@ All subcommands read and write the same data directory: by default `~/.missioncr
 | Command | Description |
 |---|---|
 | `mc chat channels [-p project]` | Lists channels, including their project and working directory. |
-| `mc chat channels --create <name> -p <project> [--workdir dir]` | Creates a channel whose id is `<project>:<name>`. |
+| `mc chat channels --create <name> -p <project> [--workdir dir]` | Creates a channel whose id is `<project>:<name>`; a `/` in the name (sidebar grouping) becomes a hyphen in the id (`backend/api` → `backend-api`). |
 | `mc chat send "<content>" [-c channel] [-p project] [--author name] [--no-wait]` | Sends a message to a channel; the default channel is `general`. `@[role]` (with square brackets) in the content explicitly triggers that role to run, while a plain `@role` is just body text; if no role is mentioned, the message goes to the orchestrator. By default it waits until all runs triggered by this message (including cascades) finish, and prints the new messages produced in the meantime. |
 | `mc chat log [channel] [-p project] [--limit N]` | Shows the recent chat history of a channel. |
 

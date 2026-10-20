@@ -98,7 +98,7 @@ class AgentToolCallInput(BaseModel):
 
 
 class ChannelCreate(BaseModel):
-    id: str
+    id: str = ""      # 留空 = 由 name 推导(`group/topic` -> `group-topic`)
     name: str = ""
     project_id: Optional[str] = None
     workdir: Optional[str] = None

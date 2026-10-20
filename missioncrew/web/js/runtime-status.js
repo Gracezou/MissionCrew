@@ -105,7 +105,8 @@ function refreshRuntimeIndicators(data = runtimeStatusSnapshot) {
     }
   });
   document.querySelectorAll(".channel-background-marker").forEach(marker => {
-    const count = channelBackground.get(marker.dataset.channelId) || 0;
+    const count = markerChannelIds(marker).reduce(
+      (sum, id) => sum + (channelBackground.get(id) || 0), 0);
     marker.hidden = count === 0;
     if (count) {
       marker.title = backgroundTitle(count);

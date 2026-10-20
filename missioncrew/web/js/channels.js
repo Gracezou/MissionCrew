@@ -1,17 +1,22 @@
 /* ---- 频道(当前项目) ---- */
-function channelSidebarItem(channel) {
+// 频道内有排队/执行/等待用户的运行时亮起；轮询到新状态后就地更新，不必重绘侧栏。
+// attrs 是 data-channel-id(单个频道)或 data-channel-group(收起的分组,汇总组内频道)
+function channelMarkersHtml(attrs, runCount) {
+  return `<span class="channel-running-marker" ${attrs}
+    title="${channelRunningTitle(runCount)}" role="img"
+    aria-label="${channelRunningTitle(runCount)}" ${runCount ? "" : "hidden"}><i></i></span>`
+    // 后台命令(跨 turn 存活、不阻塞对话)另用沙漏标记,由 Runtime 状态轮询点亮
+    + `<span class="channel-background-marker" ${attrs} role="img" hidden>⏳</span>`;
+}
+
+// topic 非空表示条目在分组内:缩进并只显示 `/` 后的话题名
+function channelSidebarItem(channel, topic = "") {
   const general = channelIsGeneral(channel);
   // 归档频道只读、内容专属频道由平台维护,不能编辑;general 只能编辑,不能归档或删除
   const editable = !channel.archived && !channelIsContent(channel);
   const status = channel.archived ? `<span class="channel-state">已归档</span>` : "";
-  // 频道内有排队/执行/等待用户的运行时亮起；轮询到新状态后就地更新，不必重绘侧栏
-  const runCount = channelRunningCount(channel);
-  const runMarker = `<span class="channel-running-marker" data-channel-id="${esc(channel.id)}"
-    title="${channelRunningTitle(runCount)}" role="img"
-    aria-label="${channelRunningTitle(runCount)}" ${runCount ? "" : "hidden"}><i></i></span>`
-    // 后台命令(跨 turn 存活、不阻塞对话)另用沙漏标记,由 Runtime 状态轮询点亮
-    + `<span class="channel-background-marker" data-channel-id="${esc(channel.id)}"
-    role="img" hidden>⏳</span>`;
+  const runMarker = channelMarkersHtml(
+    `data-channel-id="${esc(channel.id)}"`, channelRunningCount(channel));
   const actions = !editable && general ? "" : `<span class="channel-item-actions">
     <button class="channel-more" type="button" aria-label="频道操作" title="频道操作"
       onclick="toggleChannelActions(event,this)">•••</button>
@@ -27,11 +32,90 @@ function channelSidebarItem(channel) {
         onclick="deleteChannel(this.dataset.channelId)">删除频道</button>`}
     </span>
   </span>`;
-  return `<div class="side-item channel-item ${channel.archived ? "archived" : ""} ${
+  return `<div class="side-item channel-item ${topic ? "channel-subitem" : ""} ${
+      channel.archived ? "archived" : ""} ${
       channel.id === currentChan && currentTab === "chat" ? "selected" : ""}"
       data-channel-id="${esc(channel.id)}" onclick="selectChannel(this.dataset.channelId)"
       title="${esc(channel.purpose || "")}">
-    <span class="channel-name"># ${esc(channel.name || channel.id)}</span>${runMarker}${status}${actions}</div>`;
+    <span class="channel-name"># ${esc(topic || channel.name || channel.id)}</span>${runMarker}${status}${actions}</div>`;
+}
+
+/* ---- 频道分组 ----
+   频道名里的 `/` 把频道归入侧栏分组:`backend/api` 显示在可折叠的 `backend` 分组下,
+   条目只写 `api`。只按第一个 `/` 分一层,组名或话题为空时不分组;页面对话频道名里
+   带文档路径,不参与分组。分组只影响侧栏展示,id、排序与频道其他行为都不变。 */
+function channelGroupParts(channel) {
+  const name = channel.name || "";
+  const at = name.indexOf("/");
+  if (at < 0 || channelIsContent(channel)) return null;
+  const group = name.slice(0, at).trim(), topic = name.slice(at + 1).trim();
+  return group && topic ? { group, topic } : null;
+}
+
+const channelGroupMemberIds = group => projChannels()
+  .filter(channel => channelGroupParts(channel)?.group === group).map(channel => channel.id);
+
+// 频道条目上的标记对应一个频道;收起的分组标题上的标记汇总组内全部频道
+const markerChannelIds = marker => marker.dataset.channelGroup === undefined
+  ? [marker.dataset.channelId] : channelGroupMemberIds(marker.dataset.channelGroup);
+
+// 收起的分组按「项目 + 组名」存浏览器,默认展开
+const collapsedChannelGroups = new Set(
+  JSON.parse(localStorage.getItem("mc.channelGroupsCollapsed") || "[]"));
+const channelGroupKey = group => JSON.stringify([currentProject, group]);
+
+function setChannelGroupCollapsed(group, collapsed) {
+  const key = channelGroupKey(group);
+  if (collapsed === collapsedChannelGroups.has(key)) return;
+  collapsed ? collapsedChannelGroups.add(key) : collapsedChannelGroups.delete(key);
+  localStorage.setItem("mc.channelGroupsCollapsed", JSON.stringify([...collapsedChannelGroups]));
+}
+
+function toggleChannelGroup(group) {
+  setChannelGroupCollapsed(group, !collapsedChannelGroups.has(channelGroupKey(group)));
+  renderSidebar();
+}
+
+// 选中(含链接直达)收起分组里的频道时展开该组,由调用方随后渲染侧栏
+function expandChannelGroupOf(channelId) {
+  const channel = overview.channels.find(item => item.id === channelId);
+  const parts = channel && channelGroupParts(channel);
+  if (parts) setChannelGroupCollapsed(parts.group, false);
+}
+
+// 分组出现在组内最靠前成员的位置,组内沿用列表排序(general 置顶、按最近活动)
+function channelSidebarHtml(channels) {
+  const rows = [], groups = new Map();
+  for (const channel of channels) {
+    const parts = channelGroupParts(channel);
+    if (!parts) { rows.push(channel); continue; }
+    if (!groups.has(parts.group)) {
+      const group = { name: parts.group, members: [] };
+      groups.set(parts.group, group);
+      rows.push(group);
+    }
+    groups.get(parts.group).members.push({ channel, topic: parts.topic });
+  }
+  return rows.map(row => row.members ? channelGroupHtml(row) : channelSidebarItem(row)).join("");
+}
+
+function channelGroupHtml(group) {
+  const closed = collapsedChannelGroups.has(channelGroupKey(group.name));
+  // 收起时当前频道不可见:分组标题改用强调色,运行标记也汇总到标题上
+  const holdsCurrent = currentTab === "chat"
+    && group.members.some(({ channel }) => channel.id === currentChan);
+  const runCount = group.members.reduce(
+    (sum, { channel }) => sum + channelRunningCount(channel), 0);
+  const head = `<div class="side-item side-tree-dir channel-group ${
+      closed && holdsCurrent ? "holds-current" : ""}"
+      data-group="${esc(group.name)}" onclick="toggleChannelGroup(this.dataset.group)"
+      role="button" aria-expanded="${!closed}" title="${closed ? "展开" : "收起"}分组">
+    <span class="caret">${closed ? "▸" : "▾"}</span>
+    <span class="channel-name">📁 ${esc(group.name)}</span>
+    ${closed ? channelMarkersHtml(`data-channel-group="${esc(group.name)}"`, runCount) : ""}
+    <span class="channel-group-count">${group.members.length}</span></div>`;
+  return head + (closed ? "" : group.members.map(
+    ({ channel, topic }) => channelSidebarItem(channel, topic)).join(""));
 }
 
 const channelRunningCount = channel => Number(channel?.active_run_count || 0);
@@ -42,7 +126,7 @@ function refreshChannelRunningMarkers() {
   const counts = new Map(overview.channels.map(
     channel => [channel.id, channelRunningCount(channel)]));
   document.querySelectorAll(".channel-running-marker").forEach(marker => {
-    const count = counts.get(marker.dataset.channelId) || 0;
+    const count = markerChannelIds(marker).reduce((sum, id) => sum + (counts.get(id) || 0), 0);
     marker.hidden = count === 0;
     if (count) {
       marker.title = channelRunningTitle(count);
@@ -279,8 +363,8 @@ function openChannelDialog() {
   const repoOpts = (projObj()?.repos || []).filter(r => r.path).map(r =>
     `<option value="${esc(r.path)}">${esc(r.name || r.id)} — ${esc(r.path)}</option>`).join("");
   openFormDialog("新建频道", `
-    <label>频道名(字母、数字、下划线、连字符)</label>
-    <input type="text" id="nc-id" placeholder="例如 backend-repo">
+    <label>频道名(字母、数字、下划线、连字符;用 / 归入侧栏分组)</label>
+    <input type="text" id="nc-id" placeholder="例如 backend-repo 或 backend/api">
     <label>频道用途/任务边界</label>
     <input type="text" id="nc-purpose" placeholder="例如：结算模块需求澄清与实现讨论">
     <label>工作目录(可选;默认平台内置工作区)</label>
@@ -293,10 +377,11 @@ function openChannelDialog() {
 }
 
 async function createChannel() {
-  const id = document.getElementById("nc-id").value.trim();
-  if (!id) { uiAlert("频道名不能为空"); return; }
+  const name = document.getElementById("nc-id").value.trim();
+  if (!name) { uiAlert("频道名不能为空"); return; }
+  // id 由服务端按名称推导:`backend/api` 的 id 是 `backend-api`
   await api("POST", "/api/chat/channels", {
-    id, name: id,
+    name,
     project_id: currentProject,
     purpose: document.getElementById("nc-purpose").value.trim(),
     workdir: document.getElementById("nc-workdir").value.trim() || null,
@@ -315,7 +400,7 @@ function openChannelEditDialog(id) {
     `<option value="${esc(r.path)}" ${r.path === channel.workdir ? "selected" : ""}>` +
     `${esc(r.name || r.id)} — ${esc(r.path)}</option>`).join("");
   openFormDialog(`编辑频道 #${channel.name || channel.id}`, `
-    <label>显示名称</label>
+    <label>显示名称(group/topic 形式归入侧栏分组)</label>
     <input type="text" id="ec-name" value="${esc(channel.name || "")}">
     <label>频道用途/任务边界</label>
     <input type="text" id="ec-purpose" value="${esc(channel.purpose || "")}">

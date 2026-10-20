@@ -40,7 +40,7 @@ MissionCrew 的日常操作在 Web 页面完成，频道、Task、文档、准�
 | 命令 | 说明 |
 |---|---|
 | `mc chat channels [-p 项目]` | 列出频道，含所属项目和工作目录。 |
-| `mc chat channels --create <名称> -p <项目> [--workdir 目录]` | 创建频道，id 为 `<项目>:<名称>`。 |
+| `mc chat channels --create <名称> -p <项目> [--workdir 目录]` | 创建频道，id 为 `<项目>:<名称>`；名称里用于侧栏分组的 `/` 在 id 中换成连字符（`backend/api` → `backend-api`）。 |
 | `mc chat send "<内容>" [-c 频道] [-p 项目] [--author 名字] [--no-wait]` | 向频道发消息，默认频道 `general`。内容中的 `@[角色]`（方括号）显式触发该角色执行，普通 `@角色` 只是正文；不 @ 任何角色则交给主控。默认等待本条消息触发的所有执行（含级联）结束，并打印期间产生的新消息。 |
 | `mc chat log [频道] [-p 项目] [--limit N]` | 查看频道最近的聊天记录。 |
 

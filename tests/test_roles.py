@@ -463,6 +463,18 @@ def test_channel_id_namespaced_by_project(client, seeded):
                        json={"id": "x", "project_id": "ghost"}).status_code == 400
 
 
+def test_channel_id_derived_from_grouped_name(client, seeded):
+    # 名称里的 `/` 只用于侧栏分组;不给 id 时由名称推导,`/` 换成连字符
+    r = client.post("/api/chat/channels",
+                    json={"name": "backend / api", "project_id": "webshop"})
+    assert r.status_code == 200
+    assert (r.json()["id"], r.json()["name"]) == ("webshop:backend-api", "backend / api")
+    assert client.post("/api/chat/channels", json={
+        "name": "backend/api", "project_id": "webshop"}).status_code == 400
+    assert client.post("/api/chat/channels", json={
+        "name": "/", "project_id": "webshop"}).status_code == 400
+
+
 def test_channel_archive_restore_and_delete_api(client, seeded):
     created = client.post("/api/chat/channels", json={
         "id": "release", "project_id": "webshop", "purpose": "发布讨论",
@@ -553,7 +565,7 @@ def test_channel_sidebar_exposes_filter_archive_restore_and_delete(client):
     assert "输入 @ 后从列表选择角色；单个角色直接执行，多个角色交给主控协调" in html
     assert "CHANNEL_FILTERS" in ui and "channelIsGeneral" in ui
     assert "channelActivity" in ui and "visibleProjChannels" in ui
-    assert "visibleProjChannels()" in router and "channelSidebarItem" in router
+    assert "visibleProjChannels()" in router and "channelSidebarHtml(chans)" in router
     for function in ("archiveChannel", "restoreChannel", "deleteChannel",
                      "renderChannelFilter", "renderChannelState"):
         assert f"function {function}" in channels

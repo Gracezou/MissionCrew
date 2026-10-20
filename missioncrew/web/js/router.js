@@ -505,7 +505,7 @@ function renderSidebar() {
   // 频道 -> 聊天
   const chans = visibleProjChannels();
   if (!_secState("channels", "chan-list", "cnt-channels", chans.length))
-    document.getElementById("chan-list").innerHTML = chans.map(channelSidebarItem).join("")
+    document.getElementById("chan-list").innerHTML = channelSidebarHtml(chans)
       || `<div class="empty" style="padding-left:20px">该筛选下暂无频道</div>`;
   renderChannelFilter();
   // 面板 -> 内置任务看板 + 项目自定义面板。

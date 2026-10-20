@@ -23,6 +23,12 @@ class ChannelChangeError(ValueError):
         self.code = code
 
 
+def channel_short_id(name: str) -> str:
+    """由频道名推导短 id:名称里的 ``/`` 只用于侧栏分组(``group/topic``),
+    id 仍限于字母、数字、下划线、连字符,各段改用连字符连接。"""
+    return "-".join(part.strip() for part in name.split("/") if part.strip())
+
+
 def _ensure_editable(channel: Channel) -> None:
     if channel.content_kind:
         raise ChannelChangeError(

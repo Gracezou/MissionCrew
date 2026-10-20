@@ -64,8 +64,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(400, "频道必须归属一个已存在的项目")
         project = ctx.must_project(body.project_id)
         actor = ctx.validate_orchestrator_actor(project, body.actor_role_id)
-        # 频道 id 以项目为命名空间,避免多项目下同名冲突
-        cid = ctx.namespaced_id(body.project_id, body.id, "频道")
+        # 频道 id 以项目为命名空间,避免多项目下同名冲突;不给 id 时由名称推导
+        cid = ctx.namespaced_id(
+            body.project_id, body.id or channel_ops.channel_short_id(body.name), "频道")
         if store.get_channel(cid):
             raise HTTPException(400, "频道已存在")
         c = Channel(id=cid, name=body.name or body.id,

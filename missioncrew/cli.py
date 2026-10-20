@@ -12,6 +12,7 @@ import yaml
 
 from .runtime import runtime_manager
 from .core import seed as seed_mod
+from .collab.channels import channel_short_id
 from .collab.chat import ChatEngine
 from .collab.recycle_bin import recycle_task
 from .collab.tasks import add_task_brief, create_task, dispatch_task
@@ -313,7 +314,7 @@ def chat_channels(create: Optional[str] = typer.Option(None, help="创建频道�
     if create:
         if not project or store.get_project(project) is None:
             raise typer.BadParameter("创建频道必须用 --project 指定已存在的项目")
-        cid = f"{project}:{create}"
+        cid = f"{project}:{channel_short_id(create)}"
         store.put_channel(Channel(id=cid, name=create, project_id=project,
                                   workdir=workdir))
         typer.echo(f"频道已创建: {cid}")

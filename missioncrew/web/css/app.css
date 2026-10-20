@@ -183,6 +183,13 @@
   .channel-more:hover { color: var(--accent); background: var(--accent-soft); }
   .channel-actions-menu { top: calc(100% + 3px); right: 0; width: 112px; }
   .channel-actions-menu .danger-text { color: var(--bad); }
+  /* 频道名 group/topic 归入可折叠分组:标题沿用文档目录的 caret 样式,组内条目缩进一级 */
+  .channel-group { display: flex; align-items: center; gap: 5px; }
+  .channel-group .caret { flex: none; }
+  .channel-group.holds-current { color: var(--accent); font-weight: 600; }
+  .channel-group-count { flex: none; margin-left: auto; padding-right: 8px;
+                         color: var(--muted); font-size: 11px; font-weight: 400; }
+  .channel-subitem { padding-left: 36px; }
   .panel-item .builtin-badge { flex: none; margin-left: auto; padding: 0 6px;
                                border: 1px solid var(--line); border-radius: 999px;
                                color: var(--muted); font-size: 10px; font-weight: 500; }

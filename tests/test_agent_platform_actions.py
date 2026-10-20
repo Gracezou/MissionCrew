@@ -342,6 +342,88 @@ def test_sidebar_channel_menu_offers_edit_where_allowed():
     assert content == [["archiveChannel", "归档频道"], ["deleteChannel", "删除频道"]]
 
 
+# 频道名 group/topic 的侧栏分组:装载真实的 channels.js,把渲染结果拆成逐行的摘要;
+# 浏览器里已收起 webshop 的 ops 分组,选中频道后再渲染一次
+_CHANNEL_GROUP_SCRIPT = r"""
+const fs = require("fs");
+const vm = require("vm");
+const channels = JSON.parse(fs.readFileSync(0, "utf8"));
+const stored = { "mc.channelGroupsCollapsed": JSON.stringify([JSON.stringify(["webshop", "ops"])]) };
+const context = {
+  localStorage: { getItem: key => stored[key] ?? null, setItem: (key, value) => { stored[key] = value; } },
+  document: { addEventListener() {} },
+  window: { addEventListener() {} },
+  esc: value => String(value ?? ""),
+  overview: { channels }, currentProject: "webshop", currentChan: "webshop:ops-deploy",
+  currentTab: "chat",
+};
+vm.createContext(context);
+const ui = fs.readFileSync(process.argv[1] + "/ui.js", "utf8");
+for (const name of ["channelIsGeneral", "channelIsContent"])
+  vm.runInContext(ui.match(new RegExp(`const ${name} = .*`))[0].replace("const", "var"), context);
+vm.runInContext(fs.readFileSync(process.argv[1] + "/channels.js", "utf8"), context);
+const rows = () => context.channelSidebarHtml(channels).split('<div class="side-item').slice(1)
+  .map(chunk => {
+    const classes = chunk.slice(0, chunk.indexOf('"')).trim().split(/\s+/);
+    const marker = chunk.match(/<span class="channel-running-marker"([^>]*)>/);
+    return [
+      chunk.match(/data-group="([^"]*)"/)?.[1] ?? chunk.match(/data-channel-id="([^"]*)"/)[1],
+      chunk.match(/<span class="channel-name">([^<]*)</)[1].trim(),
+      classes.filter(name => ["channel-subitem", "holds-current", "selected"].includes(name)),
+      chunk.match(/<span class="channel-group-count">(\d+)</)?.[1] ?? null,
+      marker ? !/\bhidden\b/.test(marker[1]) : null,
+    ];
+  });
+const collapsed = rows();
+context.expandChannelGroupOf("webshop:ops-deploy");
+process.stdout.write(JSON.stringify({ collapsed, expanded: rows(),
+                                      stored: stored["mc.channelGroupsCollapsed"] }));
+"""
+
+
+def test_sidebar_groups_channels_by_slash_in_name():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser renderers")
+    channels = [
+        {"id": "webshop:general", "name": "general"},
+        {"id": "webshop:backend-api", "name": "backend/api"},
+        {"id": "webshop:misc", "name": "misc"},
+        {"id": "webshop:backend-db", "name": " backend / db"},
+        {"id": "webshop:ops-deploy", "name": "ops/deploy", "active_run_count": 1},
+        {"id": "webshop:docs-x", "name": "文档 · design/arch.md",
+         "content_kind": "docs", "content_key": "design/arch.md"},
+        {"id": "webshop:edge", "name": "/edge"},
+    ]
+    result = subprocess.run(
+        [node, "-e", _CHANNEL_GROUP_SCRIPT,
+         str(Path(__file__).resolve().parents[1] / "missioncrew" / "web" / "js")],
+        input=json.dumps(channels), text=True, capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # 分组出现在第一个成员的位置,组内条目只写话题;页面对话频道与空组名不分组
+    head = [
+        ["webshop:general", "# general", [], None, False],
+        ["backend", "📁 backend", [], "2", None],
+        ["webshop:backend-api", "# api", ["channel-subitem"], None, False],
+        ["webshop:backend-db", "# db", ["channel-subitem"], None, False],
+        ["webshop:misc", "# misc", [], None, False],
+    ]
+    tail = [
+        ["webshop:docs-x", "# 文档 · design/arch.md", [], None, False],
+        ["webshop:edge", "# /edge", [], None, False],
+    ]
+    # 收起的分组藏起成员,标题标出含当前频道并汇总运行标记
+    assert data["collapsed"] == head + [
+        ["ops", "📁 ops", ["holds-current"], "1", True]] + tail
+    # 选中收起分组里的频道会展开该组,并记回浏览器
+    assert data["expanded"] == head + [
+        ["ops", "📁 ops", [], "1", None],
+        ["webshop:ops-deploy", "# deploy", ["channel-subitem", "selected"], None, True],
+    ] + tail
+    assert json.loads(data["stored"]) == []
+
+
 def test_document_history_lists_versions_and_reads_old_content(seeded):
     """普通角色也能读文档历史(与 document.publish 同权),只读不留回执。"""
     chat = ChatEngine(seeded)

@@ -296,7 +296,9 @@ ACTION_DEFINITIONS = {
     "channel.create": {
         "description": "Create a project channel (check with channel.list first that the id is free)",
         "orchestrator_only": True,
-        "arguments": {"id": "short channel id", "name": "name", "purpose": "purpose",
+        "arguments": {"id": "short channel id",
+                      "name": "name; 'group/topic' files it under a collapsible sidebar group",
+                      "purpose": "purpose",
                       "workdir": "optional project repository directory"},
     },
     "channel.update": {

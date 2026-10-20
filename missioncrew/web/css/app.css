@@ -191,11 +191,11 @@
                                        -webkit-mask: var(--icon) center / contain no-repeat;
                                        mask: var(--icon) center / contain no-repeat; }
   .channel-icon { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath transform='translate(2.5 2.5)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3C/svg%3E"); }
-  /* 双 #:前后两层各缩到 0.85,后层向右上错开(5, -4.5)、在与前层笔画交叉处留缝、0.85 不透明度,
+  /* 双 #:前层缩到 0.85、后层放大到 1.1,后层向右上错开、只在与前层笔画交叉处留缝、0.85 不透明度,
      大部分露在外面。画在 20 单位画布上、盒子 21px:前层 # 的中心与单个 # 重合(负上外边距),
-     右外边距 -4px 让组名比频道名右移 2px,给后层留出间距,也正好对齐组内频道的 # */
-  .channel-group-icon { width: 21px; height: 21px; margin: -5.74px -4px 0 0;
-    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23000' stroke-width='1.76' stroke-linecap='round'%3E%3Cmask id='m'%3E%3Crect width='20' height='20' fill='%23fff' stroke='none'/%3E%3Cpath transform='translate(2.47 7.58) scale(0.85)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2' stroke-width='3.41'/%3E%3C/mask%3E%3Cpath mask='url(%23m)' opacity='0.85' transform='translate(7.47 3.08) scale(0.85)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3Cpath transform='translate(2.47 7.58) scale(0.85)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3C/svg%3E"); }
+     右外边距 -3px 让组名比频道名右移 3px,给后层留出间距,也正好对齐组内频道的 # */
+  .channel-group-icon { width: 21px; height: 21px; margin: -5.74px -3px 0 0;
+    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23000' stroke-linecap='round'%3E%3Cmask id='m'%3E%3Crect width='20' height='20' fill='%23fff' stroke='none'/%3E%3Cpath transform='translate(2.47 7.58) scale(0.85)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2' stroke-width='3.41'/%3E%3C/mask%3E%3Cpath mask='url(%23m)' opacity='0.85' transform='translate(6.35 1.45) scale(1.1)' stroke-width='1.36' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3Cpath transform='translate(2.47 7.58) scale(0.85)' stroke-width='1.76' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3C/svg%3E"); }
   /* 频道名 group/topic 归入可折叠分组:三角挂在图标列左侧的留白里,分组图标与其他频道同列;
      组内条目缩进一级(42px),# 的字形起点与组名起点对齐 */
   .channel-group { position: relative; display: flex; align-items: center; gap: 5px; }

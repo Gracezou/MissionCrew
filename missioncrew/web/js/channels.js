@@ -107,7 +107,7 @@ function channelGroupHtml(group) {
     && group.members.some(({ channel }) => channel.id === currentChan);
   const runCount = group.members.reduce(
     (sum, { channel }) => sum + channelRunningCount(channel), 0);
-  // 折叠三角在图标列左侧的留白里,分组图标与组内、组外频道的 # 对齐在同一列
+  // 折叠三角在图标列左侧的留白里,分组图标与组外频道的 # 同列,组内频道缩进一级
   const head = `<div class="side-item channel-group ${
       closed && holdsCurrent ? "holds-current" : ""}"
       data-group="${esc(group.name)}" onclick="toggleChannelGroup(this.dataset.group)"

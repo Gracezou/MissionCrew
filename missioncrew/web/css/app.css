@@ -128,7 +128,8 @@
               user-select: none; border-radius: 6px; padding: 4px 6px; transition: all .15s; }
   .sec-head:hover { background: var(--card-2); color: var(--text); }
   .sec-head.active { color: var(--accent); }
-  .sec-head .caret { width: 16px; font-size: 12px; line-height: 1; transition: transform .15s; }
+  /* 侧栏的展开/收起三角(分区、频道分组、文档目录)统一 15px */
+  .sec-head .caret { width: 16px; font-size: 15px; line-height: 1; transition: transform .15s; }
   .sec-head .count { margin-left: auto; font-weight: 500; font-size: 11px;
                      background: var(--bg-soft); border-radius: 999px; padding: 0 7px; }
   .sec-head.active .count { background: var(--accent-soft); }
@@ -198,8 +199,8 @@
   /* 频道名 group/topic 归入可折叠分组:三角挂在图标列左侧的留白里,分组图标与其他频道同列;
      组内条目缩进一级(42px),# 的字形起点与组名起点对齐 */
   .channel-group { position: relative; display: flex; align-items: center; gap: 5px; }
-  .channel-group .caret { position: absolute; left: 6px; width: 14px; text-align: center;
-                          color: var(--muted); font-size: 10px; }
+  .channel-group .caret { position: absolute; left: 5px; width: 16px; text-align: center;
+                          color: var(--muted); font-size: 15px; line-height: 1; }
   .channel-group.holds-current { color: var(--accent); font-weight: 600; }
   .channel-group-count { flex: none; margin-left: auto; padding-right: 8px;
                          color: var(--muted); font-size: 11px; font-weight: 400; }
@@ -1375,7 +1376,8 @@
   .muted { color: var(--muted); font-size: 12px; }
 
   /* ---- 文档库:目录树在应用侧栏,主区只呈现当前文档 ---- */
-  .side-tree-dir .caret { display: inline-block; width: 13px; color: var(--muted); }
+  .side-tree-dir .caret { display: inline-block; width: 16px; color: var(--muted);
+                          font-size: 15px; line-height: 1; }
   .doc-pane { width: 100%; height: 100%; min-width: 0; min-height: 300px; overflow: auto;
               background: var(--card); border: 1px solid var(--line); border-radius: 12px;
               padding: 16px 20px; box-shadow: var(--shadow-sm); }

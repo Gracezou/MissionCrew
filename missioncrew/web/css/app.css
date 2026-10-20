@@ -183,13 +183,28 @@
   .channel-more:hover { color: var(--accent); background: var(--accent-soft); }
   .channel-actions-menu { top: calc(100% + 3px); right: 0; width: 112px; }
   .channel-actions-menu .danger-text { color: var(--bad); }
-  /* 频道名 group/topic 归入可折叠分组:标题沿用文档目录的 caret 样式,组内条目缩进一级 */
-  .channel-group { display: flex; align-items: center; gap: 5px; }
-  .channel-group .caret { flex: none; }
+  /* 频道图标列:单个 # 与分组的立体双 #,都用遮罩取 currentColor,随选中态与主题变色;
+     margin-top 把图标对齐到文字的视觉中线 */
+  .channel-icon, .channel-group-icon { flex: none; width: 15px; height: 15px; margin-top: -1px;
+                                       background: currentColor;
+                                       -webkit-mask: var(--icon) center / contain no-repeat;
+                                       mask: var(--icon) center / contain no-repeat; }
+  .channel-icon { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath transform='translate(2.5 2.5)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3C/svg%3E"); }
+  /* 双 # 画在 20 单位画布上:左下 16 单位与单个 # 的画布重合,前层 # 落在同一位置;后层向右上
+     错开、被前层整块挡住且半透明。盒子同比放大到 18.75px,负外边距把多出的右上部分挂出去,
+     占位仍是 15px,组名与频道名对齐 */
+  .channel-group-icon { width: 18.75px; height: 18.75px; margin: -4.75px -3.75px 0 0;
+    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round'%3E%3Cmask id='m' stroke='none'%3E%3Crect width='20' height='20' fill='%23fff'/%3E%3Crect x='1.55' y='5.75' width='12.9' height='12.5' rx='1.5' fill='%23000'/%3E%3C/mask%3E%3Cpath mask='url(%23m)' opacity='.6' transform='translate(7 2)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3Cpath transform='translate(2.5 6.5)' d='M4.6 .8 3.2 10.2M8.6 .8 7.2 10.2M1.2 3.6h9.2M.6 7.4h9.2'/%3E%3C/svg%3E"); }
+  /* 频道名 group/topic 归入可折叠分组:三角挂在图标列左侧的留白里,组内条目不缩进、
+     与其他频道同列,改由三角下方的竖线标出归属 */
+  .channel-group { position: relative; display: flex; align-items: center; gap: 5px; }
+  .channel-group .caret { position: absolute; left: 6px; width: 14px; text-align: center;
+                          color: var(--muted); font-size: 10px; }
   .channel-group.holds-current { color: var(--accent); font-weight: 600; }
   .channel-group-count { flex: none; margin-left: auto; padding-right: 8px;
                          color: var(--muted); font-size: 11px; font-weight: 400; }
-  .channel-subitem { padding-left: 36px; }
+  .channel-subitem::before { content: ""; position: absolute; left: 13px; top: 0; bottom: 0;
+                             border-left: 1px solid var(--line-strong); }
   .panel-item .builtin-badge { flex: none; margin-left: auto; padding: 0 6px;
                                border: 1px solid var(--line); border-radius: 999px;
                                color: var(--muted); font-size: 10px; font-weight: 500; }

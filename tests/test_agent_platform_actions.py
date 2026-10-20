@@ -403,23 +403,23 @@ def test_sidebar_groups_channels_by_slash_in_name():
 
     # 分组出现在第一个成员的位置,组内条目只写话题;页面对话频道与空组名不分组
     head = [
-        ["webshop:general", "# general", [], None, False],
-        ["backend", "📁 backend", [], "2", None],
-        ["webshop:backend-api", "# api", ["channel-subitem"], None, False],
-        ["webshop:backend-db", "# db", ["channel-subitem"], None, False],
-        ["webshop:misc", "# misc", [], None, False],
+        ["webshop:general", "general", [], None, False],
+        ["backend", "backend", [], "2", None],
+        ["webshop:backend-api", "api", ["channel-subitem"], None, False],
+        ["webshop:backend-db", "db", ["channel-subitem"], None, False],
+        ["webshop:misc", "misc", [], None, False],
     ]
     tail = [
-        ["webshop:docs-x", "# 文档 · design/arch.md", [], None, False],
-        ["webshop:edge", "# /edge", [], None, False],
+        ["webshop:docs-x", "文档 · design/arch.md", [], None, False],
+        ["webshop:edge", "/edge", [], None, False],
     ]
     # 收起的分组藏起成员,标题标出含当前频道并汇总运行标记
     assert data["collapsed"] == head + [
-        ["ops", "📁 ops", ["holds-current"], "1", True]] + tail
+        ["ops", "ops", ["holds-current"], "1", True]] + tail
     # 选中收起分组里的频道会展开该组,并记回浏览器
     assert data["expanded"] == head + [
-        ["ops", "📁 ops", [], "1", None],
-        ["webshop:ops-deploy", "# deploy", ["channel-subitem", "selected"], None, True],
+        ["ops", "ops", [], "1", None],
+        ["webshop:ops-deploy", "deploy", ["channel-subitem", "selected"], None, True],
     ] + tail
     assert json.loads(data["stored"]) == []
 

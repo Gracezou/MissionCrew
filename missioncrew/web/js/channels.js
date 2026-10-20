@@ -37,7 +37,8 @@ function channelSidebarItem(channel, topic = "") {
       channel.id === currentChan && currentTab === "chat" ? "selected" : ""}"
       data-channel-id="${esc(channel.id)}" onclick="selectChannel(this.dataset.channelId)"
       title="${esc(channel.purpose || "")}">
-    <span class="channel-name"># ${esc(topic || channel.name || channel.id)}</span>${runMarker}${status}${actions}</div>`;
+    <span class="channel-icon" aria-hidden="true"></span>
+    <span class="channel-name">${esc(topic || channel.name || channel.id)}</span>${runMarker}${status}${actions}</div>`;
 }
 
 /* ---- 频道分组 ----
@@ -106,12 +107,14 @@ function channelGroupHtml(group) {
     && group.members.some(({ channel }) => channel.id === currentChan);
   const runCount = group.members.reduce(
     (sum, { channel }) => sum + channelRunningCount(channel), 0);
-  const head = `<div class="side-item side-tree-dir channel-group ${
+  // 折叠三角在图标列左侧的留白里,分组图标与组内、组外频道的 # 对齐在同一列
+  const head = `<div class="side-item channel-group ${
       closed && holdsCurrent ? "holds-current" : ""}"
       data-group="${esc(group.name)}" onclick="toggleChannelGroup(this.dataset.group)"
       role="button" aria-expanded="${!closed}" title="${closed ? "展开" : "收起"}分组">
     <span class="caret">${closed ? "▸" : "▾"}</span>
-    <span class="channel-name">📁 ${esc(group.name)}</span>
+    <span class="channel-group-icon" aria-hidden="true"></span>
+    <span class="channel-name">${esc(group.name)}</span>
     ${closed ? channelMarkersHtml(`data-channel-group="${esc(group.name)}"`, runCount) : ""}
     <span class="channel-group-count">${group.members.length}</span></div>`;
   return head + (closed ? "" : group.members.map(

@@ -16,10 +16,6 @@ DONE_STATUS = "已完成"
 DISPATCHED_STATUS = "处理中"
 
 
-class TaskDispatchError(ValueError):
-    """多 Channel 派发只完成一部分时，保留已经产生的消息。"""
-
-
 class TaskConflictError(ValueError):
     """external_id 在同一数据源里已被另一个 Task 占用;existing 是那个 Task。"""
 
@@ -235,9 +231,13 @@ def _require_enabled_role(store: Store, project_id: str, role_id: str) -> None:
 def dispatch_task(store: Store, chat, task: Task, *, message: str = "",
                   mention_spans: Optional[list[dict]] = None,
                   target_role_ids: Optional[list[str]] = None,
+                  channel_id: str = "",
                   author: str = "human",
                   author_type: str = "human") -> tuple[list[dict], dict]:
-    """把 Task 作为普通 Channel 消息派发。
+    """把 Task 作为普通 Channel 消息派发到一个 Channel。
+
+    接收频道只有一个:``channel_id`` 指定的频道,缺省为首个绑定频道(无绑定
+    回退 general);所选频道未绑定时顺带绑定,Task 才会出现在该频道的任务列表里。
 
     三种派发形态:
     - ``mention_spans``:message 内含角色选择器生成的结构化提及,提及目标
@@ -295,51 +295,43 @@ def dispatch_task(store: Store, chat, task: Task, *, message: str = "",
         }]
         target_ids = [lead_id]
 
-    channels = task_channels(store, task.project_id, task.channel_ids)
-    if not channels:
+    picked = task_channels(store, task.project_id,
+                           [channel_id] if channel_id else task.channel_ids)
+    if not picked:
         raise ValueError("Task 派发需要至少一个可用 Channel")
-    task.channel_ids = [channel.id for channel in channels]
+    channel = picked[0]
+    previous_channels = list(task.channel_ids)
     previous_labels = list(task.labels)
+    if channel.id not in task.channel_ids:
+        task.channel_ids.append(channel.id)
     # 自定义源有自己的状态取值:没声明「处理中」时保持原状态,
     # 否则卡片会从按状态分列的看板上消失
     if board_sources.declares_status(
             store, task.project_id, task.source_id, DISPATCHED_STATUS):
         task.labels = with_status(task.labels, DISPATCHED_STATUS)
     store.put_task(task)
-    handled_by = "、".join(f"@{role_id}" for role_id in target_ids)
-    sent: list[dict] = []
     try:
-        for channel in channels:
-            message_id = chat.post(
-                channel.id, author, content, author_type=author_type,
-                mention_spans=legal_spans,
-            )
-            sent.append({"channel_id": channel.id, "message_id": message_id})
-    except ValueError as exc:
-        if sent:
-            store.add_task_brief(
-                task.id, "platform", "system",
-                f"已向 {len(sent)} 个 Channel 的 {handled_by} 派发；"
-                f"后续派发失败：{exc}",
-                status_of(task.labels),
-            )
-            store.put_task(task)
-            raise TaskDispatchError(str(exc)) from exc
-        else:
-            task.labels = previous_labels
-            store.put_task(task)
-            raise
+        message_id = chat.post(
+            channel.id, author, content, author_type=author_type,
+            mention_spans=legal_spans,
+        )
+    except ValueError:
+        task.channel_ids = previous_channels
+        task.labels = previous_labels
+        store.put_task(task)
+        raise
+    sent = [{"channel_id": channel.id, "message_id": message_id}]
 
+    handled_by = "、".join(f"@{role_id}" for role_id in target_ids)
     brief = store.add_task_brief(
         task.id, author, author_type,
-        f"已交给 {handled_by} 处理：" + "、".join(channel.name or channel.id
-                                                for channel in channels),
+        f"已交给 {handled_by} 处理：{channel.name or channel.id}",
         status_of(task.labels),
     )
     store.put_task(task)
     store.audit(author, "task_dispatched", task.id,
                 f"project={task.project_id} targets={','.join(target_ids)} "
-                f"channels={','.join(task.channel_ids)}")
+                f"channel={channel.id}")
     return sent, brief
 
 
@@ -433,7 +425,7 @@ def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
     if rule is None:
         return None
     try:
-        # 新规则带结构化提及,与人工"交给主控处理"同一通道;
+        # 新规则带结构化提及,与人工"交给角色处理"同一通道;
         # 旧规则只有 role_ids,平台生成 @前缀保持兼容
         sent, brief = dispatch_task(
             store, chat, task, message=rule.prompt,
@@ -441,7 +433,7 @@ def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
             target_role_ids=None if rule.mentions else rule.role_ids,
             author=TASK_RULE_AUTHOR, author_type="automation",
         )
-    except (TaskDispatchError, ValueError) as exc:
+    except ValueError as exc:
         store.add_task_brief(
             task.id, "platform", "system",
             f"自动处理规则(`{rule.query}`)派发失败：{exc}",

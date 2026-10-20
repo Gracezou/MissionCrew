@@ -70,7 +70,7 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 Task 是类似 Issue 的协作入口，事实源是平台数据库。它包含标题、简介、正文、状态、标签、一个或多个 Channel 绑定，以及多条追加式状态简报。直接访问 Task URL 会打开内置任务看板并展开详情；在聊天、文档等页面里点击本项目的 Task 链接只在当前页弹出详情窗口，不切换页面（按住 Ctrl/⌘ 点击仍在新标签页打开完整看板），其他项目的 Task 链接照常跳转。聊天页频道标题行右侧的「Task N」按钮显示绑定当前频道的未完成 Task 数，点击弹出悬浮的竖条列表，列出这些未归档 Task 的状态和标题（默认只显示未完成的，可切到全部），点条目同样弹出详情；频道没有关联 Task 时不显示按钮。
 
-Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 `task.create`、`task.update` 和 `task.brief` 修改事实源，项目主控使用 `task.delete` 删除；人类使用同一组 Web/API 字段。删除时 Task 与状态简报一起进入项目回收站，恢复后仍使用原 Task id。处理 Task 时，平台不启动独立执行引擎，而是在每个绑定 Channel 中发送普通消息：默认发给项目主控，带结构化提及或命中自动处理规则时发给指定角色，由既有 Channel 协作流程接管。
+Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 `task.create`、`task.update` 和 `task.brief` 修改事实源，项目主控使用 `task.delete` 删除；人类使用同一组 Web/API 字段。删除时 Task 与状态简报一起进入项目回收站，恢复后仍使用原 Task id。处理 Task 时，平台不启动独立执行引擎，而是只在一个 Channel 中发送普通消息：默认发给项目主控，带结构化提及或命中自动处理规则时发给指定角色，由既有 Channel 协作流程接管。接收频道默认是 Task 的首个绑定 Channel（没有绑定时用 `general`）；Task 详情里的「交给角色处理」可以改选项目内任一活跃 Channel，API 对应 `process` 请求的 `channel_id` 字段，选中未绑定的 Channel 时会同时把它加入 Task 的绑定。
 
 主要 API：
 

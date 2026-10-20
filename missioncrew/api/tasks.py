@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from ..collab.recycle_bin import recycle_task
 from ..collab.resource_urls import channel_resource_url, task_resource_url
 from ..core.models import BUILTIN_SOURCE_ID
-from ..collab.tasks import (TaskConflictError, TaskDispatchError, add_task_brief,
+from ..collab.tasks import (TaskConflictError, add_task_brief,
                             archive_task, auto_process_task, create_task,
                             dispatch_task, preview_auto_rule, restore_task,
                             update_task)
@@ -168,9 +168,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         try:
             sent, brief = dispatch_task(
                 store, ctx.chat, task, message=body.message,
-                mention_spans=[item.model_dump() for item in body.mentions])
-        except TaskDispatchError as exc:
-            raise HTTPException(409, f"Task 仅部分派发：{exc}") from exc
+                mention_spans=[item.model_dump() for item in body.mentions],
+                channel_id=body.channel_id)
         except ValueError as exc:
             raise HTTPException(
                 409 if "已归档" in str(exc) else 400, str(exc)) from exc

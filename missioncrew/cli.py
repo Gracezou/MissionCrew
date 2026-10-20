@@ -92,7 +92,7 @@ def demo(run: bool = typer.Option(True, help="是否顺带演示 Channel 派发"
         labels=["bug"], channel_ids=[],
     )
     sent, _ = dispatch_task(store, chat, task)
-    typer.echo(f"\nTask {task.id} 已发送到 {len(sent)} 个 Channel 的项目主控。")
+    typer.echo(f"\nTask {task.id} 已发送到 Channel {sent[0]['channel_id']} 的项目主控。")
     chat.wait_idle()
     for m in store.list_messages(task.channel_ids[0]):
         who = f"@{m['author']}" if m["author_type"] == "agent" else m["author"]
@@ -401,7 +401,7 @@ def task_create(project: str = typer.Option(..., "-p", "--project"),
                 meta: list[str] = typer.Option([], help="看板卡片附注,可重复"),
                 external_id: Optional[str] = typer.Option(
                     None, help="外部条目 id,同源唯一;自定义源的整体同步按它匹配"),
-                process: bool = typer.Option(False, help="创建后发送给绑定 Channel 的主控")):
+                process: bool = typer.Option(False, help="创建后发送给首个绑定 Channel 的主控")):
     store = _store()
     try:
         task = create_task(
@@ -414,20 +414,26 @@ def task_create(project: str = typer.Option(..., "-p", "--project"),
     typer.echo(f"任务已创建: {task.id}")
     if process:
         sent, _ = dispatch_task(store, ChatEngine(store), task)
-        typer.echo(f"已派发到 {len(sent)} 个 Channel")
+        typer.echo(f"已派发到 Channel {sent[0]['channel_id']}")
     _print_task(task)
 
 
 @task_app.command("process")
 def task_process(task_id: str,
-                 message: str = typer.Option("", "-m", "--message")):
-    """在每个绑定 Channel 中通知项目主控处理 Task。"""
+                 message: str = typer.Option("", "-m", "--message"),
+                 channel: str = typer.Option(
+                     "", "-c", "--channel", help="接收频道,缺省为首个绑定频道")):
+    """在一个 Channel 中通知项目主控处理 Task。"""
     store = _store()
     task = store.get_task(task_id)
     if task is None:
         raise typer.BadParameter("任务不存在")
-    sent, _ = dispatch_task(store, ChatEngine(store), task, message=message)
-    typer.echo(f"已派发到 {len(sent)} 个 Channel")
+    try:
+        sent, _ = dispatch_task(store, ChatEngine(store), task,
+                                message=message, channel_id=channel)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
+    typer.echo(f"已派发到 Channel {sent[0]['channel_id']}")
 
 
 @task_app.command("brief")

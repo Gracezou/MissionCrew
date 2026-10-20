@@ -151,7 +151,7 @@ async function openTask(id, updateRoute = true) {
   ];
   if (!task.archived && taskStatus(task) !== "已完成")
     actions.push(
-      `<button class="action" onclick="processTask('${task.id}')">交给主控处理</button>`);
+      `<button class="action" onclick="processTask('${task.id}')">交给角色处理</button>`);
   document.getElementById("dlg-actions").innerHTML = actions.join("");
   if (!dlg.open) dlg.showModal();
   if (updateRoute) syncUrl();
@@ -295,16 +295,32 @@ async function saveTaskBrief(id) {
   toast("状态简报已添加", "success");
 }
 
+// 派发只发到一个频道:可选项为项目全部活跃频道,默认首个绑定频道,无绑定时回退 general
+function taskDispatchChannelOptions(task) {
+  const active = projChannels().filter(channel => !channel.archived);
+  const bound = task.channel_ids.filter(id => active.some(channel => channel.id === id));
+  const selected = bound[0] || (active.find(channelIsGeneral) || active[0])?.id;
+  // 已绑定的排在前面并标注,选未绑定频道时后端会顺带绑定
+  const ordered = [...active].sort((a, b) =>
+    Number(!bound.includes(a.id)) - Number(!bound.includes(b.id)));
+  return ordered.map(channel => `<option value="${esc(channel.id)}"
+    ${channel.id === selected ? "selected" : ""}>#${esc(channel.name || channel.id)}${
+      bound.includes(channel.id) ? " · 已绑定" : ""}</option>`).join("");
+}
+
 function processTask(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   closeTaskDialog(false);
   const peer = peerModeProject();
-  openFormDialog(`${peer ? "派发给角色" : "交给主控处理"} · ${task.id}`, `
-    <p class="muted" style="margin-top:0">将在所有绑定 Channel 中发送这条 Task。
+  openFormDialog(`交给角色处理 · ${task.id}`, `
+    <p class="muted" style="margin-top:0">只在所选的一个 Channel 中发送这条 Task,选未绑定的 Channel 会同时绑定它。
       ${peer ? "本项目没有主控:输入 @ 从列表选择处理角色(必填),多个角色各自启动。"
              : "可补充处理要求;输入 @ 从列表选择角色可指定处理人:单个角色直接执行" +
                "(不经主控),多个角色由主控协调。不 @ 任何角色则交给项目主控。"}</p>
+    <label>接收 Channel</label>
+    <select id="task-dispatch-channel">${taskDispatchChannelOptions(task)}</select>
+    <label>处理要求</label>
     <div class="composer-wrap task-dispatch-wrap">
       <div id="task-dispatch-input" class="task-dispatch-input" contenteditable="true"
         role="textbox" aria-multiline="true" aria-label="处理要求"
@@ -331,14 +347,17 @@ async function submitProcessTask(id) {
     uiAlert("本项目没有主控，请 @ 指定处理角色。");
     return;
   }
-  await api("POST", `/api/tasks/${id}/process`, { message: content, mentions });
+  const channel_id = document.getElementById("task-dispatch-channel").value;
+  if (!channel_id) { uiAlert("请先选择接收 Channel"); return; }
+  await api("POST", `/api/tasks/${id}/process`, { message: content, mentions, channel_id });
   activateComposer("input", "mention-picker");
   fdlg.close();
   await loadOverview();
   await openTask(id, false);
+  const where = `#${projChannels().find(channel => channel.id === channel_id)?.name || channel_id}`;
   const named = [...new Set(mentions.map(item => `@${item.role_id}`))];
-  toast(named.length ? `Task 已派发给 ${named.join("、")}`
-    : "Task 已发送给绑定 Channel 的主控", "success");
+  toast(named.length ? `Task 已在 ${where} 派发给 ${named.join("、")}`
+    : `Task 已发送给 ${where} 的主控`, "success");
 }
 
 async function archiveTask(id) {

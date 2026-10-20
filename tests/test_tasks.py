@@ -178,33 +178,60 @@ def test_task_archive_hides_and_freezes_until_restored(seeded, tmp_path):
         }).status_code == 200
 
 
-def test_processing_task_posts_to_each_bound_channel_and_triggers_lead(seeded):
+def test_processing_task_posts_only_to_first_bound_channel_and_triggers_lead(seeded):
     seeded.put_channel(Channel(
         id="webshop:delivery", name="交付", project_id="webshop"))
     task = create_task(
         seeded, "webshop", title="发布结算改版",
         summary="准备灰度发布", body="确认监控与回滚方案；@[dev] 只是正文引用。",
-        channel_ids=["general", "webshop:delivery"],
+        channel_ids=["webshop:delivery", "general"],
     )
     chat = ChatEngine(seeded, max_workers=2)
     sent, brief = dispatch_task(
         seeded, chat, task, message="优先确认回滚开关。")
     chat.wait_idle()
 
-    assert {item["channel_id"] for item in sent} == {
-        "general", "webshop:delivery"}
+    # 多个绑定频道也只发一条:未指定时取首个绑定频道
+    assert [item["channel_id"] for item in sent] == ["webshop:delivery"]
+    assert seeded.list_messages("general") == []
     assert brief["status"] == "处理中"
+    assert "交付" in brief["content"]
     assert seeded.get_task(task.id).status == "处理中"
-    for item in sent:
-        message = seeded.get_message(item["message_id"])
-        assert f"@lead 请处理 Task [{task.id}" in message["content"]
-        assert "优先确认回滚开关" in message["content"]
-        assert json.loads(message["mentions"]) == ["lead"]
-        runs = seeded._query(
-            "SELECT role_id FROM chat_runs WHERE trigger_message_id=?",
-            (item["message_id"],),
-        )
-        assert [row["role_id"] for row in runs] == ["lead"]
+    message = seeded.get_message(sent[0]["message_id"])
+    assert f"@lead 请处理 Task [{task.id}" in message["content"]
+    assert "优先确认回滚开关" in message["content"]
+    assert json.loads(message["mentions"]) == ["lead"]
+    runs = seeded._query(
+        "SELECT role_id FROM chat_runs WHERE trigger_message_id=?",
+        (sent[0]["message_id"],),
+    )
+    assert [row["role_id"] for row in runs] == ["lead"]
+
+
+def test_processing_task_to_selected_channel_binds_it(seeded):
+    seeded.put_channel(Channel(
+        id="webshop:delivery", name="交付", project_id="webshop"))
+    seeded.put_channel(Channel(
+        id="webshop:old", name="旧频道", project_id="webshop", archived=True))
+    task = create_task(
+        seeded, "webshop", title="补充回归用例", channel_ids=["general"])
+    with TestClient(create_app()) as client:
+        rejected = client.post(f"/api/tasks/{task.id}/process",
+                               json={"channel_id": "webshop:old"})
+        assert rejected.status_code == 409 and "已归档" in rejected.json()["detail"]
+        assert seeded.get_task(task.id).channel_ids == ["general"]
+
+        response = client.post(f"/api/tasks/{task.id}/process",
+                               json={"message": "", "channel_id": "delivery"})
+        assert response.status_code == 200
+        body = response.json()
+    assert [item["channel_id"] for item in body["sent"]] == ["webshop:delivery"]
+    # 选中未绑定频道时追加绑定,原有绑定保留,但原频道不再收到消息
+    assert body["task"]["channel_ids"] == ["general", "webshop:delivery"]
+    assert seeded.list_messages("general") == []
+    delivered = seeded.list_messages("webshop:delivery")
+    assert delivered[0]["id"] == body["sent"][0]["message_id"]
+    assert delivered[0]["author_type"] == "human"
 
 
 def test_processing_task_with_mentions_dispatches_named_role_directly(seeded):

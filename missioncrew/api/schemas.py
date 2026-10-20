@@ -53,6 +53,8 @@ class TaskProcessInput(BaseModel):
     message: str = ""
     # message 内由角色选择器生成的结构化提及;为空时按默认流程交给项目主控
     mentions: list[MessageMentionInput] = Field(default_factory=list, max_length=50)
+    # 接收派发消息的唯一频道;为空时用 Task 的首个绑定频道
+    channel_id: str = Field(default="", max_length=200)
 
 
 class AutomationInput(BaseModel):

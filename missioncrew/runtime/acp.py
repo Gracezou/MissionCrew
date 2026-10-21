@@ -9,6 +9,10 @@ JSON-RPC 服务挂在 stdio 上(换行分隔的 JSON-RPC 2.0)。流程:
     推理力度(effort)若不在 serve 命令里,则按 ACP 标准的会话配置项在会话内
     切换:session/new|load 应答的 configOptions 中 category=thought_level 的
     选项(kimi 的 `thinking`)即档位,每轮 prompt 前 set_config_option 对齐;
+    项目额外目录若不在 serve 命令里,则随 session/new|load 的
+    additionalDirectories 传入(agent 声明了 sessionCapabilities.additionalDirectories);
+    回合结束时把 session/prompt 响应的 usage 与最近一次 usage_update 归一成
+    usage/v1 过程事件;
     agent 反向发来的 session/request_permission 必须应答(选它提供的安全
     选项),否则 agent 会阻塞到内部超时,任务假死。
 """
@@ -44,6 +48,13 @@ _TERMINAL_OUTPUT_LIMIT = 128 * 1024
 # turn 之外的自发 session/update(如 Grok 后台任务结束后的自动汇报)按
 # 静默间隔去抖:这么久没有新事件就认为该自发 turn 已结束,整体交付
 _WAKE_DEBOUNCE_SECONDS = 3.0
+
+# ACP 用量(规范中仍标 unstable):session/prompt 响应的 usage 是该次 prompt
+# 的用量,inputTokens 含缓存读写;usage_update 通知给当前上下文占用 used、
+# 窗口 size 与会话累计 cost{amount,currency}。厂商私有扩展不在这里解析。
+ACP_USAGE_FIELDS = {"input": "inputTokens", "cache_read": "cachedReadTokens",
+                    "cache_write": "cachedWriteTokens", "output": "outputTokens",
+                    "reasoning": "thoughtTokens", "total": "totalTokens"}
 
 # 平台注册的自唤醒回调:客户端终端里的后台任务结束后,支持自发汇报的
 # Runtime(Grok 的 task_completed 扩展等)会在 turn 之外产出输出,经此
@@ -174,6 +185,10 @@ class _AcpClient:
         # session/new|load 自报的推理力度配置项 id(ACP category=thought_level,
         # kimi 为 "thinking");空 = 该 Runtime 不经会话配置项切换档位
         self.thought_level_option = ""
+        # 工具声明的私有用量解析(session/prompt 响应 -> usage/v1 片段);None = 只认标准字段
+        self.parse_usage: Optional[Callable[[dict], dict]] = None
+        # 本轮最近一次 usage_update(上下文占用/窗口/会话累计费用)
+        self.context_usage: dict = {}
         self._raw_emit = emit or (lambda kind, text: None)
         try:
             permissions = json.loads(env.get("MISSIONCREW_RUNTIME_PERMISSIONS", "{}"))
@@ -220,6 +235,7 @@ class _AcpClient:
         self._turn_active = True
         self.deadline = time.time() + timeout if timeout is not None else None
         self.chunks = []
+        self.context_usage = {}
         self._raw_emit = emit or (lambda kind, text: None)
         with self._detached_lock:
             self._tool_inputs = {}
@@ -281,6 +297,16 @@ class _AcpClient:
                 return
             update = params.get("update") or {}
             kind = update.get("sessionUpdate")
+            if (kind == "agent_message_chunk" and isinstance(meta, dict)
+                    and meta.get("parentToolCallId")):
+                # 子代理(task 工具)与主代理共用 sessionId,只靠 parentToolCallId
+                # 区分(traecli 实测)。子代理正文已作为工具结果交回主代理;并入
+                # 回复会与主代理及并行子代理的流式分片逐字交错,只当过程事件展示
+                kind = "agent_thought_chunk"
+            if kind == "usage_update":
+                # 只记最新状态,回合结束时随本轮用量一起上报;不进唤醒缓冲
+                self.context_usage = update
+                return
             # 消息/思考块的 content 是 {type,text};tool_call 类更新的 content 按
             # ACP 约定是内容块列表,不能当 dict 用
             content = update.get("content")
@@ -580,7 +606,13 @@ class _AcpClient:
             except queue.Empty:
                 raise AcpError(f"{method} 超时")
             if "error" in msg:
-                detail = msg["error"].get("message", msg["error"]) if isinstance(msg["error"], dict) else msg["error"]
+                error = msg["error"]
+                detail = error.get("message", error) if isinstance(error, dict) else error
+                # traecli 的 message 只有通用的 "Invalid params",具体原因在
+                # 字符串 data 里(如 Unsupported reasoning effort for selected model)
+                data = error.get("data") if isinstance(error, dict) else None
+                if isinstance(data, str) and data and data not in str(detail):
+                    detail = f"{detail}: {data}"
                 raise AcpError(f"{method} 失败: {detail}")
             return msg.get("result") or {}
         finally:
@@ -648,8 +680,10 @@ def _session_lock(session_key: str) -> threading.Lock:
         return _SESSION_LOCKS.setdefault(session_key, threading.Lock())
 
 
-def _client_signature(cmd: list[str], workdir: str, env: dict) -> tuple:
-    # ACP serve 进程启动后不能更新环境；项目目录权限已渲染进 cmd，其余平台
+def _client_signature(cmd: list[str], workdir: str, env: dict,
+                      additional_dirs: tuple[str, ...] = ()) -> tuple:
+    # ACP serve 进程启动后不能更新环境；项目目录权限渲染进 cmd 或经协议的
+    # additionalDirectories 传入(只在建会话时生效,变化同样要换进程)，其余平台
     # 环境只比较稳定的 MISSIONCREW_*。旧调用方可能仍传逐轮 run id；它由
     # Agent Tool 的 run-scoped token 取代，不能因此打断长驻会话。
     platform_env = tuple(sorted(
@@ -657,7 +691,7 @@ def _client_signature(cmd: list[str], workdir: str, env: dict) -> tuple:
         if key.startswith("MISSIONCREW_")
         and key != "MISSIONCREW_AGENT_RUN_ID"
     ))
-    return tuple(cmd), workdir, platform_env
+    return tuple(cmd), workdir, platform_env, tuple(additional_dirs)
 
 
 def _drop_live_session(session_key: str, expected: Optional[_LiveSession] = None) -> None:
@@ -818,21 +852,33 @@ def _thought_level_option(result: dict) -> tuple[str, list[str]]:
 def _new_or_load_session(client: _AcpClient, workdir: str,
                          requested_session_id: str,
                          initialize_result: dict,
-                         load_meta: Optional[dict] = None) -> tuple[str, bool]:
+                         load_meta: Optional[dict] = None,
+                         additional_dirs: Optional[list[str]] = None
+                         ) -> tuple[str, bool]:
     """返回 (会话 id, 是否成功恢复)。不支持/无法 load 时创建新会话。
 
     顺带记下应答里的推理力度配置项 id(client.thought_level_option),供
     每轮 prompt 前按 effort 切换档位。
     """
     capabilities = initialize_result.get("agentCapabilities") or {}
-    can_load = bool(isinstance(capabilities, dict)
-                    and capabilities.get("loadSession") is True)
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    can_load = capabilities.get("loadSession") is True
+    # 会话级额外目录:agent 声明 sessionCapabilities.additionalDirectories(空对象
+    # 即支持)时随 session/new|load 传入,load 时以本次传入的清单为准(traecli
+    # 实测);未声明的工具不在协议里传,只靠 serve 命令行参数授权。
+    session_caps = capabilities.get("sessionCapabilities")
+    extra_dirs = ({"additionalDirectories": list(additional_dirs)}
+                  if additional_dirs and isinstance(session_caps, dict)
+                  and session_caps.get("additionalDirectories") is not None
+                  else {})
     if requested_session_id and can_load:
         try:
             params = {
                 "sessionId": requested_session_id,
                 "cwd": workdir,
                 "mcpServers": [],
+                **extra_dirs,
             }
             if load_meta:
                 params["_meta"] = dict(load_meta)
@@ -845,12 +891,64 @@ def _new_or_load_session(client: _AcpClient, workdir: str,
     elif requested_session_id:
         client.emit("status", "ACP Runtime 未声明 session/load，将用最近对话新建会话。\n")
 
-    result = client.request("session/new", {"cwd": workdir, "mcpServers": []})
+    result = client.request("session/new", {"cwd": workdir, "mcpServers": [],
+                                            **extra_dirs})
     session_id = result.get("sessionId") or result.get("session_id") or ""
     if not session_id:
         raise AcpError("session/new 未返回 sessionId")
     client.thought_level_option = _thought_level_option(result)[0]
     return session_id, False
+
+
+def _turn_usage(responses: list[dict], context: dict,
+                parse_usage: Optional[Callable[[dict], dict]] = None) -> dict:
+    """把一轮内各 session/prompt 响应与最近一次 usage_update 归一成 usage/v1。
+
+    同一轮的续接 prompt 各有一份用量:本轮区段、耗时、费用逐项相加,会话累计与
+    上下文取最后一次。标准字段优先;工具声明的 parse_usage 钩子解析厂商私有
+    扩展(grok 的 _meta.usage 等),只补标准字段缺失的部分。一个数都没有返回空。
+    """
+    # native 顶层导入 adapters,延迟导入避免 acp <-> adapters 的初始化环
+    from .native import build_usage, usage_section
+    turn: dict = {}
+    summed: dict = {}
+    latest: dict = {}
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        try:
+            vendor = parse_usage(response) if parse_usage else {}
+        except Exception:
+            # 用量只是过程信息,解析失败不能让已经成功的回合失败
+            vendor = {}
+        if not isinstance(vendor, dict):
+            vendor = {}
+        section = (usage_section(response.get("usage"), ACP_USAGE_FIELDS)
+                   or vendor.get("turn") or {})
+        for name, value in section.items():
+            turn[name] = turn.get(name, 0) + value
+        for key in ("cost_usd", "duration_ms", "tool_uses"):
+            if isinstance(vendor.get(key), (int, float)):
+                summed[key] = summed.get(key, 0) + vendor[key]
+        for key in ("total", "context_used", "context_window"):
+            if vendor.get(key):
+                latest[key] = vendor[key]
+    if isinstance(context.get("used"), (int, float)):
+        latest["context_used"] = context["used"]
+    if isinstance(context.get("size"), (int, float)):
+        latest["context_window"] = context["size"]
+    cost = context.get("cost")
+    if (isinstance(cost, dict) and str(cost.get("currency", "")).upper() == "USD"
+            and isinstance(cost.get("amount"), (int, float))):
+        # 标准 cost 是会话累计值,与厂商的本轮费用二者取一,标准优先
+        summed["cost_usd"] = cost["amount"]
+    raw: dict = {"responses": [{k: v for k, v in r.items() if k != "stopReason"}
+                               for r in responses if isinstance(r, dict)]}
+    if context:
+        raw["usage_update"] = {k: v for k, v in context.items() if k != "sessionUpdate"}
+    return build_usage(raw, turn=turn, total=latest.get("total"),
+                       context_window=latest.get("context_window"),
+                       context_used=latest.get("context_used"), **summed)
 
 
 def _prompt_turn(client: _AcpClient, session_id: str, prompt: str,
@@ -878,10 +976,10 @@ def _prompt_turn(client: _AcpClient, session_id: str, prompt: str,
     client.emit("input", prompt)
     if before_prompt is not None:
         before_prompt()
-    client.request("session/prompt", {
+    responses = [client.request("session/prompt", {
         "sessionId": session_id,
         "prompt": [{"type": "text", "text": prompt}],
-    })
+    })]
     for attempt in range(1, _DETACHED_FOLLOWUP_LIMIT + 1):
         pending = client.pending_detached_tasks()
         if not pending:
@@ -904,10 +1002,13 @@ def _prompt_turn(client: _AcpClient, session_id: str, prompt: str,
             "results, finish the original user request, and provide the final reply. "
             "Do not launch replacement background tasks."
         )
-        client.request("session/prompt", {
+        responses.append(client.request("session/prompt", {
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": continuation}],
-        })
+        }))
+    usage = _turn_usage(responses, client.context_usage, client.parse_usage)
+    if usage:
+        client.emit("usage", json.dumps(usage, ensure_ascii=False))
     pending = client.pending_detached_tasks()
     if pending:
         task_ids = ", ".join(sorted(pending))
@@ -923,17 +1024,23 @@ def _run_one_shot(cmd: list[str], prompt: str, workdir: str, env: dict,
                   emit: Optional[Callable[[str, str], None]],
                   task_id: str = "", stage_name: str = "",
                   project_id: str = "", role_id: str = "",
-                  effort: str = "") -> tuple[bool, str]:
+                  effort: str = "",
+                  additional_dirs: Optional[list[str]] = None,
+                  parse_usage: Optional[Callable[[dict], dict]] = None
+                  ) -> tuple[bool, str]:
     try:
         client = _AcpClient(cmd, workdir, env, timeout, emit=emit)
     except OSError as e:
         return False, f"ACP 进程启动失败: {e}"
+    client.parse_usage = parse_usage
     with _ONE_SHOT_CLIENTS_GUARD:
         _ONE_SHOT_CLIENTS[id(client)] = _OneShotClient(
             runtime_id, client, task_id, stage_name, project_id, role_id, model)
     try:
         initialize_result = _initialize(client)
-        session_id, _ = _new_or_load_session(client, workdir, "", initialize_result)
+        session_id, _ = _new_or_load_session(
+            client, workdir, "", initialize_result,
+            additional_dirs=additional_dirs)
         return True, _prompt_turn(client, session_id, prompt, model, effort)
     except AcpError as e:
         return False, str(e)
@@ -957,7 +1064,10 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                cancelled: Optional[Callable[[], bool]] = None,
                load_session_meta: Optional[dict] = None,
                trigger_message_id: int = 0,
-               effort: str = "") -> tuple[bool, str]:
+               effort: str = "",
+               additional_dirs: Optional[list[str]] = None,
+               parse_usage: Optional[Callable[[dict], dict]] = None
+               ) -> tuple[bool, str]:
     """完成一轮 ACP prompt，并按 channel×role 复用长驻原生会话。
 
     无 ``session_key`` 时保持一次性调用。长驻进程不存在（包括服务重启）时，
@@ -966,16 +1076,21 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
 
     ``effort`` 是要经会话配置项(thought_level)切换的推理力度;serve 命令里
     已带档位的工具(grok/copilot)不要再传,它们改档位靠命令签名变化重启进程。
+
+    ``additional_dirs`` 是工作目录之外的项目授权目录;agent 声明了会话级
+    additionalDirectories 能力时经协议传入,否则忽略(由 serve 命令行授权)。
+    ``parse_usage`` 是工具声明的私有用量解析钩子,见 :func:`_turn_usage`。
     """
     if cancelled and cancelled():
         return False, "执行已停止"
     if not session_key:
         return _run_one_shot(
             cmd, prompt, workdir, env, model, timeout, runtime_id, emit,
-            task_id, stage_name, project_id, role_id, effort=effort)
+            task_id, stage_name, project_id, role_id, effort=effort,
+            additional_dirs=additional_dirs, parse_usage=parse_usage)
 
     _cleanup_idle_sessions()
-    signature = _client_signature(cmd, workdir, env)
+    signature = _client_signature(cmd, workdir, env, tuple(additional_dirs or ()))
     with _session_lock(session_key):
         if cancelled and cancelled():
             return False, "执行已停止"
@@ -997,7 +1112,7 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                     initialize_result = _initialize(client)
                     runtime_session_id, recovered = _new_or_load_session(
                         client, workdir, session_id, initialize_result,
-                        load_session_meta)
+                        load_session_meta, additional_dirs)
                 except Exception:
                     client.close()
                     raise
@@ -1020,6 +1135,7 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
             live.role_id = role_id
             live.model = model
             live.last_used = time.time()
+            live.client.parse_usage = parse_usage
             # 自唤醒汇报按会话定位频道×角色;每轮刷新,保持与最近执行一致
             live.client.wake_meta = {
                 "session_key": session_key, "backend_id": runtime_id,
@@ -1086,10 +1202,12 @@ def list_model_catalog(
         parse_efforts=None) -> tuple[list[str], dict[str, list[str]]]:
     """一次性会话同时取回模型目录与每个模型支持的推理力度。
 
-    模型目录兼容两种形态:kimi 等返回 configOptions(category=model 的 select
-    选项);部分实现返回 models 块——trae 用 {availableModels:[{modelId,...}]}
-    (对齐 Multica parseACPSessionNewModels,兼容 snake_case 与旧的
-    {available:[...]} 及裸数组)。查不到返回空目录与空档位表。
+    模型目录兼容两种形态:kimi/trae 等返回 configOptions(category=model 的 select
+    选项);部分实现只返回 models 块 {availableModels:[{modelId,...}]}(对齐
+    Multica parseACPSessionNewModels,兼容 snake_case 与旧的 {available:[...]}
+    及裸数组)。两者都有时以 configOptions 为准:trae 的 models 块把模型与档位
+    拼成 "glm-5.3/high" 这类组合 id,不是可单独选择的模型。查不到返回空目录与
+    空档位表。
 
     按模型的推理力度有两条路:
     - ACP 标准的会话配置项:configOptions 里有 category=thought_level 的选项

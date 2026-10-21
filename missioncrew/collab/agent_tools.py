@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import board_sources
+from . import channels as channel_ops
 from .content_channels import content_channel, rebind_content_channel
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls, safe_relative_path)
-from .guidelines import save_guideline
+from .guidelines import (guideline_history, read_guideline_version, save_guideline,
+                         sync_guideline_library)
 from .recycle_bin import (RecycleConflictError, list_recycle_items,
                           purge_recycle_item, recycle_bin_url,
                           recycle_dashboard, recycle_document,
@@ -33,7 +35,10 @@ from .recycle_bin import (RecycleConflictError, list_recycle_items,
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
                             skill_resource_url, task_resource_url)
-from .skills import save_project_skill, save_project_skill_markdown
+from .skill_versions import skill_version_library
+from .skills import (read_skill_version, save_project_skill, save_project_skill_markdown,
+                     skill_history, skill_package, sync_project_skill_library)
+from .webhooks import webhook_path
 from .workspace import chat_workspace_dir, write_task_files
 from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            BoardDataSource, BoardWidget,
@@ -45,6 +50,10 @@ from ..core.store import Store
 CONTROL_ID_RE = re.compile(r"[\w-]+")
 REQUEST_ID_RE = re.compile(r"[\w-]{1,100}")
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+# automation.list 带 id 时每条运行记录的 stdout/stderr 只回传末尾这么多字符
+AUTOMATION_OUTPUT_TAIL = 4000
+# *.history 读取单个历史版本的上限;更大的文件请人类在 Web 端下载
+MAX_HISTORY_READ_BYTES = 5 * 1024 * 1024
 TOKEN_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 TOKEN_RENEWAL_WINDOW_SECONDS = 24 * 60 * 60
 LOGGER = logging.getLogger(__name__)
@@ -54,19 +63,23 @@ class AgentToolError(Exception):
     """可安全、结构化地返回给 Runtime 的动作错误。"""
 
     def __init__(self, code: str, message: str, status_code: int = 400,
-                 *, retryable: bool = False):
+                 *, retryable: bool = False, details: Optional[dict] = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.retryable = retryable
+        self.details = details   # 帮调用方当场恢复的结构化信息,如冲突时的当前版本
 
     def to_dict(self) -> dict:
-        return {
+        error = {
             "code": self.code,
             "message": self.message,
             "retryable": self.retryable,
         }
+        if self.details:
+            error["details"] = self.details
+        return error
 
 
 class DispatchInactiveError(RuntimeError):
@@ -105,217 +118,414 @@ class AgentRunContext:
     depth: int
 
 
+# 动作说明只给 Agent 看(actions 命令与 /api/agent/v1/actions),与 Prompt 一样用英文;
+# 状态示例里的 待处理/处理中 等是项目真实的标签取值,保持原样
 ACTION_DEFINITIONS = {
     "task.create": {
-        "description": "创建一个可绑定多个 Channel 的 Issue 化 Task",
+        "description": "Create an issue-style Task that can be bound to several channels",
         "orchestrator_only": False,
         "arguments": {
-            "title": "任务标题", "summary": "一句话简介", "body": "正文",
-            "labels": ("标签数组;`文本` 或 `属性: 值` 高级标签,"
-                       "如 owner: 张三"),
-            "channel_ids": "可选绑定的 Channel id 数组",
-            "status": "状态文本,如 待处理/处理中/已阻塞/已完成,缺省 待处理",
+            "title": "task title", "summary": "one-line summary", "body": "body text",
+            "labels": ("label array; plain `text` or advanced `property: value` labels, "
+                       "e.g. owner: 张三"),
+            "channel_ids": ("optional array of channel ids to bind; omitted binds the current "
+                            "channel"),
+            "status": ("status text such as 待处理/处理中/已阻塞/已完成; defaults to the data "
+                       "source's first status value (待处理 for the built-in source)"),
+            "source": ("optional data source id: the built-in `built-in` (default) or a custom "
+                       "source's short id; the task then shows on boards bound to that source and "
+                       "uses its status values"),
+            "url": "optional link to the external item (e.g. the issue page)",
+            "meta": "optional array of short display notes shown on the board card",
+            "external_id": ("optional id of the external item (e.g. the issue number), unique "
+                            "within the source; already taken returns already_exists with the "
+                            "existing task in error.details. In a custom source it is the key "
+                            "of the whole sync (board_source.save cards): card `id` equal to "
+                            "external_id updates this task instead of creating another, and a "
+                            "later card list without it deletes the task. Tasks without "
+                            "external_id are never touched by the whole sync"),
+            "external_updated_at": ("optional update time of the item in the external "
+                                    "system: Unix seconds or ISO 8601 with a time zone "
+                                    "(e.g. 2026-10-19T08:00:00Z); the board shows it as the "
+                                    "task's update time and sorts by it. Distinct from "
+                                    "updated_at, which MissionCrew sets itself on every "
+                                    "write and cannot be set"),
         },
     },
     "task.update": {
-        "description": "以乐观并发方式更新任务的需求字段",
+        "description": ("Update a task's requirement fields with optimistic concurrency; the "
+                        "result's task carries the new updated_at (MissionCrew's own system "
+                        "update time, the version) for the next update"),
         "orchestrator_only": False,
         "arguments": {
-            "id": "任务 id", "snapshot_updated_at": "读取任务时的更新时间",
-            "title/summary/body/status/labels/channel_ids": "要更新的字段",
+            "id": "task id",
+            "snapshot_updated_at": ("the task's updated_at as last read (tasks/ snapshot or a "
+                                    "previous result); on version_conflict, error.details.task "
+                                    "is the current task"),
+            "title/summary/body/status/labels/channel_ids/url/meta/external_id/"
+            "external_updated_at": (
+                "fields to update; labels replaces the whole label list; channel_ids [] "
+                "unbinds all; external_id \"\" removes the sync key; external_updated_at "
+                "null clears it (same rules as task.create)"),
+            "properties": ("set individual `property: value` labels without touching the rest, "
+                           "e.g. {\"owner\": \"张三\", \"priority\": null}; a value may be a "
+                           "string or an array, null clears the property; status wins if "
+                           "also given"),
         },
     },
     "task.brief": {
-        "description": "为 Task 追加一条状态简报，并可同时更新状态",
+        "description": ("Append a status brief to a Task, optionally updating its status; "
+                        "needs no snapshot_updated_at"),
         "orchestrator_only": False,
         "arguments": {
-            "id": "任务 id", "content": "状态简报正文",
-            "status": "可选状态文本,如 待处理/处理中/已阻塞/已完成",
+            "id": "task id", "content": "status brief text",
+            "status": "optional status text such as 待处理/处理中/已阻塞/已完成",
         },
     },
     "task.delete": {
-        "description": "把 Task 及其状态简报移入项目回收站",
+        "description": "Move a Task and its status briefs to the project recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "任务 id"},
+        "arguments": {"id": "task id"},
+    },
+    "task.archive": {
+        "description": ("Archive a Task: it leaves the task boards and the tasks/ snapshot but "
+                        "keeps its body and briefs; task.restore brings it back"),
+        "orchestrator_only": True,
+        "arguments": {"id": "task id"},
+    },
+    "task.restore": {
+        "description": ("Restore an archived Task to the task boards and the tasks/ snapshot "
+                        "(archived tasks are not in the snapshot; take the id from the human or "
+                        "an earlier result)"),
+        "orchestrator_only": True,
+        "arguments": {"id": "task id"},
     },
     "document.publish": {
-        "description": "把文本或二进制文件发布到项目版本化文档库",
+        "description": "Publish a text or binary file to the project's versioned document library",
         "orchestrator_only": False,
         "arguments": {
-            "path": "文档库相对路径",
-            "content 或 content_base64": "文件内容",
-            "overwrite": "目标存在时是否显式覆盖，默认 false",
-            "message": "可选版本说明",
+            "path": "path in the document library",
+            "content or content_base64": "file content",
+            "overwrite": "whether to explicitly overwrite an existing target; default false",
+            "message": "optional version message",
         },
     },
     "document.rename": {
-        "description": "移动或重命名项目版本化文档并保留 Git 历史",
+        "description": "Move or rename a versioned project document, keeping its Git history",
         "orchestrator_only": False,
         "arguments": {
-            "source": "现有文档库相对路径",
-            "target": "新的文档库相对路径；目标必须不存在",
+            "source": "existing path in the document library",
+            "target": "new path in the document library; the target must not exist",
         },
     },
     "document.delete": {
-        "description": "把项目版本化文档移入统一回收站并保留 Git 历史",
+        "description": ("Move a versioned project document to the unified recycle bin, "
+                        "keeping its Git history"),
         "orchestrator_only": True,
-        "arguments": {"path": "文档库相对路径"},
+        "arguments": {"path": "path in the document library"},
+    },
+    "document.history": {
+        "description": ("Read a document's version history (the history is not in the "
+                        "workspace): without revision, list its versions newest first (also for "
+                        "renamed or deleted documents); with revision, return that version's "
+                        "content (content, or content_base64 for non-UTF-8 files)"),
+        "orchestrator_only": False,
+        "arguments": {
+            "path": "path in the document library",
+            "revision": "optional revision from the version list",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
     },
     "message.publish": {
         "description": (
-            "向本项目频道发布消息；mentions 参数是唯一的角色派发通道；"
-            "返回的 dispatched(实际启动的角色)非空时结束当前 turn，"
-            "chain_budget 给出本条协作链已用次数与上限"
+            "Post a message to a project channel, only for dispatching or posting to other "
+            "channels; your final reply is already published to the trigger channel by the "
+            "platform, so do not use this to copy the answer. mentions is the only channel for "
+            "dispatching roles; end the current turn when the returned dispatched (roles actually "
+            "started) is non-empty; chain_budget gives the runs used and the limit of this "
+            "collaboration chain"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "channel": "项目内频道短 id",
-            "content": "消息正文；正文里的任何 @ 都不产生调度",
-            "mentions": "要显式调度的角色 id 数组；不传则只发消息不派发",
+            "channel": "short channel id within the project",
+            "content": "message body; any @ in it never dispatches",
+            "mentions": ("array of role ids to dispatch explicitly; omit it to post without "
+                         "dispatching"),
         },
     },
     "channel.runs.list": {
         "description": (
-            "按需查询频道中 queued/running/waiting_user 的角色运行(默认当前 "
-            "Channel,可传 channel 查项目内其他频道);状态不会预先写入聊天上下文"
+            "On demand, list queued/running/waiting_user role runs in a channel (the current "
+            "channel by default; pass channel for another project channel); run status is not "
+            "preloaded into the chat context"
         ),
         "orchestrator_only": True,
         "automation_allowed": False,
-        "arguments": {"channel": "项目内频道短 id；不传为当前 Channel"},
+        "arguments": {"channel": "short channel id within the project; defaults to the current channel"},
     },
     "channel.run.stop": {
-        "description": "停止当前 Channel 中指定的活动角色运行；应先查询取得 run_id",
+        "description": ("Stop the given active role run in the current channel; query it first "
+                        "to get the run_id"),
         "orchestrator_only": True,
         "automation_allowed": False,
-        "arguments": {"run_id": "channel.runs.list 返回的正整数 Run id"},
+        "arguments": {"run_id": "positive integer run id returned by channel.runs.list"},
     },
     "channel.history": {
         "description": (
-            "按需读取频道最近消息(默认当前 Channel,可传 channel 读项目内其他频道);"
-            "记录格式与 channel-history.json 相同,用于核对派发、进展与回报,"
-            "不要当作等待循环反复调用"
+            "On demand, read a channel's recent messages (the current channel by default; pass "
+            "channel for another project channel); records use the channel-history.json format, "
+            "for checking dispatches, progress and reports; do not call it repeatedly as a wait loop"
         ),
         "orchestrator_only": True,
         "automation_allowed": False,
         "arguments": {
-            "channel": "项目内频道短 id；不传为当前 Channel",
-            "limit": "返回最新几条,默认 20,最多 200",
-            "before_id": "只取 id 小于该值的更早消息,用于向前翻页",
+            "channel": "short channel id within the project; defaults to the current channel",
+            "limit": "how many latest messages to return; default 20, at most 200",
+            "before_id": "only return earlier messages with id below this value, for paging back",
         },
     },
     "channel.list": {
         "description": (
-            "按需列出项目频道(id、名称、用途、工作目录、归档态、最近消息时间、"
-            "活动运行数);频道清单不预先写入聊天上下文,新建频道前先查避免重复"
+            "On demand, list project channels (id, name, purpose, workdir, archive state, last "
+            "message time, active run count); the channel list is not preloaded into the chat "
+            "context, so check it before creating a channel to avoid duplicates"
         ),
         "orchestrator_only": True,
-        "arguments": {"scope": "active(默认)/archived/all"},
+        "arguments": {"scope": "active (default)/archived/all"},
     },
     "channel.create": {
-        "description": "创建项目频道(先用 channel.list 确认 id 未被占用)",
+        "description": "Create a project channel (check with channel.list first that the id is free)",
         "orchestrator_only": True,
-        "arguments": {"id": "频道短 id", "name": "名称", "purpose": "用途",
-                      "workdir": "可选项目仓库目录"},
+        "arguments": {"id": "short channel id",
+                      "name": "name; 'group/topic' files it under a collapsible sidebar group",
+                      "purpose": "purpose",
+                      "workdir": "optional project repository directory"},
     },
-    "dashboard.save": {
-        "description": "创建或更新项目面板(组件网格或任务看板)",
+    "channel.update": {
+        "description": ("Change a project channel's name, purpose or workdir; archived and "
+                        "page-conversation channels cannot be changed, and a new workdir takes "
+                        "effect from the next run in that channel"),
         "orchestrator_only": True,
         "arguments": {
-            "id": "面板短 id", "name": "名称", "description": "用途",
-            "layout": "可选组件数组(widgets 形态)",
-            "kind": "可选 widgets/taskboard",
-            "source": "taskboard 数据源 id(内置 built-in 或自定义源短 id)",
-            "filters": ("taskboard 筛选列数组 [{title,query,color}],query 是"
-                        "标签表达式(& | ! 与括号,`属性: *` 匹配带该属性的"
-                        "任务);新建时缺省按数据源状态取值生成 status 列"),
-            "group_by": ("可选分列属性名;非空时改为按该属性取值横向分列(末尾"
-                         "「未设置」列),filters 的并集只划定卡片范围"),
+            "id": "short channel id; defaults to the current channel",
+            "name": "new name", "purpose": "new purpose",
+            "workdir": ("project repository path or a subdirectory of one; an empty string "
+                        "switches back to the platform's built-in workspace"),
+        },
+    },
+    "channel.archive": {
+        "description": ("Archive a project channel: it becomes read-only, drops out of "
+                        "channel.list's default scope and its persistent runtimes are stopped; "
+                        "refused for general, page-conversation channels and channels with "
+                        "active runs (so never the current channel)"),
+        "orchestrator_only": True,
+        "arguments": {"id": "short channel id"},
+    },
+    "channel.restore": {
+        "description": "Restore an archived project channel (find it with channel.list scope=archived)",
+        "orchestrator_only": True,
+        "arguments": {"id": "short channel id"},
+    },
+    "dashboard.save": {
+        "description": "Create or update a project dashboard (widget grid or task board)",
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "short dashboard id", "name": "name", "description": "purpose",
+            "layout": "optional widget array (widgets form)",
+            "kind": "optional widgets/taskboard",
+            "source": ("taskboard data source id (the built-in `built-in` or a custom source's "
+                       "short id)"),
+            "filters": ("taskboard filter column array [{title,query,color}]; query is a label "
+                        "expression (& | ! and parentheses; `property: *` matches tasks with "
+                        "that property, and a bare term like `owner` also matches any "
+                        "`owner: ...` label); when creating, defaults to status columns generated "
+                        "from the data source's status values"),
+            "group_by": ("optional property name the board page groups columns by by default: "
+                         "one column per value plus a trailing \"unset\" column, covering every "
+                         "task in the board's scope (filters do not narrow it); viewers can "
+                         "switch grouping and filters for themselves without changing it"),
         },
     },
     "dashboard.delete": {
-        "description": "把项目面板移入统一回收站",
+        "description": "Move a project dashboard to the unified recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "面板短 id"},
+        "arguments": {"id": "short dashboard id"},
+    },
+    "dashboard.list": {
+        "description": ("On demand, list project dashboards (dashboards are not in the "
+                        "workspace); pass id to get one dashboard's full configuration (layout, "
+                        "filters, group_by) before changing it with dashboard.save"),
+        "orchestrator_only": True,
+        "arguments": {"id": "optional short dashboard id"},
     },
     "board_source.save": {
         "description": (
-            "创建或更新自定义任务数据源;cards 按 id 整体同步为该源的任务"
-            "(新增/覆盖/删除),适合配自动化脚本定时同步 GitCode/GitHub "
-            "Issue 等外部列表,再用 dashboard.save 建任务看板绑定该源"
+            "Create or update a custom task data source; cards are synced by id as that "
+            "source's tasks (add/update/delete); suited to automation scripts that "
+            "periodically sync external lists such as GitCode/GitHub issues, then use "
+            "dashboard.save to create a task board bound to the source. To add, change or "
+            "remove single tasks of a source, use task.create with source (and external_id "
+            "when the item exists externally) and task.update/task.delete instead of "
+            "resending the whole card list"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "id": "数据源短 id(不能与内置源重名)",
-            "name": "名称", "description": "用途",
-            "columns": ("可选状态取值数组 [{value,color}](兼容旧版 "
-                        "{key,title,color}),缺省四态"),
-            "cards": ("可选卡片数组,按 id 整体同步;每张必须有 id、title,"
-                      "可选 summary、status(状态文本)、labels、updated_at、"
-                      "meta、url(外部链接);新任务会走项目自动处理规则"),
-            "mode": "create/update/upsert,缺省 upsert",
+            "id": "short data source id (must not clash with built-in sources)",
+            "name": "name", "description": "purpose",
+            "columns": ("optional array of status values [{value,color}] (legacy "
+                        "{key,title,color} accepted); defaults to 待处理/处理中/已阻塞/已完成 "
+                        "on creation, omitted on update keeps the existing ones"),
+            "cards": ("optional card array, synced as a whole by id against the source's "
+                      "tasks' external_id: tasks with an external_id absent from the list are "
+                      "deleted, tasks without one are left alone. Each card needs id (title too when it creates a task), "
+                      "optionally summary, status (status text), labels, properties, "
+                      "updated_at (the item's update time in the external system, stored as "
+                      "the task's external_updated_at: Unix seconds or ISO 8601 with a time "
+                      "zone), meta (array of strings) and url (external "
+                      "link). Existing tasks only change "
+                      "what a card carries: omit status to keep the local status (new tasks "
+                      "default to the first status value); plain labels in labels replace the "
+                      "task's plain labels as a set, `property: value` labels and properties "
+                      "({property: value | [values] | null}) replace only those properties, "
+                      "null clears. New tasks go through the project's automatic handling "
+                      "rules. Removed tasks are deleted permanently with their briefs, so "
+                      "never save a partial list"),
+            "mode": "create/update/upsert; default upsert",
         },
     },
     "board_source.delete": {
-        "description": "删除自定义看板数据源(仍被面板引用时拒绝)",
+        "description": ("Delete a custom board data source (refused while a dashboard still "
+                        "references it)"),
         "orchestrator_only": True,
-        "arguments": {"id": "数据源短 id"},
+        "arguments": {"id": "short data source id"},
+    },
+    "board_source.list": {
+        "description": ("On demand, list custom task data sources with their status values, "
+                        "task counts and the dashboards bound to them; the tasks themselves are "
+                        "in the tasks/ snapshot"),
+        "orchestrator_only": True,
+        "arguments": {},
     },
     "guideline.save": {
-        "description": "保存完整准则 Markdown",
+        "description": "Save a complete guideline Markdown file",
         "orchestrator_only": True,
-        "arguments": {"markdown": "含 name/description frontmatter 的全文",
-                      "enabled": "是否启用", "original_name": "重命名前名称"},
+        "arguments": {"markdown": "full text with name/description frontmatter",
+                      "enabled": "whether it is enabled",
+                      "original_name": "name before renaming"},
     },
     "guideline.delete": {
-        "description": "把准则 Markdown 移入统一回收站并保留 Git 历史",
+        "description": ("Move a guideline Markdown file to the unified recycle bin, keeping its "
+                        "Git history"),
         "orchestrator_only": True,
-        "arguments": {"name": "准则 name"},
+        "arguments": {"name": "guideline name"},
+    },
+    "guideline.history": {
+        "description": ("Read a guideline's version history: without revision, list its "
+                        "versions newest first; with revision, return that version's full "
+                        "markdown"),
+        "orchestrator_only": True,
+        "arguments": {
+            "name": "guideline name",
+            "revision": "optional revision from the version list",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
+    },
+    "guideline.list": {
+        "description": ("On demand, list all project guidelines including disabled ones (the "
+                        "workspace guidelines/ view only has enabled ones); pass name to get the "
+                        "full markdown, e.g. to edit or re-enable it with guideline.save"),
+        "orchestrator_only": True,
+        "arguments": {"name": "optional guideline name"},
     },
     "skill.save": {
-        "description": "保存完整 Skill Markdown",
+        "description": "Save a complete skill Markdown file",
         "orchestrator_only": True,
-        "arguments": {"id": "Skill id", "markdown": "完整 SKILL.md",
-                      "enabled": "是否启用"},
+        "arguments": {"id": "skill id", "markdown": "the complete SKILL.md",
+                      "enabled": "whether it is enabled"},
     },
     "skill.delete": {
-        "description": "把完整 Skill 包移入统一回收站",
+        "description": "Move a complete skill package to the unified recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "Skill id"},
+        "arguments": {"id": "skill id"},
+    },
+    "skill.history": {
+        "description": ("Read a skill package's version history: without revision, list its "
+                        "versions newest first; with revision, return that version's SKILL.md "
+                        "and file list, and with file also that file's content"),
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "skill id",
+            "revision": "optional revision from the version list",
+            "file": "with revision: optional path inside the package, e.g. scripts/run.sh",
+            "limit": "without revision: how many versions to list; default 20, at most 100",
+        },
+    },
+    "skill.list": {
+        "description": ("On demand, list all project skills including disabled ones (the "
+                        "workspace skills/ view only has enabled ones); pass id to get the full "
+                        "SKILL.md and the package's file list, e.g. to edit or re-enable it with "
+                        "skill.save"),
+        "orchestrator_only": True,
+        "arguments": {"id": "optional skill id"},
     },
     "automation.save": {
         "description": (
-            "创建或更新项目自动化脚本;脚本经统一定时入口按 cron 或手动触发,"
-            "以专属 token 调用平台动作"
+            "Create or update a project automation script; it is triggered by cron, by webhook "
+            "deliveries on the platform's dedicated webhook port, or manually, and it calls "
+            "platform actions with its own token"
         ),
         "orchestrator_only": True,
         "arguments": {
-            "id": "脚本短 id", "name": "名称", "description": "用途",
-            "script": "脚本全文(有 shebang 按可执行文件运行,否则用 bash)",
-            "cron": "五段 crontab;空字符串表示仅手动触发",
-            "enabled": "是否启用定时触发",
-            "actions": "允许调用的动作白名单数组;不传保留现值",
-            "timeout_seconds": "单次运行超时秒数",
+            "id": "short script id", "name": "name", "description": "purpose",
+            "script": ("full script text (run as an executable when it has a shebang, "
+                       "otherwise with bash)"),
+            "cron": "five-field crontab; an empty string means no schedule",
+            "enabled": "whether scheduled (cron) triggering is enabled",
+            "webhook": ("true accepts webhook deliveries (can be combined with cron); the "
+                        "result gives webhook_path, and the signing secret is shown only to "
+                        "humans on the automation page, so ask a human to configure the "
+                        "external system"),
+            "actions": "allowlist array of actions it may call; omit it to keep the current value",
+            "timeout_seconds": "timeout of a single run in seconds",
         },
     },
     "automation.delete": {
-        "description": "删除项目自动化脚本及其运行记录",
+        "description": "Delete a project automation script and its run records",
         "orchestrator_only": True,
-        "arguments": {"id": "脚本短 id"},
+        "arguments": {"id": "short script id"},
+    },
+    "automation.list": {
+        "description": ("On demand, list project automation scripts (schedule, enabled, actions "
+                        "allowlist, last run); pass id to get the full script and its recent "
+                        "runs with the tail of their output, e.g. to fix a failing script"),
+        "orchestrator_only": True,
+        "arguments": {
+            "id": "optional short script id",
+            "runs": "with id: how many recent runs to return; default 5, at most 20",
+        },
+    },
+    "automation.run": {
+        "description": ("Trigger a manual run of an automation script now (also when scheduling "
+                        "is disabled); it runs in the background, so check the result later "
+                        "with automation.list and the id instead of waiting in a loop"),
+        "orchestrator_only": True,
+        "automation_allowed": False,
+        "arguments": {"id": "short script id"},
     },
     "recycle.list": {
-        "description": "列出当前项目统一回收站",
+        "description": "List the current project's unified recycle bin",
         "orchestrator_only": True,
         "arguments": {},
     },
     "recycle.restore": {
-        "description": "从项目回收站恢复资源",
+        "description": "Restore a resource from the project recycle bin",
         "orchestrator_only": True,
-        "arguments": {"id": "回收站条目 id"},
+        "arguments": {"id": "recycle bin entry id"},
     },
     "recycle.purge": {
-        "description": "永久删除一个项目回收站条目",
+        "description": "Permanently delete a project recycle bin entry",
         "orchestrator_only": True,
-        "arguments": {"id": "回收站条目 id"},
+        "arguments": {"id": "recycle bin entry id"},
     },
 }
 
@@ -323,44 +533,75 @@ AUTOMATION_ACTIONS = frozenset(
     name for name, definition in ACTION_DEFINITIONS.items()
     if definition.get("automation_allowed", True))
 
+# 无主控项目里角色能发消息但不能派发:列出动作时用这份说明替换 message.publish,
+# 不给出 mentions 参数(服务端在 _publish_message 里同样拒绝)
+PEER_MESSAGE_PUBLISH = {
+    "description": (
+        "Post a message to a project channel, only for posting to other channels (such as a "
+        "brief in a new channel); this project has no orchestrator, so roles cannot dispatch "
+        "each other and only humans start roles; your final reply is already published to the "
+        "trigger channel by the platform, so do not use this to copy the answer"
+    ),
+    "arguments": {
+        "channel": "short channel id within the project",
+        "content": "message body; any @ in it is plain text and never starts a role",
+    },
+}
+
 ACTION_ARGUMENTS = {
     "task.create": {
-        "title", "summary", "body", "labels", "channel_ids", "status",
+        "title", "summary", "body", "labels", "channel_ids", "status", "source",
+        "url", "meta", "external_id", "external_updated_at",
     },
     "task.update": {
         "id", "snapshot_updated_at", "title", "summary", "body", "status",
-        "labels", "channel_ids",
+        "labels", "properties", "channel_ids", "url", "meta", "external_id",
+        "external_updated_at",
     },
     "task.brief": {"id", "content", "status"},
     "task.delete": {"id"},
+    "task.archive": {"id"},
+    "task.restore": {"id"},
     "document.publish": {
         "path", "content", "content_base64", "overwrite", "message",
     },
     "document.rename": {"source", "target"},
     "document.delete": {"path"},
+    "document.history": {"path", "revision", "limit"},
     "message.publish": {"channel", "content", "mentions"},
     "channel.runs.list": {"channel"},
     "channel.run.stop": {"run_id"},
     "channel.history": {"channel", "limit", "before_id"},
     "channel.list": {"scope"},
     "channel.create": {"id", "name", "purpose", "workdir"},
+    "channel.update": {"id", "name", "purpose", "workdir"},
+    "channel.archive": {"id"},
+    "channel.restore": {"id"},
     "dashboard.save": {"id", "name", "description", "layout", "mode",
                        "kind", "source", "filters", "group_by"},
     "dashboard.delete": {"id"},
+    "dashboard.list": {"id"},
     "board_source.save": {"id", "name", "description", "columns", "cards",
                           "mode"},
     "board_source.delete": {"id"},
+    "board_source.list": set(),
     "guideline.save": {"markdown", "enabled", "original_name"},
     "guideline.delete": {"name"},
+    "guideline.list": {"name"},
+    "guideline.history": {"name", "revision", "limit"},
     "skill.save": {
         "id", "markdown", "enabled", "name", "description", "instructions",
     },
     "skill.delete": {"id"},
+    "skill.list": {"id"},
+    "skill.history": {"id", "revision", "file", "limit"},
     "automation.save": {
-        "id", "name", "description", "script", "cron", "enabled", "actions",
+        "id", "name", "description", "script", "cron", "enabled", "webhook", "actions",
         "timeout_seconds",
     },
     "automation.delete": {"id"},
+    "automation.list": {"id", "runs"},
+    "automation.run": {"id"},
     "recycle.list": set(),
     "recycle.restore": {"id"},
     "recycle.purge": {"id"},
@@ -372,7 +613,9 @@ ACTION_ARGUMENTS = {
 CONVERSATION_RECEIPT_ACTIONS = (
     frozenset(ACTION_DEFINITIONS) - {
         "message.publish", "channel.runs.list", "channel.run.stop",
-        "channel.history", "recycle.list",
+        "channel.history", "channel.list", "recycle.list", "dashboard.list",
+        "board_source.list", "guideline.list", "skill.list", "automation.list",
+        "document.history", "guideline.history", "skill.history",
     }
 )
 
@@ -382,20 +625,28 @@ class AgentActionService:
 
     def __init__(self, store: Store, post_message: Callable[..., int],
                  stop_run: Callable[..., dict],
-                 history_records: Optional[Callable[..., list[dict]]] = None):
+                 history_records: Optional[Callable[..., list[dict]]] = None,
+                 stop_channel_sessions: Optional[Callable[[str], int]] = None):
         self.store = store
         self._post_message = post_message
         self._stop_run = stop_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的
         # 消息记录;由聊天引擎提供,保证脱敏口径与工作区历史文件一致
         self._history_records = history_records
+        # 归档频道前停掉其持久 Runtime;None = 没有聊天引擎(测试),无长驻实例
+        self._stop_channel_sessions = stop_channel_sessions or (lambda _channel_id: 0)
+        # 自动化调度器在服务装配时绑定(它自身依赖本服务签发脚本令牌)
+        self._trigger_automation: Optional[Callable[..., int]] = None
+
+    def bind_automation_trigger(self, trigger: Callable[..., int]) -> None:
+        self._trigger_automation = trigger
 
     @staticmethod
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def allowed_actions(self, project: Project, role_id: str) -> list[str]:
-        # 无主控项目里每个角色都拥有主控级动作
+        # 无主控项目里每个角色都拥有主控级动作;派发另由 can_dispatch 把关
         is_orchestrator = project.controls_platform(role_id)
         return [
             name for name, definition in ACTION_DEFINITIONS.items()
@@ -550,16 +801,20 @@ class AgentActionService:
     def capabilities(self, identity: AgentIdentity) -> dict:
         project = self._identity_project(identity)
         allowed = self._identity_actions(project, identity)
+        actions = {
+            name: {key: value for key, value in ACTION_DEFINITIONS[name].items()
+                   if key not in {"orchestrator_only", "automation_allowed"}}
+            for name in allowed
+        }
+        if ("message.publish" in actions and not identity.is_automation
+                and not project.can_dispatch(identity.role_id)):
+            actions["message.publish"] = PEER_MESSAGE_PUBLISH
         return {
             "project_id": identity.project_id,
             "channel_id": identity.channel_id,
             "role_id": identity.role_id,
             "token_id": identity.token_id,
-            "actions": {
-                name: {key: value for key, value in ACTION_DEFINITIONS[name].items()
-                       if key not in {"orchestrator_only", "automation_allowed"}}
-                for name in allowed
-            },
+            "actions": actions,
         }
 
     def execute(self, identity: AgentIdentity, action: str, arguments: dict,
@@ -771,25 +1026,39 @@ class AgentActionService:
             "task.update": self._update_task,
             "task.brief": self._add_task_brief,
             "task.delete": self._delete_task,
+            "task.archive": self._archive_task,
+            "task.restore": self._restore_task,
             "document.publish": self._publish_document,
             "document.rename": self._rename_document,
             "document.delete": self._delete_document,
+            "document.history": self._document_history,
             "message.publish": self._publish_message,
             "channel.runs.list": self._list_channel_runs,
             "channel.run.stop": self._stop_channel_run,
             "channel.history": self._channel_history,
             "channel.list": self._list_channels,
             "channel.create": self._create_channel,
+            "channel.update": self._update_channel,
+            "channel.archive": self._archive_channel,
+            "channel.restore": self._restore_channel,
             "dashboard.save": self._save_dashboard,
             "dashboard.delete": self._delete_dashboard,
+            "dashboard.list": self._list_dashboards,
             "board_source.save": self._save_board_source,
             "board_source.delete": self._delete_board_source,
+            "board_source.list": self._list_board_sources,
             "guideline.save": self._save_guideline,
             "guideline.delete": self._delete_guideline,
+            "guideline.list": self._list_guidelines,
+            "guideline.history": self._guideline_history,
             "skill.save": self._save_skill,
             "skill.delete": self._delete_skill,
+            "skill.list": self._list_skills,
+            "skill.history": self._skill_history,
             "automation.save": self._save_automation,
             "automation.delete": self._delete_automation,
+            "automation.list": self._list_automations,
+            "automation.run": self._run_automation,
             "recycle.list": self._list_recycle_bin,
             "recycle.restore": self._restore_recycle_item,
             "recycle.purge": self._purge_recycle_item,
@@ -912,13 +1181,16 @@ class AgentActionService:
     def _create_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
         from types import SimpleNamespace
-        from .tasks import auto_process_task, create_task
+        from .tasks import TaskConflictError, auto_process_task, create_task
 
-        task = create_task(
-            self.store, project.id, **arguments,
-            actor=identity.actor,
-            fallback_channel_id=identity.channel_id,
-        )
+        try:
+            task = create_task(
+                self.store, project.id, **arguments,
+                actor=identity.actor,
+                fallback_channel_id=identity.channel_id,
+            )
+        except TaskConflictError as exc:
+            raise self._task_conflict(exc) from exc
         self._refresh_task_snapshot(project.id, identity)
         self.store.audit(
             identity.actor, "agent_task_created", task.id,
@@ -941,7 +1213,7 @@ class AgentActionService:
 
     def _update_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
-        from .tasks import update_task
+        from .tasks import TaskConflictError, update_task
 
         task_id = str(arguments.get("id", "")).strip()
         task = self.store.get_task(task_id)
@@ -955,9 +1227,17 @@ class AgentActionService:
                 snapshot_updated_at=arguments.get("snapshot_updated_at"),
                 changes=changes, actor=identity.actor,
             )
+        except TaskConflictError as exc:
+            raise self._task_conflict(exc) from exc
         except ValueError as exc:
             if "重新读取" in str(exc):
-                raise AgentToolError("version_conflict", str(exc), 409) from exc
+                # 刷新快照并带回当前版本,调用方核对后用新的 updated_at 当场重试
+                self._refresh_task_snapshot(project.id, identity)
+                raise AgentToolError(
+                    "version_conflict",
+                    f"{exc}；tasks/ 快照已刷新，error.details.task 是当前版本，"
+                    "核对后用其中的 updated_at 作为 snapshot_updated_at 重试",
+                    409, details={"task": task.to_dict()}) from exc
             if "已归档" in str(exc):
                 raise AgentToolError("task_archived", str(exc), 409) from exc
             raise AgentToolError("invalid_arguments", str(exc), 400) from exc
@@ -970,6 +1250,13 @@ class AgentActionService:
             "summary": f"已更新任务 [{task.title}]({url})",
             "task": task.to_dict(), "resource_url": url,
         }
+
+    @staticmethod
+    def _task_conflict(exc) -> "AgentToolError":
+        # 带回已占用该 external_id 的任务,调用方改用 task.update 更新它而不是再建一张
+        return AgentToolError(
+            "already_exists", f"{exc}；error.details.task 是已有任务，请改用 task.update",
+            409, details={"task": exc.existing.to_dict()})
 
     def _add_task_brief(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:
@@ -998,10 +1285,7 @@ class AgentActionService:
 
     def _delete_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:
-        task_id = str(arguments.get("id", "")).strip()
-        task = self.store.get_task(task_id)
-        if task is None or task.project_id != project.id:
-            raise AgentToolError("task_not_found", f"任务不存在: {task_id}", 404)
+        task = self._project_task(project, arguments)
         item = recycle_task(
             self.store, project, task, actor=identity.actor)
         self._refresh_task_snapshot(project.id, identity)
@@ -1010,6 +1294,44 @@ class AgentActionService:
             "deleted": True,
             "recycle_item": item,
             "resource_url": recycle_bin_url(project.id),
+        }
+
+
+    def _project_task(self, project: Project, arguments: dict) -> Task:
+        task_id = str(arguments.get("id", "")).strip()
+        task = self.store.get_task(task_id)
+        if task is None or task.project_id != project.id:
+            raise AgentToolError("task_not_found", f"任务不存在: {task_id}", 404)
+        return task
+
+    def _archive_task(self, project: Project, identity: AgentIdentity,
+                      arguments: dict, _context: AgentRunContext) -> dict:
+        from .tasks import archive_task
+
+        task = self._project_task(project, arguments)
+        was_archived = task.archived
+        archive_task(self.store, task, actor=identity.actor)
+        self._refresh_task_snapshot(project.id, identity)
+        url = task_resource_url(project.id, task.id)
+        return {
+            "summary": (f"任务 [{task.title}]({url}) 已是归档状态" if was_archived
+                        else f"已归档任务 [{task.title}]({url})"),
+            "task": task.to_dict(), "resource_url": url,
+        }
+
+    def _restore_task(self, project: Project, identity: AgentIdentity,
+                      arguments: dict, _context: AgentRunContext) -> dict:
+        from .tasks import restore_task
+
+        task = self._project_task(project, arguments)
+        was_archived = task.archived
+        restore_task(self.store, task, actor=identity.actor)
+        self._refresh_task_snapshot(project.id, identity)
+        url = task_resource_url(project.id, task.id)
+        return {
+            "summary": (f"已恢复归档任务 [{task.title}]({url})" if was_archived
+                        else f"任务 [{task.title}]({url}) 未归档，无需恢复"),
+            "task": task.to_dict(), "resource_url": url,
         }
 
     def _refresh_task_snapshot(self, project_id: str,
@@ -1139,6 +1461,13 @@ class AgentActionService:
         if (not isinstance(mentions, list)
                 or not all(isinstance(item, str) for item in mentions)):
             raise AgentToolError("invalid_arguments", "mentions 必须是角色 id 数组")
+        if (mentions and not identity.is_automation
+                and not project.can_dispatch(identity.role_id)):
+            # 无主控项目的角色有主控级管理权限,但不能派发:只有人类点名启动角色
+            raise AgentToolError(
+                "permission_denied",
+                "本项目没有主控,角色之间不能派发;需要其他角色时请在最终回复里说明,"
+                "由人类点名", 403)
         unique_mentions: list[str] = []
         for role_id in mentions:
             if not identity.is_automation and role_id == identity.role_id:
@@ -1208,9 +1537,11 @@ class AgentActionService:
                 result["summary"] += (
                     "，已派发 " + "、".join(f"@{r}" for r in result["dispatched"]))
                 result["handoff"] = "end_turn"
+                # resume 是给调用方 Agent 的提示,与 Prompt 一样用英文;summary 会展示给人类
                 result["resume"] = (
-                    "不要向仍在执行的角色追问中间状态；MissionCrew 会在已派发角色"
-                    "完成或失败后自动启动你的新 turn 交回结果"
+                    "Do not ask still-running roles for interim status; MissionCrew automatically "
+                    "starts a new turn for you with the results once the dispatched roles finish "
+                    "or fail"
                 )
             if dropped:
                 result["not_dispatched"] = dropped
@@ -1269,6 +1600,73 @@ class AgentActionService:
         where = f"(工作目录 {workdir})" if workdir else ""
         return {
             "summary": f"已创建频道 [#{channel.name}]({url}){where}",
+            "channel": channel.to_dict(), "resource_url": url,
+        }
+
+
+    def _update_channel(self, project: Project, identity: AgentIdentity,
+                        arguments: dict, _context: AgentRunContext) -> dict:
+        if not str(arguments.get("id") or "").strip() and not identity.channel_id:
+            raise AgentToolError("invalid_arguments", "需要提供频道 id")
+        channel = self._project_channel(
+            project, arguments.get("id", ""), identity.channel_id)
+        fields: dict = {}
+        for key in ("name", "purpose"):
+            if key in arguments:
+                fields[key] = str(arguments.get(key) or "")
+        if "workdir" in arguments:
+            requested = str(arguments.get("workdir") or "").strip()
+            # 空值 = 改回平台内置工作区;非空必须落在项目代码仓内(与 channel.create 同口径)
+            fields["workdir"] = (self._resolve_channel_workdir(project, requested)
+                                 if requested else None)
+        if not fields:
+            raise AgentToolError(
+                "invalid_arguments", "channel.update 至少需要 name、purpose、workdir 之一")
+        try:
+            changed = channel_ops.update_channel(
+                self.store, channel, actor=identity.actor, **fields)
+        except channel_ops.ChannelChangeError as exc:
+            raise AgentToolError(exc.code, str(exc), 409) from exc
+        url = channel_resource_url(project.id, channel.id)
+        labels = {"name": "名称", "purpose": "用途", "workdir": "工作目录"}
+        if changed:
+            summary = (f"已更新频道 [#{channel.name}]({url})的"
+                       + "、".join(labels[key] for key in changed))
+            if "workdir" in changed:
+                summary += f"(新工作目录 {channel.workdir or '平台内置工作区'}，从下一轮执行起生效)"
+        else:
+            summary = f"频道 [#{channel.name}]({url}) 没有变化"
+        return {"summary": summary, "changed": changed,
+                "channel": channel.to_dict(), "resource_url": url}
+
+    def _archive_channel(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        channel = self._project_channel(project, arguments.get("id", ""))
+        if channel.content_kind:
+            raise AgentToolError(
+                "content_channel", "页面对话频道随内容页存在，不能经 Agent Tool 归档", 409)
+        try:
+            stopped = channel_ops.archive_channel(
+                self.store, channel, actor=identity.actor,
+                stop_sessions=self._stop_channel_sessions)
+        except channel_ops.ChannelChangeError as exc:
+            raise AgentToolError(exc.code, str(exc), 409) from exc
+        url = channel_resource_url(project.id, channel.id)
+        return {
+            "summary": f"已归档频道 [#{channel.name}]({url})",
+            "channel": channel.to_dict(), "stopped_runtimes": stopped,
+            "resource_url": url,
+        }
+
+    def _restore_channel(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        channel = self._project_channel(project, arguments.get("id", ""))
+        restored = channel_ops.restore_channel(
+            self.store, channel, actor=identity.actor)
+        url = channel_resource_url(project.id, channel.id)
+        return {
+            "summary": (f"已恢复归档频道 [#{channel.name}]({url})" if restored
+                        else f"频道 [#{channel.name}]({url}) 未归档，无需恢复"),
             "channel": channel.to_dict(), "resource_url": url,
         }
 
@@ -1339,6 +1737,38 @@ class AgentActionService:
             self.store, project, board_id, actor=identity.actor)
         return {"summary": f"已将面板 {board.name} 移入项目回收站",
                 "deleted": True, "recycle_item": item}
+
+
+    def _list_dashboards(self, project: Project, _identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        """不带 id 列出摘要;带 id 返回 dashboard.save 可直接改写的完整配置。"""
+        def short_id(board: Board) -> str:
+            return board.id.removeprefix(f"{project.id}:")
+
+        if str(arguments.get("id") or "").strip():
+            raw_id = self._control_id(arguments.get("id"))
+            board = self.store.get_board(f"{project.id}:{raw_id}")
+            if board is None or board.project_id != project.id:
+                raise AgentToolError("not_found", "面板不存在", 404)
+            url = dashboard_resource_url(project.id, board.id)
+            return {"summary": f"面板 [{board.name}]({url}) 的完整配置",
+                    "dashboard": {**board.to_dict(), "id": short_id(board),
+                                  "resource_url": url}}
+        rows = []
+        for board in self.store.list_boards(project.id):
+            row = {"id": short_id(board), "name": board.name,
+                   "description": board.description, "kind": board.kind,
+                   "updated_at": board.updated_at,
+                   "resource_url": dashboard_resource_url(project.id, board.id)}
+            if board.kind == "taskboard":
+                row.update(source=board.source, group_by=board.group_by,
+                           filters=[f.get("title", "") for f in board.filters])
+            else:
+                row["widgets"] = [{"id": w.id, "type": w.type, "title": w.title}
+                                  for w in board.layout]
+            rows.append(row)
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个面板",
+                "dashboards": rows}
 
     def _save_board_source(self, project: Project, identity: AgentIdentity,
                            arguments: dict, _context: AgentRunContext) -> dict:
@@ -1423,6 +1853,24 @@ class AgentActionService:
                             f"(连带 {removed} 个任务)"),
                 "deleted": True}
 
+
+    def _list_board_sources(self, project: Project, _identity: AgentIdentity,
+                            _arguments: dict, _context: AgentRunContext) -> dict:
+        boards = [b for b in self.store.list_boards(project.id) if b.kind == "taskboard"]
+        rows = []
+        for record in self.store.list_board_datasources(project.id):
+            short = record.id.removeprefix(f"{project.id}:")
+            rows.append({
+                "id": short, "name": record.name, "description": record.description,
+                "columns": record.status_values,
+                "task_count": len(self.store.list_tasks(project.id, source_id=short)),
+                "dashboards": [b.id.removeprefix(f"{project.id}:")
+                               for b in boards if b.source == short],
+                "updated_at": record.updated_at,
+            })
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个自定义任务数据源",
+                "sources": rows}
+
     def _save_automation(self, project: Project, identity: AgentIdentity,
                          arguments: dict, _context: AgentRunContext) -> dict:
         from .automations import save_automation
@@ -1436,6 +1884,7 @@ class AgentActionService:
                 script=arguments.get("script"),
                 cron=arguments.get("cron"),
                 enabled=arguments.get("enabled"),
+                webhook=arguments.get("webhook"),
                 actions=arguments.get("actions"),
                 timeout_seconds=arguments.get("timeout_seconds"),
                 actor=identity.actor,
@@ -1443,12 +1892,15 @@ class AgentActionService:
             )
         except ValueError as exc:
             raise AgentToolError("invalid_arguments", str(exc), 400) from exc
-        schedule = (f"cron `{automation.cron}`" if automation.cron
-                    else "仅手动触发")
+        triggers = [f"cron `{automation.cron}`"] if automation.cron else []
+        if automation.webhook:
+            triggers.append("webhook")
+        # 密钥只给人看:Agent 拿到的配置里没有 webhook_secret
         return {
             "summary": (f"已{'创建' if created else '更新'}自动化脚本 "
-                        f"{automation.name}({schedule})"),
-            "automation": automation.to_dict(),
+                        f"{automation.name}({' + '.join(triggers) or '仅手动触发'})"),
+            "automation": {**automation.public_dict(),
+                           "webhook_path": webhook_path(automation)},
             "resource_url": automation_resource_url(project.id, automation.id),
         }
 
@@ -1465,6 +1917,78 @@ class AgentActionService:
         return {
             "summary": f"已删除自动化脚本 {automation.name}",
             "deleted": True,
+        }
+
+
+    def _project_automation(self, project: Project, arguments: dict):
+        from .automations import normalize_automation_id
+
+        try:
+            full_id = normalize_automation_id(project.id, str(arguments.get("id", "")))
+        except ValueError as exc:
+            raise AgentToolError("invalid_arguments", str(exc)) from exc
+        automation = self.store.get_automation(full_id)
+        if automation is None or automation.project_id != project.id:
+            raise AgentToolError("not_found", "自动化脚本不存在", 404)
+        return automation
+
+    def _list_automations(self, project: Project, _identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        """不带 id 列出摘要;带 id 返回脚本全文与最近运行(输出只留末尾)。"""
+        def summary_row(automation) -> dict:
+            return {
+                "id": automation.id.removeprefix(f"{project.id}:"),
+                "name": automation.name, "description": automation.description,
+                "cron": automation.cron, "enabled": automation.enabled,
+                "webhook": automation.webhook,
+                "webhook_path": webhook_path(automation) if automation.webhook else "",
+                "actions": automation.actions,
+                "timeout_seconds": automation.timeout_seconds,
+                "last_run_at": automation.last_run_at,
+                "last_status": automation.last_status,
+                "resource_url": automation_resource_url(project.id, automation.id),
+            }
+
+        if str(arguments.get("id") or "").strip():
+            automation = self._project_automation(project, arguments)
+            limit = arguments.get("runs", 5)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+                raise AgentToolError("invalid_arguments", "runs 必须是 1..20 的整数")
+            runs = []
+            for row in self.store.list_automation_runs(automation.id, limit):
+                run = {key: row.get(key) for key in (
+                    "id", "trigger", "trigger_detail", "status", "exit_code", "error",
+                    "started_at", "finished_at")}
+                for stream in ("stdout", "stderr"):
+                    text = str(row.get(stream) or "")
+                    run[stream] = text[-AUTOMATION_OUTPUT_TAIL:]
+                    run[f"{stream}_truncated"] = len(text) > AUTOMATION_OUTPUT_TAIL
+                runs.append(run)
+            return {"summary": f"自动化脚本 {automation.name} 的配置与最近 {len(runs)} 次运行",
+                    "automation": {**summary_row(automation), "script": automation.script},
+                    "runs": runs}
+        rows = [summary_row(item) for item in self.store.list_automations(project.id)]
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个自动化脚本",
+                "automations": rows}
+
+    def _run_automation(self, project: Project, identity: AgentIdentity,
+                        arguments: dict, _context: AgentRunContext) -> dict:
+        automation = self._project_automation(project, arguments)
+        if self._trigger_automation is None:
+            raise AgentToolError(
+                "unavailable", "自动化调度器未就绪，请稍后重试", 503, retryable=True)
+        try:
+            run_id = self._trigger_automation(automation, trigger="manual")
+        except ValueError as exc:
+            raise AgentToolError("in_use", str(exc), 409) from exc
+        self.store.audit(
+            identity.actor, "automation_run_requested",
+            detail=f"project={project.id} automation={automation.id} run={run_id}")
+        return {
+            "summary": (f"已手动触发自动化脚本 {automation.name}(运行记录 #{run_id})，"
+                        "在后台执行"),
+            "run_id": run_id,
+            "resource_url": automation_resource_url(project.id, automation.id),
         }
 
     def _save_guideline(self, project: Project, identity: AgentIdentity,
@@ -1504,6 +2028,29 @@ class AgentActionService:
             "recycle_item": item,
             "resource_url": guideline_resource_url(project.id, name),
         }
+
+
+    def _list_guidelines(self, project: Project, _identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        sync_guideline_library(self.store, project)
+        name = str(arguments.get("name") or "").strip()
+        if name:
+            for guideline in project.guidelines:
+                if guideline.name == name:
+                    url = guideline_resource_url(project.id, guideline.name)
+                    return {"summary": f"准则 [{guideline.name}]({url}) 全文",
+                            "guideline": {"name": guideline.name,
+                                          "description": guideline.description,
+                                          "enabled": guideline.enabled,
+                                          "markdown": guideline.render_markdown(),
+                                          "resource_url": url}}
+            raise AgentToolError("not_found", f"准则不存在: {name}", 404)
+        rows = [{"name": g.name, "description": g.description, "enabled": g.enabled,
+                 "resource_url": guideline_resource_url(project.id, g.name)}
+                for g in project.guidelines]
+        enabled = sum(1 for row in rows if row["enabled"])
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 篇准则(启用 {enabled} 篇)",
+                "guidelines": rows}
 
     def _save_skill(self, project: Project, identity: AgentIdentity,
                     arguments: dict, _context: AgentRunContext) -> dict:
@@ -1548,6 +2095,124 @@ class AgentActionService:
             "revision": item["revision"],
             "resource_url": skill_resource_url(project.id, skill_id),
         }
+
+
+    def _list_skills(self, project: Project, _identity: AgentIdentity,
+                     arguments: dict, _context: AgentRunContext) -> dict:
+        project, _issues = sync_project_skill_library(self.store, project)
+        skill_id = str(arguments.get("id") or "").strip()
+        if skill_id:
+            skill = next((item for item in project.skills if item.id == skill_id), None)
+            if skill is None:
+                raise AgentToolError("not_found", f"Skill 不存在: {skill_id}", 404)
+            markdown, files = skill_package(project.id, skill.id)
+            url = skill_resource_url(project.id, skill.id)
+            return {"summary": f"Skill [{skill.name or skill.id}]({url}) 的 SKILL.md 与文件清单",
+                    "skill": {"id": skill.id, "name": skill.name,
+                              "description": skill.description, "enabled": skill.enabled,
+                              "markdown": markdown, "files": files, "resource_url": url}}
+        rows = [{"id": item.id, "name": item.name, "description": item.description,
+                 "enabled": item.enabled,
+                 "resource_url": skill_resource_url(project.id, item.id)}
+                for item in project.skills]
+        enabled = sum(1 for row in rows if row["enabled"])
+        return {"summary": f"项目 {project.id} 共 {len(rows)} 个 Skill(启用 {enabled} 个)",
+                "skills": rows}
+
+
+    @staticmethod
+    def _history_limit(arguments: dict) -> int:
+        limit = arguments.get("limit", 20)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise AgentToolError("invalid_arguments", "limit 必须是 1..100 的整数")
+        return limit
+
+    @staticmethod
+    def _history_content(data: bytes) -> dict:
+        """历史版本正文:UTF-8 文本原样返回,否则给 base64(与 document.publish 对称)。"""
+        if len(data) > MAX_HISTORY_READ_BYTES:
+            raise AgentToolError(
+                "file_too_large",
+                f"该版本超过 {MAX_HISTORY_READ_BYTES // 1024 // 1024} MB，请在 Web 端下载", 413)
+        try:
+            return {"content": data.decode("utf-8")}
+        except UnicodeDecodeError:
+            return {"content_base64": base64.b64encode(data).decode("ascii")}
+
+    def _document_history(self, project: Project, _identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        path = str(arguments.get("path") or "").strip()
+        if not path:
+            raise AgentToolError("invalid_arguments", "需要提供 path")
+        library = library_for(project.id)
+        url = document_resource_url(project.id, path)
+        revision = str(arguments.get("revision") or "").strip()
+        if revision:
+            try:
+                data = library.read_history_bytes(path, revision)
+            except FileNotFoundError as exc:
+                raise AgentToolError("not_found", str(exc), 404) from exc
+            return {"summary": f"文档 {path} 在版本 {revision[:10]} 的内容",
+                    "path": path, "revision": revision, "resource_url": url,
+                    **self._history_content(data)}
+        versions = library.history(path, self._history_limit(arguments))
+        if not versions:
+            raise AgentToolError("not_found", f"文档没有历史版本: {path}", 404)
+        return {"summary": f"文档 {path} 最近 {len(versions)} 个版本",
+                "path": path, "versions": versions, "resource_url": url}
+
+    def _guideline_history(self, project: Project, _identity: AgentIdentity,
+                           arguments: dict, _context: AgentRunContext) -> dict:
+        name = str(arguments.get("name") or "").strip()
+        if not name:
+            raise AgentToolError("invalid_arguments", "需要提供 name")
+        sync_guideline_library(self.store, project)
+        url = guideline_resource_url(project.id, name)
+        revision = str(arguments.get("revision") or "").strip()
+        try:
+            if revision:
+                version = read_guideline_version(self.store, project, name, revision)
+                return {"summary": f"准则 {name} 在版本 {revision[:10]} 的全文",
+                        "name": name, "resource_url": url,
+                        "version": {key: version[key] for key in (
+                            "revision", "created_at", "actor", "message")},
+                        "markdown": version["markdown"]}
+            versions = guideline_history(
+                self.store, project, name, self._history_limit(arguments))
+        except FileNotFoundError as exc:
+            raise AgentToolError("not_found", str(exc), 404) from exc
+        return {"summary": f"准则 {name} 最近 {len(versions)} 个版本",
+                "name": name, "versions": versions, "resource_url": url}
+
+    def _skill_history(self, project: Project, _identity: AgentIdentity,
+                       arguments: dict, _context: AgentRunContext) -> dict:
+        skill_id = self._control_id(arguments.get("id"))
+        url = skill_resource_url(project.id, skill_id)
+        revision = str(arguments.get("revision") or "").strip()
+        file = str(arguments.get("file") or "").strip()
+        if file and not revision:
+            raise AgentToolError("invalid_arguments", "file 需要和 revision 一起提供")
+        try:
+            if revision:
+                package = read_skill_version(self.store, project, skill_id, revision)
+                result = {"summary": f"Skill {skill_id} 在版本 {revision[:10]} 的内容",
+                          "id": skill_id, "revision": package["revision"],
+                          "markdown": package["markdown"], "files": package["files"],
+                          "resource_url": url}
+                if file:
+                    if file not in package["files"]:
+                        raise AgentToolError(
+                            "not_found", f"该版本的 Skill 包里没有文件: {file}", 404)
+                    data = skill_version_library(project.id).read_bytes(
+                        skill_id, file, package["revision"])
+                    result.update(file=file, **self._history_content(data))
+                return result
+            versions = skill_history(
+                self.store, project, skill_id, self._history_limit(arguments))
+        except FileNotFoundError as exc:
+            raise AgentToolError("not_found", str(exc), 404) from exc
+        return {"summary": f"Skill {skill_id} 最近 {len(versions)} 个版本",
+                "id": skill_id, "versions": versions, "resource_url": url}
 
     def _list_recycle_bin(self, project: Project, _identity: AgentIdentity,
                           _arguments: dict, _context: AgentRunContext) -> dict:

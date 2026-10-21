@@ -40,6 +40,21 @@ def test_property_star_existence_and_negation():
     assert matches("!owner: *", without_owner)
 
 
+def test_bare_term_also_matches_labels_using_it_as_property():
+    # 不带冒号的项 = 同名普通标签 | 该属性已设置;!项 即「完全没有这个标签/属性」
+    assert matches("owner", ["owner: 张三"])
+    assert matches("Owner", ["owner"])
+    assert not matches("owner", ["bug"])
+    assert not matches("!owner", ["owner: 张三"])
+    assert matches("!owner", ["bug"])
+    expr = "! 责任人 & ! agent-ready"
+    assert matches(expr, ["bug"])
+    assert not matches(expr, ["责任人: 张三"])
+    assert not matches(expr, ["agent-ready"])
+    # 带冒号但值为空的项仍是普通标签,不当作属性存在性
+    assert not matches("owner:", ["owner: 张三"])
+
+
 def test_operators_parens_and_case_insensitive_match():
     expr = "(Bug | crash) & !wontfix"
     assert matches(expr, ["bug"])

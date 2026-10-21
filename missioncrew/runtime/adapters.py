@@ -149,22 +149,25 @@ _INJECTION_LABELS = {
     "lean": "增量回合(版本未变,沿用会话内公共上下文)",
 }
 
+# 以下横幅是给角色的提示词,与公共上下文一样用英文
 LEAN_TURN_TEMPLATE = (
-    "# MissionCrew 增量回合\n"
-    "持久公共上下文版本 {context_version} 未变化,本轮不重发;会话中已注入的"
-    "公共上下文(角色、项目、权限、协作规则)继续有效。\n\n"
+    "# MissionCrew Incremental Turn\n"
+    "Durable shared context version {context_version} is unchanged and not resent this turn; "
+    "the shared context already injected in this session (role, project, permissions, "
+    "collaboration rules) remains in effect.\n\n"
 )
 
 _REINJECT_BANNER = (
-    "# MissionCrew 公共上下文重注入\n"
-    "距上次完整注入较久或会话历史发生过压缩,现重发完整公共上下文;"
-    "以本区块为准刷新角色、项目、权限与协作规则。\n\n"
+    "# MissionCrew Shared Context Reinjection\n"
+    "It has been a while since the last full injection, or the session history was compacted, "
+    "so the full shared context is resent; refresh your role, project, permissions and "
+    "collaboration rules from this block.\n\n"
 )
 
 _UPDATE_BANNER = (
-    "# MissionCrew 公共上下文更新\n"
-    "本轮公共上下文版本已经变化。立即以新版本完整替换会话中的旧版本，"
-    "不要继续引用旧项目设置。\n\n"
+    "# MissionCrew Shared Context Update\n"
+    "The shared context version changed this turn. Replace the old version in this session "
+    "with the new one completely and stop referring to old project settings.\n\n"
 )
 
 
@@ -340,9 +343,16 @@ def is_newer(latest: str, installed: str) -> bool:
 
 
 def fetch_latest_version(adapter: str, timeout: int = 8) -> str:
-    """查询工具的最新发布版本(目前支持 npm registry);查不到返回空。"""
+    """查询工具的最新发布版本;查不到返回空。
+
+    工具声明了 latest_version 钩子(自带的更新检查子命令)时用它,否则查
+    npm registry。
+    """
     import urllib.parse
     import urllib.request
+    cli_spec = _clis.BY_ADAPTER.get(adapter)
+    if cli_spec and cli_spec.latest_version:
+        return cli_spec.latest_version(timeout)
     pkg = (UPDATE_SPECS.get(adapter) or {}).get("npm")
     if not pkg:
         return ""
@@ -685,6 +695,12 @@ def _load_session_meta(adapter_name: str) -> Optional[dict]:
     return dict(spec.load_session_meta) if spec and spec.load_session_meta else None
 
 
+def _prompt_usage_parser(adapter_name: str):
+    """工具声明的 ACP 私有用量解析钩子(grok 的 _meta.usage 等);None = 只认标准字段。"""
+    spec = _clis.BY_ADAPTER.get(adapter_name)
+    return spec.parse_prompt_usage if spec else None
+
+
 def supports_account_usage(adapter: str) -> bool:
     """该 adapter 是否声明了账户限额探测钩子。"""
     return account_usage_probe(adapter) is not None
@@ -709,11 +725,11 @@ class AcpAdapter:
         if not template:
             return RunResult(False, f"适配器 {self.adapter_name} 未配置 ACP serve 命令")
         workdir = str(Path(cfg.workdir).expanduser().resolve())
+        extra_dirs = _additional_allowed_dirs(workdir, cfg.allowed_dirs)
         cmd = render_command(
             template, "", cfg.backend.model,
             cfg.env.get("MISSIONCREW_DOCUMENTS_DIR", ""), cfg.effort,
-            allowed_dirs=_additional_allowed_dirs(workdir, cfg.allowed_dirs),
-            workdir=workdir,
+            allowed_dirs=extra_dirs, workdir=workdir,
         )
         if self.command is None:
             cmd = _apply_permission_policy(cmd, self.adapter_name, cfg)
@@ -749,6 +765,10 @@ class AcpAdapter:
             load_session_meta=_load_session_meta(self.adapter_name),
             trigger_message_id=cfg.trigger_message_id,
             effort=protocol_effort,
+            # 额外目录同时交给协议层:声明了会话级 additionalDirectories 的
+            # 工具(trae)经 session/new|load 授权,其余工具已在 serve 命令里
+            additional_dirs=extra_dirs,
+            parse_usage=_prompt_usage_parser(self.adapter_name),
         )
         try:
             _diagnostic_log_path(cfg, self.adapter_name).write_text(text)
@@ -1304,12 +1324,12 @@ def get_adapter(name: str):
 
 
 def _role_from_prompt(prompt: str) -> str:
-    m = re.search(r"你是角色 @([\w-]+)", prompt)
+    m = re.search(r"You are role @([\w-]+)", prompt)
     return m.group(1) if m else ""
 
 
 def _trigger_from_prompt(prompt: str) -> str:
-    m = re.search(r"# 触发消息[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.S)
+    m = re.search(r"# Trigger Message[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.S)
     if not m:
         return ""
     raw = m.group(1).strip()

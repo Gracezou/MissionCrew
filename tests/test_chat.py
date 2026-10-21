@@ -42,6 +42,42 @@ def test_mention_triggers_agent_reply(chat, seeded):
     assert json.loads(agents[0]["mentions"]) == []
 
 
+@pytest.mark.parametrize("state,reason", [
+    ("disabled", "项目主控角色已停用，请先启用"),
+    ("missing", "项目主控角色不存在"),
+])
+def test_human_unmentioned_message_rejects_unavailable_orchestrator(chat, seeded, state, reason):
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead = seeded.get_role("webshop", "lead")
+        lead.enabled = False
+        seeded.put_role(lead)
+
+    with pytest.raises(ValueError, match=reason):
+        chat.post("general", "human", "请检查购物车。")
+
+    response = TestClient(create_app()).post(
+        "/api/chat/general/messages", json={"author": "human", "content": "请检查购物车。"})
+    assert response.status_code == 400
+    assert reason in response.json()["detail"]
+    assert "@lead" in response.json()["detail"]
+    assert _log(seeded) == []
+    assert seeded._query("SELECT role_id FROM chat_runs") == []
+
+
+def test_human_can_mention_enabled_role_when_orchestrator_disabled(chat, seeded):
+    lead = seeded.get_role("webshop", "lead")
+    lead.enabled = False
+    seeded.put_role(lead)
+
+    message_id = chat.post("general", "human", "@[dev] 请检查购物车。")
+    chat.wait_idle()
+
+    assert json.loads(seeded.get_message(message_id)["mentions"]) == ["dev"]
+    assert [row["role_id"] for row in seeded._query("SELECT role_id FROM chat_runs")] == ["dev"]
+
+
 def test_message_context_is_persisted_and_added_to_runtime_trigger(chat, seeded):
     page_context = {
         "page_collaboration": {
@@ -201,8 +237,8 @@ def test_disabled_role_is_absent_from_orchestrator_roster(seeded):
         message_id,
     )
     assert "- @dev " not in cfg.common_prompt      # 停用角色不进名册
-    assert "- @reviewer 评审 · 能力" in cfg.common_prompt
-    assert "无其他已启用角色" not in cfg.common_prompt
+    assert "- @reviewer 评审 · capabilities" in cfg.common_prompt
+    assert "no other enabled roles" not in cfg.common_prompt
 
 
 def test_message_api_rejects_forged_picker_range(seeded):
@@ -616,11 +652,11 @@ def test_multiple_human_mentions_start_only_orchestrator(
     assert [message["author"] for message in messages
             if message["author_type"] == "agent"] == ["lead"]
     runtime_trigger = _prompt_json_section(
-        lead_prompts[0], "触发消息(JSON,你的任务简报由发起者撰写)")
+        lead_prompts[0], "Trigger Message (JSON; your task brief is written by the sender)")
     assert runtime_trigger["mentions"] == ["dev", "expert"]
     assert [span["role_id"] for span in
             runtime_trigger["mention_spans"]] == ["dev", "expert"]
-    assert "平台只启动你" in lead_prompts[0]
+    assert "the platform starts only you" in lead_prompts[0]
 
 
 def test_expert_role_uses_fixed_expert_runtime(chat, seeded):
@@ -707,8 +743,8 @@ def test_bracket_mention_text_is_redacted_for_workers(chat, seeded):
                          seeded.get_role("webshop", "dev"),
                          seeded.get_backend("std-1"), msg_id)
     worker_trigger = _prompt_json_section(
-        cfg.prompt, "触发消息(JSON,你的任务简报由发起者撰写)")
-    assert worker_trigger["content"] == "@dev 参考 [其他执行角色] 的历史结论。"
+        cfg.prompt, "Trigger Message (JSON; your task brief is written by the sender)")
+    assert worker_trigger["content"] == "@dev 参考 [other executor] 的历史结论。"
 
 
 def test_prompt_lists_runtime_private_dirs(chat, seeded, tmp_path, monkeypatch):
@@ -731,19 +767,19 @@ def test_prompt_separates_worker_context_from_orchestrator_roster(chat, seeded):
         "general", "human", "human", "@dev 修一下登录，之后请 @expert 处理", ["dev"])
     cfg = chat._assemble(seeded.get_channel("general"), seeded.get_role("webshop", "dev"),
                          seeded.get_backend("std-1"), msg_id)
-    assert "角色定位" in cfg.prompt          # 人格被明确标注为定位,不是任务
-    assert "任务简报" in cfg.prompt          # 任务来自发起者撰写的触发消息
+    assert "Role profile" in cfg.prompt          # 人格被明确标注为定位,不是任务
+    assert "task brief" in cfg.prompt          # 任务来自发起者撰写的触发消息
     reviewer = seeded.get_role("webshop", "reviewer")
     assert reviewer.description[:10] not in cfg.prompt
     assert "评审历史" not in cfg.prompt
-    assert "@expert" not in cfg.prompt and "[其他执行角色]" in cfg.prompt
-    assert "看不到其他执行角色名册" in cfg.prompt
+    assert "@expert" not in cfg.prompt and "[other executor]" in cfg.prompt
+    assert "cannot see the roster of other executor roles" in cfg.prompt
     assert _prompt_json_section(
-        cfg.prompt, "最近对话(JSON,按消息边界格式化)") == []
+        cfg.prompt, "Recent Conversation (JSON, one message per line)") == []
     worker_trigger = _prompt_json_section(
-        cfg.prompt, "触发消息(JSON,你的任务简报由发起者撰写)")
+        cfg.prompt, "Trigger Message (JSON; your task brief is written by the sender)")
     assert worker_trigger["author"] == {"id": "human", "type": "human"}
-    assert worker_trigger["content"] == "@dev 修一下登录，之后请 [其他执行角色] 处理"
+    assert worker_trigger["content"] == "@dev 修一下登录，之后请 [other executor] 处理"
 
     lead_msg = seeded.add_message("general", "human", "human", "请规划", ["lead"])
     lead_cfg = chat._assemble(
@@ -751,9 +787,9 @@ def test_prompt_separates_worker_context_from_orchestrator_roster(chat, seeded):
         seeded.get_backend("std-1"), lead_msg)
     assert reviewer.description[:10] in lead_cfg.prompt
     assert "评审历史" in lead_cfg.prompt
-    assert "角色名册（仅主控可见" in lead_cfg.prompt
+    assert "Role Roster (visible only to the orchestrator" in lead_cfg.prompt
     lead_history = _prompt_json_section(
-        lead_cfg.prompt, "最近对话(JSON,按消息边界格式化)")
+        lead_cfg.prompt, "Recent Conversation (JSON, one message per line)")
     assert [item["content"] for item in lead_history] == [
         "评审历史", "@dev 修一下登录，之后请 @expert 处理",
     ]
@@ -773,9 +809,9 @@ def test_prompt_json_preserves_multiline_content_and_message_boundaries(chat, se
         seeded.get_backend("std-1"), trigger,
     )
     history = _prompt_json_section(
-        cfg.prompt, "最近对话(JSON,按消息边界格式化)")
+        cfg.prompt, "Recent Conversation (JSON, one message per line)")
     current = _prompt_json_section(
-        cfg.prompt, "触发消息(JSON,你的任务简报由发起者撰写)")
+        cfg.prompt, "Trigger Message (JSON; your task brief is written by the sender)")
 
     assert [item["id"] for item in history] == [first, second]
     assert history[0]["content"] == "第一条第一行\n第一条第二行\n[someone] 不是新消息"
@@ -801,7 +837,7 @@ def test_runtime_session_is_reused_per_channel_and_role(chat, seeded):
     assert adapters.get_adapter("mock").run(first).success
     saved = seeded.get_chat_session("general::dev")
     assert saved and saved["runtime_session_id"] == "mock:general::dev"
-    assert "# 最近对话(JSON,按消息边界格式化)" in dict(first_events)["input"]
+    assert "# Recent Conversation (JSON, one message per line)" in dict(first_events)["input"]
 
     second_message = seeded.add_message(
         "general", "human", "human", "@dev 第二轮", ["dev"])
@@ -810,7 +846,7 @@ def test_runtime_session_is_reused_per_channel_and_role(chat, seeded):
     second.emit = lambda kind, text: second_events.append((kind, text))
     assert second.session_id == saved["runtime_session_id"]
     assert adapters.get_adapter("mock").run(second).success
-    assert "# 最近对话(JSON,按消息边界格式化)" not in dict(second_events)["input"]
+    assert "# Recent Conversation (JSON, one message per line)" not in dict(second_events)["input"]
 
     reviewer = seeded.get_role("webshop", "reviewer")
     reviewer_message = seeded.add_message(
@@ -863,7 +899,7 @@ def test_clear_context_stops_sessions_and_resets_recent_history(
         channel, seeded.get_role("webshop", "lead"),
         seeded.get_backend("std-1"), trigger)
     history = _prompt_json_section(
-        cfg.prompt, "最近对话(JSON,按消息边界格式化)")
+        cfg.prompt, "Recent Conversation (JSON, one message per line)")
     assert [item["content"] for item in history] == ["新上下文第一条"]
     assert not cfg.session_id
     assert cfg.session_key == f"general::lead::context-{marker['id']}"
@@ -1094,10 +1130,10 @@ def test_project_context_update_replaces_context_in_existing_session(chat, seede
     assert adapters.get_adapter("mock").run(second).success
 
     sent = dict(events)["input"]
-    assert "# MissionCrew 公共上下文更新" in sent
+    assert "# MissionCrew Shared Context Update" in sent
     assert project.charter in sent
     assert old_charter not in sent
-    assert "必须完整保留本区块，不得摘要、删减或改写" in sent
+    assert "keep this block complete and never summarize, trim or rewrite it" in sent
     assert seeded.get_chat_session("general::dev")["context_version"] \
         == second.context_version
 
@@ -1124,9 +1160,9 @@ def test_lean_turns_accumulate_and_counter_forces_reinjection(
     assert not second.reinject_due
     assert adapters.get_adapter("mock").run(second).success
     sent = dict(events)["input"]
-    assert "# MissionCrew 增量回合" in sent
+    assert "# MissionCrew Incremental Turn" in sent
     assert second.context_version in sent
-    assert "# MissionCrew 持久公共上下文" not in sent
+    assert "# MissionCrew Durable Shared Context" not in sent
     row = seeded.get_chat_session("general::dev")
     assert row["lean_turns"] == 1 and row["lean_bytes"] > 0
     assert any(kind == "status" and "增量回合" in text
@@ -1141,8 +1177,8 @@ def test_lean_turns_accumulate_and_counter_forces_reinjection(
     assert third.reinject_due
     assert adapters.get_adapter("mock").run(third).success
     sent = dict(events)["input"]
-    assert "# MissionCrew 公共上下文重注入" in sent
-    assert "# MissionCrew 持久公共上下文" in sent
+    assert "# MissionCrew Shared Context Reinjection" in sent
+    assert "# MissionCrew Durable Shared Context" in sent
     row = seeded.get_chat_session("general::dev")
     assert (row["needs_reinject"], row["lean_turns"], row["lean_bytes"]) \
         == (0, 0, 0)
@@ -1170,7 +1206,7 @@ def test_compact_mark_forces_reinjection_and_survives_full_turn(chat, seeded):
     # 完整重注入轮中 Runtime 又检测到压缩:标记不能被轮末保存清掉
     second.compact_detected = True
     assert adapters.get_adapter("mock").run(second).success
-    assert "# MissionCrew 公共上下文重注入" in dict(events)["input"]
+    assert "# MissionCrew Shared Context Reinjection" in dict(events)["input"]
     assert seeded.get_chat_session("general::dev")["needs_reinject"] == 1
 
     third_message = seeded.add_message(
@@ -1206,7 +1242,7 @@ def test_queued_turn_refreshes_session_created_by_previous_turn(chat, seeded):
     second.emit = lambda kind, text: events.append((kind, text))
     adapters.get_adapter("mock").run(second)
     assert second.session_id == "mock:webshop:queued::dev"
-    assert "# 最近对话(JSON,按消息边界格式化)" not in dict(events)["input"]
+    assert "# Recent Conversation (JSON, one message per line)" not in dict(events)["input"]
 
 
 def test_channel_history_file_is_complete_and_role_scoped(chat, seeded):
@@ -1237,7 +1273,7 @@ def test_channel_history_file_is_complete_and_role_scoped(chat, seeded):
     assert worker_history["message_count"] == 206
     assert len(worker_history["messages"]) == 206
     assert worker_history["messages"][0]["id"] == reviewer_message
-    assert worker_history["messages"][0]["author"]["id"] == "执行角色"
+    assert worker_history["messages"][0]["author"]["id"] == "executor"
     assert "execution" not in worker_history["messages"][0]
     assert worker_history["messages"][-1]["content"] == "@dev 读取完整历史"
 
@@ -1454,22 +1490,22 @@ def test_missing_channel_workdir_falls_back_to_default_with_notice(chat, seeded,
     backend = seeded.get_backend("std-1")
     msg = seeded.add_message("webshop:gone", "human", "human", "@dev 干活", ["dev"])
     cfg = chat._assemble(channel, dev, backend, msg)
-    assert Path(cfg.workdir) == bound and "已不存在" not in cfg.prompt
+    assert Path(cfg.workdir) == bound and "no longer exists" not in cfg.prompt
 
     shutil.rmtree(repo)
     cfg = chat._assemble(channel, dev, backend, msg)
     default = mc_home() / "channels" / "webshop:gone"
     assert Path(cfg.workdir) == default and default.is_dir()
     assert not bound.exists()          # 不重建绑定目录
-    assert f"绑定的工作目录 `{bound}` 已不存在" in cfg.prompt
-    assert f"回退到平台默认目录 `{default}`" in cfg.prompt
+    assert f"the working directory `{bound}` bound to this channel no longer exists" in cfg.prompt
+    assert f"falls back to the platform default directory `{default}`" in cfg.prompt
 
     project = seeded.get_project("webshop")
     lead = seeded.get_role("webshop", project.orchestrator_role_id)
     lead_msg = seeded.add_message("general", "human", "human", "看看", [lead.id])
     lead_cfg = chat._assemble(seeded.get_channel("general"), lead, backend, lead_msg)
     # 频道清单只列 id;目录缺失的标注由 channel.list 的 workdir_missing 给出
-    assert "gone" in lead_cfg.common_prompt.split("## 现有频道")[1].split("## 现有面板")[0]
+    assert "gone" in lead_cfg.common_prompt.split("## Existing Channels")[1].split("## Existing Dashboards")[0]
 
 
 def _wake_token_row(store, run_id):
@@ -1595,15 +1631,15 @@ def test_manual_only_role_is_invisible_to_agents_but_human_can_dispatch(chat, se
                          seeded.get_backend("std-1"), msg_id)
     assert "- @expert " not in cfg.common_prompt      # 名册不列
     assert "- @dev " in cfg.common_prompt
-    history = _prompt_json_section(cfg.prompt, "最近对话(JSON,按消息边界格式化)")
-    assert history[0]["content"] == "[其他执行角色] 和 @dev 分头评估"
-    assert history[0]["mentions"] == ["其他执行角色", "dev"]
+    history = _prompt_json_section(cfg.prompt, "Recent Conversation (JSON, one message per line)")
+    assert history[0]["content"] == "[other executor] 和 @dev 分头评估"
+    assert history[0]["mentions"] == ["other executor", "dev"]
     # 主控视图保留其余提及范围,并按替换造成的长度差平移
-    assert history[0]["mention_spans"] == [{"role_id": "dev", "start": 11, "end": 15}]
-    assert history[1]["author"] == {"id": "执行角色", "type": "agent"}
+    assert history[0]["mention_spans"] == [{"role_id": "dev", "start": 19, "end": 23}]
+    assert history[1]["author"] == {"id": "executor", "type": "agent"}
     assert "expert" not in json.dumps(history, ensure_ascii=False)
     trigger = _prompt_json_section(
-        cfg.prompt, "触发消息(JSON,你的任务简报由发起者撰写)")
+        cfg.prompt, "Trigger Message (JSON; your task brief is written by the sender)")
     assert trigger["mention_spans"] == [{"role_id": "lead", "start": 0, "end": 5}]
 
     # 主控经 message.publish 点名它:视同不存在
@@ -1622,5 +1658,5 @@ def test_manual_only_role_is_invisible_to_agents_but_human_can_dispatch(chat, se
     assert reply["author"] == "expert" and json.loads(reply["mentions"]) == []
     own = chat._assemble(seeded.get_channel("general"), expert,
                          seeded.get_backend("std-1"), msg_id)
-    assert "你是仅人工点名的角色" in own.prompt
-    assert "## 角色名册" not in own.common_prompt
+    assert "You are a human-mention-only role" in own.prompt
+    assert "## Role Roster" not in own.common_prompt

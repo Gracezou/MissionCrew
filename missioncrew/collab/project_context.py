@@ -8,6 +8,7 @@ import tempfile
 import threading
 
 from .documents import DocumentLibrary, document_resource_url
+from .platform_docs import platform_docs_dir
 from .resource_urls import (guideline_resource_url, missioncrew_project_url,
                             skill_resource_url)
 from .skills import (project_skill_library_dir, skill_context_dir,
@@ -96,6 +97,8 @@ def project_allowed_dirs(project: Project, library: DocumentLibrary,
                     else [str(guideline_context_dir(project)),
                           str(skill_context_dir(project))])
     context_dirs.append(str(project_skill_library_dir(project.id)))
+    if workspace_dir is not None:
+        context_dirs.append(str(platform_docs_dir()))   # 工作区 platform-docs/ 的链接目标
     for raw in [*project.repo_paths(), str(library.root), *context_dirs]:
         path = Path(raw).expanduser()
         if not path.is_dir():
@@ -114,12 +117,12 @@ def _guideline_content_version(doc: GuidelineDocument) -> str:
 def _render_guideline_summary(doc: GuidelineDocument) -> str:
     # 索引行只含元信息:全文路径与 Web URL 按目录规则推导,一次说明;正文版本
     # 不进公共上下文,正文修改经本轮输入的「资源更新」提示告知,不触发完整重发
-    description = " ".join(doc.description.split()) or "（未填写 description）"
+    description = " ".join(doc.description.split()) or "(no description)"
     return f"- `{doc.name}` · {description}"
 
 
 def _render_skill_summary(skill: ProjectSkill) -> str:
-    description = " ".join(skill.description.split()) or "（未填写 description）"
+    description = " ".join(skill.description.split()) or "(no description)"
     name = (skill.name or "").strip()
     if not name or name == skill.id or name == description:
         return f"- `{skill.id}` · {description}"
@@ -163,7 +166,7 @@ def render_project_context(project: Project, library: DocumentLibrary,
     for raw in extra_dirs or []:
         if raw and raw not in allowed_dirs:
             allowed_dirs.append(raw)
-    dirs_section = "\n".join(f"  - {path}" for path in allowed_dirs) or "  （无本地目录）"
+    dirs_section = "\n".join(f"  - {path}" for path in allowed_dirs) or "  (no local directories)"
     guideline_summaries = [
         _render_guideline_summary(doc) for doc in project.guidelines if doc.enabled
     ]
@@ -172,77 +175,106 @@ def render_project_context(project: Project, library: DocumentLibrary,
     ]
     legacy = []
     if project.charter:
-        legacy.append(f"## 项目章程\n{project.charter}")
+        legacy.append(f"## Project Charter\n{project.charter}")
     if project.dev_guidelines:
-        legacy.append(f"## 开发准则\n{project.dev_guidelines}")
+        legacy.append(f"## Development Guidelines\n{project.dev_guidelines}")
 
     rules = (
-        "# 必须遵守\n"
-        "- 可读写目录(以下本地代码仓和 MissionCrew 工作区已显式授权,可直接读写):\n"
+        "# Must Follow\n"
+        "- Read/write directories (these local repositories and MissionCrew workspace paths are "
+        "explicitly authorized for direct reading and writing):\n"
         f"{dirs_section}\n"
-        "- 文件系统边界:只能读写上面列出的目录及其子目录。不要探测或访问授权范围之外的路径,"
-        "包括 `/tmp`、`/var/tmp`、其他项目目录、用户主目录中的未授权文件和未作为本地代码仓"
-        "显式列出的 MissionCrew 源码目录;命令中的重定向、管道、后台日志和工具自动生成文件"
-        "也必须遵守。若现有命令使用了外部路径,执行前先改写到授权目录,不要先尝试再等待权限批准。\n"
-        "- 路径访问失败处理:上面的可读写目录清单就是本轮完整授权边界。若工具报告 `external_directory`、"
-        "`permission denied` 或其他硬路径拒绝,不要改为搜索共同父目录、兄弟目录或其他未列出的路径,"
-        "也不要重复提交同一越界请求;先把目标路径与清单逐项对照,再改用清单内的精确绝对路径继续。"
-        f"文档资源 URL `{documents_url}/<相对路径>` 直接映射为 `$MISSIONCREW_DOCUMENTS_DIR/<相对路径>`,"
-        "不要猜测或搜索 `.missioncrew` 的物理位置。若完成任务确实依赖清单外的材料,停止该项访问,"
-        "在结果中写明被拒绝的精确路径和已经尝试的授权根目录,交由主控或人类调整。\n"
-        "- 沙箱只读路径处理:清单内的路径若报 `Read-only file system`,且落在授权目录下的 `.git`、`.codex`、"
-        "`.agents` 或 git worktree 对应的主仓 `.git/worktrees/<名字>`,那是 Runtime 沙箱对这些位置的只读保护,"
-        "不是环境只读挂载,同目录其他文件仍可写。此时带一句理由申请提升权限,原样重跑同一命令,平台按审批"
-        "策略处理并留下记录;不要据此判定环境只读而放弃;只有申请被拒绝时才按上一条停止并报告。\n"
-        "- 引用规则:最终回复引用项目文档时必须写成 `[标题](" + documents_url + "/路径)`;"
-        "不得输出内部读写目录、`.missioncrew` 真实路径或 `file://` 链接。其他资源的 URL:"
-        f"频道 `{project_url}/channels/<频道 id>`、任务 `{project_url}/tasks/<任务 id>`、"
-        f"面板 `{project_url}/dashboards/<面板 id>`(内置任务看板 id 为 `tasks`)、"
-        f"准则 `{project_url}/guidelines/<name>`、Skill `{project_url}/skills/<id>`、"
-        f"回收站 `{project_url}/recycle-bin`;这些 URL 是 Web 标识,不是文件路径。\n"
-        "- 工作区文件不进业务仓:`.missioncrew` 工作区位于业务代码仓之外,其中的文件不会进入"
-        "业务源码或业务代码提交;协作草稿、报告和普通聊天产生的验证记录写入 `documents/`,"
-        "不要写入 `tasks/`,平台会在每次执行后为文档库记录 Git 版本。\n"
-        "- Task 快照只读:`tasks/` 里的 Markdown 是平台生成的快照。Task 包含标题、简介、正文、状态、"
-        "标签和 Channel 绑定,每个 Task 至少绑定一个可用 Channel;快照对当前执行只读,创建、编辑、"
-        "追加状态简报或删除 Task 必须显式调用 Agent Tool,回合结束只刷新快照,不会把文件修改同步回 Task。\n"
-        "- Skill 来源:MissionCrew 注入的项目 Skill 是额外能力,不替代当前代码仓原有的 Agent 配置或 Skill。"
-        "代码仓内的 `AGENTS.md`、`CLAUDE.md` 以及 Runtime 原生支持的目录(如 `.agent/skills`、"
-        "`.agents/skills`、`.claude/skills`)仍可按原生规则发现和使用;不要把 `MISSIONCREW_SKILLS_DIR` "
-        "当作唯一 Skill 来源。仓内文件仍须位于本次授权的代码仓目录中。"
+        "- File system boundary: read and write only the directories listed above and their "
+        "subdirectories. Do not probe or access paths outside them, including `/tmp`, `/var/tmp`, "
+        "other project directories, unauthorized files in the user's home directory, and MissionCrew "
+        "source directories not explicitly listed as local repositories; redirections, pipes, "
+        "background logs and files generated by tools in your commands must follow this too. If an "
+        "existing command uses an outside path, rewrite it to an authorized directory before running "
+        "it; do not try first and then wait for permission approval.\n"
+        "- Path access failures: the read/write list above is the complete authorization boundary for "
+        "this turn. If a tool reports `external_directory`, `permission denied` or another hard path "
+        "denial, do not switch to searching common parent directories, sibling directories or other "
+        "unlisted paths, and do not resubmit the same out-of-bounds request; compare the target path "
+        "against the list entry by entry, then continue with the exact absolute path from the list. "
+        f"The document resource URL `{documents_url}/<relative path>` maps directly to "
+        "`$MISSIONCREW_DOCUMENTS_DIR/<relative path>`; do not guess or search for the physical "
+        "location of `.missioncrew`. If the task truly depends on material outside the list, stop "
+        "accessing it and state in your result the exact denied path and the authorized roots you "
+        "tried, so the orchestrator or a human can adjust.\n"
+        "- Sandbox read-only paths: if a listed path reports `Read-only file system` and lies in "
+        "`.git`, `.codex` or `.agents` under an authorized directory, or in the main repository's "
+        "`.git/worktrees/<name>` for a git worktree, that is the runtime sandbox's read-only "
+        "protection for those locations, not a read-only mount of the environment; other files in "
+        "the same directory stay writable. Request elevated permission with a one-sentence reason and "
+        "rerun the same command unchanged; the platform handles it under its approval policy and keeps "
+        "a record. Do not conclude that the environment is read-only and give up; only if the request "
+        "is denied, stop and report as described above.\n"
+        "- Linking: a final reply that references project documents must write them as "
+        "`[title](" + documents_url + "/path)`; never output internal read/write directories, the "
+        "real `.missioncrew` path or `file://` links. URLs of other resources: channel "
+        f"`{project_url}/channels/<channel id>`, task `{project_url}/tasks/<task id>`, "
+        f"dashboard `{project_url}/dashboards/<dashboard id>` (the built-in task board id is "
+        f"`tasks`), guideline `{project_url}/guidelines/<name>`, skill `{project_url}/skills/<id>`, "
+        f"recycle bin `{project_url}/recycle-bin`; these URLs are web identifiers, not file paths.\n"
+        "- Workspace files stay out of business repositories: the `.missioncrew` workspace lives "
+        "outside the business repositories, and its files never enter business source code or "
+        "commits. Write collaboration drafts, reports and verification records from ordinary chats "
+        "into `documents/`, not `tasks/`; the platform records a Git version of the document library "
+        "after every run.\n"
+        "- Task snapshots are read-only: the Markdown files in `tasks/` are snapshots generated by the "
+        "platform, refreshed when a turn is assembled and right after your own `task.*` calls; file "
+        "edits are never synced back to Tasks. Creating, editing, appending status briefs to or "
+        "deleting a Task must explicitly call the Agent Tool.\n"
+        "- Skill sources: project skills injected by MissionCrew are extra capabilities and do not "
+        "replace the repository's own agent configuration or skills. The repository's `AGENTS.md`, "
+        "`CLAUDE.md` and the directories the runtime natively supports (such as `.agent/skills`, "
+        "`.agents/skills`, `.claude/skills`) can still be discovered and used under their native "
+        "rules; do not treat `MISSIONCREW_SKILLS_DIR` as the only skill source. Files in the "
+        "repository must still lie within the repository directories authorized for this run."
     )
     resources = (
-        "# 项目资料\n"
+        "# Project Materials\n"
         + ("\n\n".join(legacy) + "\n" if legacy else "")
-        + f"## 准则索引(name · 适用场景;全文 `{guideline_dir}/<name>.md`,"
-        f"环境变量 MISSIONCREW_GUIDELINES_DIR;Web `{project_url}/guidelines/<name>`)\n"
-        + ("\n".join(guideline_summaries) if guideline_summaries else "（未配置）")
-        + "\n## Skill 索引(id · 名称 · 适用场景;入口 "
-        + (f"`{skills_dir}/<id>/SKILL.md`,环境变量 MISSIONCREW_SKILLS_DIR" if skills_dir is not None
-           else "见 Skill 库")
-        + f";Web `{project_url}/skills/<id>`)\n"
-        + ("\n".join(skill_summaries) if skill_summaries else "（本项目未配置额外的 MissionCrew Skill）")
-        + "\n先根据 description 判断相关性,仅在任务需要时读取全文;准则和 Skill 正文中的相对 Markdown "
-        "链接以文档库目录为根,仅在任务需要时读取链接文件,不要预加载,不要机械执行无关条目;"
-        "Skill 以其目录为根解析 scripts/、references/、assets/ 等相对文件。"
+        + f"## Guideline Index (name · when to use; full text `{guideline_dir}/<name>.md`, "
+        f"env MISSIONCREW_GUIDELINES_DIR; Web `{project_url}/guidelines/<name>`)\n"
+        + ("\n".join(guideline_summaries) if guideline_summaries else "(not configured)")
+        + "\n## Skill Index (id · name · when to use; entry "
+        + (f"`{skills_dir}/<id>/SKILL.md`, env MISSIONCREW_SKILLS_DIR" if skills_dir is not None
+           else "see the skill library")
+        + f"; Web `{project_url}/skills/<id>`)\n"
+        + ("\n".join(skill_summaries) if skill_summaries
+           else "(this project has no extra MissionCrew skills)")
+        + "\nJudge relevance from the description first and read the full text only when the task "
+        "needs it. Relative Markdown links in guidelines and skills resolve against the document "
+        "library directory; read linked files only when the task needs them, do not preload, and do "
+        "not mechanically follow unrelated entries. A skill resolves relative files such as "
+        "scripts/, references/ and assets/ against its own directory."
     )
     overview = (
-        "# 工作区一览\n"
-        + (f"根目录:`{workspace_dir}`(环境变量 MISSIONCREW_WORKSPACE);下面都是它的子项:\n"
-           "- `documents/` 项目文档库读写入口(MISSIONCREW_DOCUMENTS_DIR)\n"
-           "- `tasks/` Task 只读快照(MISSIONCREW_TASKS_DIR)\n"
-           "- `guidelines/` 已启用准则全文(MISSIONCREW_GUIDELINES_DIR)\n"
-           "- `skills/` 已启用 Skill(MISSIONCREW_SKILLS_DIR)\n"
-           f"- `channel-history.json` 频道完整历史(MISSIONCREW_CHANNEL_HISTORY,"
-           f"`{workspace_dir / 'channel-history.json'}`;执行角色为脱敏视图),"
-           "仅在最近对话不足以完成任务时按需读取\n"
-           f"- `manual.md` 完整手册(MISSIONCREW_MANUAL,`{workspace_dir / 'manual.md'}`):"
-           "本区块只保留必须时刻遵守的规则,涉及文档发布、Task、频道、面板与数据源、准则/Skill 格式、"
-           "自动化、回收站、配置页协作的操作细节,先读手册对应章节再动手\n"
-           "- `project.md` 项目简介;`temp/` 临时目录\n"
+        "# Workspace Overview\n"
+        + (f"Root: `{workspace_dir}` (env MISSIONCREW_WORKSPACE); everything below lives in it:\n"
+           "- `documents/` read/write entry to the project document library "
+           "(MISSIONCREW_DOCUMENTS_DIR)\n"
+           "- `tasks/` read-only Task snapshots (MISSIONCREW_TASKS_DIR)\n"
+           "- `guidelines/` full text of enabled guidelines (MISSIONCREW_GUIDELINES_DIR)\n"
+           "- `skills/` enabled skills (MISSIONCREW_SKILLS_DIR)\n"
+           f"- `channel-history.json` full channel history (MISSIONCREW_CHANNEL_HISTORY, "
+           f"`{workspace_dir / 'channel-history.json'}`; executors get a redacted view); "
+           "read it only when the recent conversation is not enough for the task\n"
+           f"- `manual.md` the full manual (MISSIONCREW_MANUAL, `{workspace_dir / 'manual.md'}`): "
+           "this block keeps only the rules that always apply; for the details of document "
+           "publishing, Tasks, channels, dashboards and data sources, guideline/skill formats, "
+           "automation, the recycle bin and config-page collaboration, read the matching manual "
+           "section before acting\n"
+           "- `platform-docs/` MissionCrew's own documentation (MISSIONCREW_PLATFORM_DOCS_DIR): "
+           "`README.md` there lists every document and what it covers; search it when you need "
+           "details of a platform mechanism that the manual does not give\n"
+           "- `project.md` project summary; `temp/` temporary directory\n"
            if workspace_dir is not None else
-           f"（本次执行未提供独立工作区;文档库目录 `{documents_dir}`）\n")
-        + "MissionCrew 是本地多 Agent harness(装配角色、Runtime/模型、项目上下文、共享资料与 "
-        "Channel 协作的平台),Task 是进入 Channel 的 Issue,不是独立执行流程;它不是业务代码仓。"
+           f"(no dedicated workspace for this run; document library directory `{documents_dir}`)\n")
+        + "MissionCrew is a local multi-agent harness (a platform that assembles roles, "
+        "runtimes/models, project context, shared materials and channel collaboration); a Task is an "
+        "issue that enters a channel, not a separate execution flow; MissionCrew is not the business "
+        "repository."
     )
     return "\n\n".join([rules, resources, overview])

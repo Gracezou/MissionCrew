@@ -8,7 +8,7 @@ MissionCrew 的日常操作在 Web 页面完成，频道、Task、文档、准�
 
 | 命令 | 说明 |
 |---|---|
-| `mc serve [--host H] [--port P] [--chat-workers N]` | 启动 Web 服务（REST API + 页面），默认只监听本机 `127.0.0.1:8321`；`--host 0.0.0.0` 或环境变量 `MISSIONCREW_HOST` 可开放局域网访问（平台无身份验证，只在可信网络中使用）。`--chat-workers` 设定聊天执行并发上限（默认 16，亦可用环境变量 `MISSIONCREW_CHAT_MAX_WORKERS`），同频道同角色仍按会话串行。常驻运行请交给 pm2，见 README「用 pm2 常驻运行」。 |
+| `mc serve [--host H] [--port P] [--chat-workers N] [--webhook-host H] [--webhook-port P]` | 启动 Web 服务（REST API + 页面），默认只监听本机 `127.0.0.1:8321`；`--host 0.0.0.0` 或环境变量 `MISSIONCREW_HOST` 可开放局域网访问（平台无身份验证，只在可信网络中使用）。`--chat-workers` 设定聊天执行并发上限（默认 16，亦可用环境变量 `MISSIONCREW_CHAT_MAX_WORKERS`），同频道同角色仍按会话串行。同时另起一个只接收自动化脚本 webhook 投递的端口（默认 `8322`，`--webhook-port` 或 `MISSIONCREW_WEBHOOK_PORT` 修改，`0` 关闭；地址默认同 `--host`，`--webhook-host` 或 `MISSIONCREW_WEBHOOK_HOST` 单独指定），见 [automation.md](automation.md)。常驻运行请交给 pm2，见 README「用 pm2 常驻运行」。 |
 | `mc audit [TASK_ID] [--limit N]` | 查看审计日志，平台每个决策都可追溯。可按 Task 过滤，默认最近 50 条。 |
 | `mc demo [--no-run]` | 向当前数据目录写入 mock 后端与示例项目 `webshop`，并演示一次 Task 经频道交给主控的流程。只用于开发调试：它会把演示数据写进真实数据目录，建议配合 `MISSIONCREW_HOME` 指向临时目录。 |
 
@@ -40,7 +40,7 @@ MissionCrew 的日常操作在 Web 页面完成，频道、Task、文档、准�
 | 命令 | 说明 |
 |---|---|
 | `mc chat channels [-p 项目]` | 列出频道，含所属项目和工作目录。 |
-| `mc chat channels --create <名称> -p <项目> [--workdir 目录]` | 创建频道，id 为 `<项目>:<名称>`。 |
+| `mc chat channels --create <名称> -p <项目> [--workdir 目录]` | 创建频道，id 为 `<项目>:<名称>`；名称里用于侧栏分组的 `/` 在 id 中换成连字符（`backend/api` → `backend-api`）。 |
 | `mc chat send "<内容>" [-c 频道] [-p 项目] [--author 名字] [--no-wait]` | 向频道发消息，默认频道 `general`。内容中的 `@[角色]`（方括号）显式触发该角色执行，普通 `@角色` 只是正文；不 @ 任何角色则交给主控。默认等待本条消息触发的所有执行（含级联）结束，并打印期间产生的新消息。 |
 | `mc chat log [频道] [-p 项目] [--limit N]` | 查看频道最近的聊天记录。 |
 
@@ -50,8 +50,8 @@ MissionCrew 的日常操作在 Web 页面完成，频道、Task、文档、准�
 
 | 命令 | 说明 |
 |---|---|
-| `mc task create -p 项目 --title 标题 [-s 简介] [-b 正文] [-l 标签]... [-c 频道id]... [--status S] [--process]` | 创建 Task，状态是自由文本（内置取值 `待处理`、`处理中`、`已阻塞`、`已完成`），落库为 `status: 文本` 标签；`--process` 表示创建后立即发送给绑定频道的主控。 |
-| `mc task process <task_id> [-m 附言]` | 在每个绑定频道里通知主控处理该 Task。 |
+| `mc task create -p 项目 --title 标题 [-s 简介] [-b 正文] [-l 标签]... [-c 频道id]... [--status S] [--source 数据源] [--url 链接] [--meta 附注]... [--external-id 外部id] [--process]` | 创建 Task，状态是自由文本（内置取值 `待处理`、`处理中`、`已阻塞`、`已完成`），落库为 `status: 文本` 标签；`--source` 指定自定义数据源短 id，缺省为内置源，没给状态时落到该源第一个状态取值；`--url`、`--meta`、`--external-id` 记录外部条目的链接、看板附注与 id（`external_id` 同源唯一，自定义源的整体同步按它匹配）；`--process` 表示创建后立即发送给首个绑定频道的主控。 |
+| `mc task process <task_id> [-m 附言] [-c 频道id]` | 在一个频道里通知主控处理该 Task：`-c` 指定接收频道（未绑定的会同时绑定），缺省为首个绑定频道。 |
 | `mc task brief <task_id> -m <内容> [--status S]` | 追加状态简报，可同时更新 Task 状态。 |
 | `mc task list` / `mc task show <task_id>` | 列出 Task；查看单个 Task 及其状态简报。 |
 | `mc task delete <task_id> [-y]` | 把 Task 及其简报移入项目回收站，可在 Web 的项目回收站中恢复。 |

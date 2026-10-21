@@ -1,14 +1,17 @@
 """Issue 化 Task 端点：编辑、状态简报与 Channel 派发。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Request
 
 from ..collab.recycle_bin import recycle_task
 from ..collab.resource_urls import channel_resource_url, task_resource_url
 from ..core.models import BUILTIN_SOURCE_ID
-from ..collab.tasks import (TaskDispatchError, add_task_brief, archive_task,
-                            auto_process_task, create_task, dispatch_task,
-                            restore_task, update_task)
+from ..collab.tasks import (TaskConflictError, add_task_brief,
+                            archive_task, auto_process_task, create_task,
+                            dispatch_task, preview_auto_rule, restore_task,
+                            update_task)
 from .context import ApiContext, etag_json_response
 from .schemas import TaskBriefInput, TaskCreate, TaskProcessInput, TaskUpdate
 
@@ -42,8 +45,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             task = create_task(
                 store, body.project_id, title=body.title, summary=body.summary,
                 body=body.body, labels=body.labels, channel_ids=body.channel_ids,
-                status=body.status,
+                status=body.status, source=body.source, url=body.url,
+                meta=body.meta, external_id=body.external_id,
+                external_updated_at=body.external_updated_at,
             )
+        except TaskConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         auto = auto_process_task(store, ctx.chat, task)
@@ -52,15 +59,28 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 "auto_dispatch": auto and {
                     "rule_query": auto["rule_query"], "sent": auto["sent"]}}
 
+    @app.get("/api/projects/{project_id}/task_rules/preview")
+    def task_rule_preview(project_id: str, query: str = "", rule: str = ""):
+        """自动处理规则编辑器预览(只读):命中条件的未归档任务及其实际处理归属;
+        rule 是正在编辑的规则原条件,缺省按新规则追加在末尾计算先后。"""
+        project = ctx.must_project(project_id)
+        try:
+            return preview_auto_rule(store, project, query, original_query=rule)
+        except ValueError as exc:
+            raise HTTPException(400, f"条件不合法: {exc}") from exc
+
     @app.get("/api/projects/{project_id}/tasks")
     def project_tasks(project_id: str, request: Request,
-                      scope: str = "active"):
+                      scope: str = "active", channel: Optional[str] = None):
         """按项目 + 归档态取任务列表(不带 body,详情走 /api/tasks/{id});
-        counts 按内置数据源全量统计,与看板筛选菜单口径一致。"""
+        counts 按内置数据源全量统计,与看板筛选菜单口径一致。
+        带 channel 时只取绑定该频道的任务(频道页的关联 Task 列表),counts 同口径。"""
         ctx.must_project(project_id)
         if scope not in LIST_SCOPES:
             raise HTTPException(400, "scope 只能是 active/archived/all")
         tasks = store.list_tasks(project_id)
+        if channel:
+            tasks = [t for t in tasks if channel in t.channel_ids]
         builtin = [t for t in tasks
                    if (t.source_id or BUILTIN_SOURCE_ID) == BUILTIN_SOURCE_ID]
         counts = {"all": len(builtin),
@@ -97,7 +117,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 changes=changes,
             )
         except ValueError as exc:
-            status = 409 if any(
+            status = 409 if isinstance(exc, TaskConflictError) or any(
                 text in str(exc) for text in ("重新读取", "已归档")) else 400
             raise HTTPException(status, str(exc)) from exc
         return _task_data(store, task)
@@ -148,9 +168,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         try:
             sent, brief = dispatch_task(
                 store, ctx.chat, task, message=body.message,
-                mention_spans=[item.model_dump() for item in body.mentions])
-        except TaskDispatchError as exc:
-            raise HTTPException(409, f"Task 仅部分派发：{exc}") from exc
+                mention_spans=[item.model_dump() for item in body.mentions],
+                channel_id=body.channel_id)
         except ValueError as exc:
             raise HTTPException(
                 409 if "已归档" in str(exc) else 400, str(exc)) from exc

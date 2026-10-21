@@ -62,6 +62,56 @@ def with_status(labels, value: str) -> list[str]:
     return rest
 
 
+def with_property(labels, prop: str, values) -> list[str]:
+    """返回替换某个属性全部取值后的标签列表;values 为空表示移除该属性。
+
+    status 走 with_status(单值、排在首位);其他属性在第一次出现的位置原地
+    替换,原先没有该属性时追加到末尾。属性名大小写不敏感。
+    """
+    key = prop.strip().lower()
+    if key == STATUS_PROPERTY:
+        return with_status(labels, values[0] if values else "")
+    labels = list(labels or [])
+    rest = [label for label in labels if split_label(label)[0].lower() != key]
+    # 第一次出现之前的标签都不属于该属性,所以原下标就是在 rest 里的插入位置
+    position = next((i for i, label in enumerate(labels)
+                     if split_label(label)[0].lower() == key), len(rest))
+    added = [f"{prop.strip()}: {value}" for value in values]
+    return normalize_labels(rest[:position] + added + rest[position:])
+
+
+def normalize_properties(raw, field: str = "properties") -> dict[str, list[str]]:
+    """校验「逐个设置属性」的参数:{属性名: 值 | [值...] | null}。
+
+    返回 属性名 -> 取值列表,空列表表示清空该属性;没提到的属性一律不动。
+    status 只能有一个取值。非法抛 ValueError。
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field} 必须是对象")
+    result: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for name, value in raw.items():
+        prop = str(name).strip() if isinstance(name, str) else ""
+        if not prop or ":" in prop:
+            raise ValueError(f"{field} 的属性名必须是不含冒号的非空字符串")
+        if prop.lower() in seen:
+            raise ValueError(f"{field} 的属性名重复: {prop}")
+        seen.add(prop.lower())
+        if value is None:
+            values = []
+        elif isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+            values = value
+        else:
+            raise ValueError(f"{field}.{prop} 必须是字符串、字符串数组或 null")
+        values = list(dict.fromkeys(v.strip() for v in values if v.strip()))
+        if prop.lower() == STATUS_PROPERTY and len(values) > 1:
+            raise ValueError(f"{field}.{prop} 只能有一个取值")
+        result[prop] = values
+    return result
+
+
 def normalize_labels(labels) -> list[str]:
     """标签统一归一化 + 去重(大小写不敏感,保留首次写法)。"""
     seen, result = set(), []
@@ -95,7 +145,7 @@ BOARD_WIDGET_TYPES = {
     "list",       # 条目列表:content.items [str 或 {text,tone?}]
     "log",        # 日志尾部:content.lines [str] 或 content.text
     "code",       # 代码块:content.code + language?
-    "taskboard",  # 标签任务看板:content.label,前端按 label 实时渲染 Task 卡片
+    "taskboard",  # 标签任务看板:content.label 标签表达式 + content.source 数据源(缺省内置)
 }
 
 
@@ -387,9 +437,9 @@ class TaskAutoRule:
 class Project:
     """项目中心条目:领域知识的主要载体，并显式指定唯一主控角色。
 
-    ``orchestrator_role_id`` 为空表示无主控模式:所有角色权限相同,都能看到角色
-    名册并经 message.publish 派发;人类同时点名多个角色时各自启动;由角色派发的
-    结果自动交回派发者,人类直接点名的结果只留在频道。
+    ``orchestrator_role_id`` 为空表示无主控模式:所有角色都有主控级管理权限
+    (频道、准则、Skill、面板、自动化等),但角色之间不能派发,只有人类点名才
+    启动角色;人类同时点名多个角色时各自启动,结果只留在频道。
     """
 
     id: str
@@ -405,10 +455,10 @@ class Project:
     resources: list[str] = field(default_factory=list)  # 可申请的受控资源 id
     required_env: Optional[str] = None                  # 执行环境要求,如 linux/gpu
     task_auto_rules: list[TaskAutoRule] = field(default_factory=list)
-    # 内置任务看板在四个锁定状态列之后追加的自定义筛选列 [{title,query,color}]
+    # 内置任务看板的自定义筛选列 [{title,query,color}],默认排在四个锁定状态列之后;
+    # 与锁定列同表达式的条目只记录该锁定列的排序位置
     task_board_filters: list[dict] = field(default_factory=list)
-    # 内置任务看板的分列属性:非空时按取值横向分列,筛选列并集只划定范围
-    # (与自定义任务看板 Board.group_by 同语义)
+    # 内置任务看板的默认分列属性(与自定义任务看板 Board.group_by 同语义)
     task_board_group_by: str = ""
 
     def __post_init__(self):
@@ -503,12 +553,17 @@ class Project:
 
     @property
     def has_orchestrator(self) -> bool:
-        """是否有主控;False 即无主控模式(所有角色同权、点名各自启动)。"""
+        """是否有主控;False 即无主控模式(所有角色有管理权限、不互相派发,点名各自启动)。"""
         return bool(self.orchestrator_role_id)
 
     def controls_platform(self, role_id: str) -> bool:
         """角色是否拥有主控级权限:有主控时只有主控,无主控时所有角色。"""
         return not self.orchestrator_role_id or role_id == self.orchestrator_role_id
+
+    def can_dispatch(self, role_id: str) -> bool:
+        """角色能否派发其他角色:只有主控。无主控时角色虽有主控级管理权限,
+        也不能互相派发,工作只由人类点名启动。"""
+        return self.has_orchestrator and role_id == self.orchestrator_role_id
 
 
 @dataclass
@@ -555,7 +610,10 @@ class Task:
     meta: list[str] = field(default_factory=list)   # 纯展示性附注文本
     archived: bool = False
     archived_at: float = 0.0
+    # 外部系统里的更新时间(Unix 秒,0 = 未提供),由同步卡片或 Agent 设置
+    external_updated_at: float = 0.0
     created_at: float = field(default_factory=now)
+    # MissionCrew 系统更新时间:每次写库自动刷新,不接受外部设置,兼作乐观锁版本
     updated_at: float = field(default_factory=now)
 
     @property
@@ -600,6 +658,7 @@ class Task:
             meta=[str(item) for item in raw.get("meta", []) or []],
             archived=bool(raw.get("archived", False)),
             archived_at=float(raw.get("archived_at", 0.0)),
+            external_updated_at=float(raw.get("external_updated_at") or 0.0),
             created_at=float(raw.get("created_at", now())),
             updated_at=float(raw.get("updated_at", now())),
         )
@@ -831,8 +890,9 @@ class Board:
     # taskboard:筛选列 [{title,query,color}],每列一个标签表达式;
     # 空列表 = 按数据源状态取值分列(创建看板时默认物化为状态筛选列)
     filters: list[dict] = field(default_factory=list)
-    # taskboard:非空时按该属性取值横向分列(末尾「未设置」列),filters 退为
-    # 卡片范围(各筛选列并集),不改变 filters 配置本身
+    # taskboard:页面默认的分列属性,按取值横向分列(末尾「未设置」列),覆盖当前
+    # 显示范围的全部任务;页面首次打开用它,之后以浏览器里的个人视图为准。
+    # 只有省略 view_group_by 的旧 API 读取仍以各筛选列并集划定卡片范围
     group_by: str = ""
 
     def to_dict(self) -> dict:
@@ -861,7 +921,7 @@ AUTOMATION_MAX_TIMEOUT = 6 * 3600
 
 @dataclass
 class Automation:
-    """项目自动化脚本:由主控或人类编写,经统一定时入口按 cron 或手动触发。
+    """项目自动化脚本:由主控或人类编写,按 cron、webhook 投递或手动触发。
 
     脚本以子进程运行,通过专属 Agent Tool token(按 actions 白名单授权)
     调用平台动作;script 有 shebang 时按可执行文件运行,否则用 bash 解释。
@@ -872,8 +932,10 @@ class Automation:
     name: str = ""
     description: str = ""
     script: str = ""
-    cron: str = ""                 # 五段 crontab;空 = 仅手动触发
-    enabled: bool = True
+    cron: str = ""                 # 五段 crontab;空 = 不定时
+    enabled: bool = True           # 只管定时触发;webhook 由 webhook 字段单独开关
+    webhook: bool = False          # 接受专用 webhook 端口上的投递触发(可与 cron 并用)
+    webhook_secret: str = ""       # 验签密钥;只在人类页面显示,不进总览与 Agent 输出
     actions: list[str] = field(
         default_factory=lambda: list(AUTOMATION_DEFAULT_ACTIONS))
     timeout_seconds: int = AUTOMATION_DEFAULT_TIMEOUT
@@ -892,6 +954,12 @@ class Automation:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def public_dict(self) -> dict:
+        """对外展示用:去掉 webhook 密钥,其余字段同 to_dict。"""
+        data = self.to_dict()
+        data.pop("webhook_secret", None)
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "Automation":

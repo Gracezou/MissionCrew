@@ -412,6 +412,8 @@ def test_chat_ui_renders_usage_events_from_unified_schema(seeded):
     assert 'const USAGE_SCHEMA = "usage/v1"' in js
     assert "renderUsagePayload" in js and "usageInlineSummary(payload.usage)" in js
     assert '{ turn: "本轮", total: "累计" }' in js and "payload.context_window" in js
+    # 上下文条优先用 Runtime 报的当前占用,一轮多次请求的合计只作退路
+    assert "usageNumber(payload.context_used) || usageNumber(turn.total)" in js
     # 前端不再认识各工具的私有字段名,工具知识留在 runtime 层
     for key in ("cachedInputTokens", "cacheRead", "total_tokens", "cache_read_input_tokens"):
         assert key not in js, key

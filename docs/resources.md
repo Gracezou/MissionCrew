@@ -28,7 +28,7 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 | 资源 | 规范 URL | 稳定标识 | Web 打开结果 |
 | --- | --- | --- | --- |
 | 频道 | `/resources/<project>/channels/<channel-id>` | 项目内频道短 ID | 对应聊天频道 |
-| Task | `/resources/<project>/tasks/<task-id>` | 全局 Task ID | 内置 Task 看板及详情 |
+| Task | `/resources/<project>/tasks/<task-id>` | 全局 Task ID | 直接打开时进入内置 Task 看板并展开详情；页面内点击本项目的 Task 链接在当前页弹出详情 |
 | 自定义面板 | `/resources/<project>/dashboards/<board-id>` | 项目内面板短 ID | 对应自定义面板 |
 | 内置任务看板 | `/resources/<project>/dashboards/tasks` | 保留标识 `tasks`（由前端路由约定；后端目前不阻止创建同名自定义面板，应避免使用该 ID） | 项目任务看板 |
 | 准则 | `/resources/<project>/guidelines/<name>` | Markdown frontmatter 的 `name` | 对应准则编辑/预览页 |
@@ -52,9 +52,13 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 ### 频道
 
-频道及消息的事实源是平台数据库。频道保存用途、工作目录和归档状态，最近活动时间由平台按消息表实时计算；频道 URL 打开项目聊天页并选择对应频道。
+频道及消息的事实源是平台数据库。频道保存用途、工作目录和归档状态，最近活动时间由平台按消息表实时计算；频道 URL 打开项目聊天页并选择对应频道。名称、用途和工作目录可以在侧栏频道条目的「•••」菜单里「编辑频道」修改，主控用 `channel.update`；新工作目录从该频道下一轮执行起生效。已归档频道和页面对话频道不能修改。
+
+频道名可以用 `/` 分组：`backend/api` 在侧栏显示为可折叠的 `backend` 分组下的 `api`。只按第一个 `/` 分一层，展开/收起状态记在浏览器里；页面对话频道不参与分组。分组只影响侧栏展示，频道 id 仍只能包含字母、数字、下划线和连字符：Web 端和 CLI 新建频道时名称里的 `/` 换成连字符（`backend/api` 的 id 是 `backend-api`），主控用 `channel.create` 时自行给出 id，之后改名也不会改变 id。
 
 归档频道默认不进入 Agent 可见范围。人类打开归档频道时仍可查看历史；Agent 向归档频道发布新消息前，平台会重新激活该频道。项目内部的 `general` 频道是保留默认频道，其资源 URL 使用短 ID `general`。
+
+人类发送未显式点名的消息时，需要存在已启用的项目主控：主控停用或缺失会在消息落库前拒收并提示原因，Web API 返回 400。显式点名其他已启用角色不受主控停用影响；无主控项目仍须至少点名一个角色。
 
 频道级停止操作会同时结束该频道中 `queued`、`running` 和 `waiting_user` 的聊天运行，释放待处理交互，终止对应 Runtime 进程，并留下可见平台消息和审计记录。平台保留已持久化的原生 session/thread ID，后续运行可重新启动进程并尝试恢复上下文；已完成的文件写入不会回滚。即使数据库已无活动 run，重复调用停止 API 也会根据频道保存的 Runtime session 清理孤儿进程。
 
@@ -68,13 +72,14 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 ### Task
 
-Task 是类似 Issue 的协作入口，事实源是平台数据库。它包含标题、简介、正文、状态、标签、一个或多个 Channel 绑定，以及多条追加式状态简报。Task URL 打开内置任务看板并展开详情。
+Task 是类似 Issue 的协作入口，事实源是平台数据库。它包含标题、简介、正文、状态、标签、一个或多个 Channel 绑定，以及多条追加式状态简报。直接访问 Task URL 会打开内置任务看板并展开详情；在聊天、文档等页面里点击本项目的 Task 链接只在当前页弹出详情窗口，不切换页面（按住 Ctrl/⌘ 点击仍在新标签页打开完整看板），其他项目的 Task 链接照常跳转。聊天页频道标题行右侧的「Task N」按钮显示绑定当前频道的未完成 Task 数，点击弹出悬浮的竖条列表，列出这些未归档 Task 的状态和标题（默认只显示未完成的，可切到全部），点条目同样弹出详情；频道没有关联 Task 时不显示按钮。
 
-Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 `task.create`、`task.update` 和 `task.brief` 修改事实源，项目主控使用 `task.delete` 删除；人类使用同一组 Web/API 字段。删除时 Task 与状态简报一起进入项目回收站，恢复后仍使用原 Task id。处理 Task 时，平台不启动独立执行引擎，而是在每个绑定 Channel 中发送普通消息：默认发给项目主控，带结构化提及或命中自动处理规则时发给指定角色，由既有 Channel 协作流程接管。
+Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 `task.create`、`task.update` 和 `task.brief` 修改事实源，项目主控使用 `task.delete` 删除；人类使用同一组 Web/API 字段。删除时 Task 与状态简报一起进入项目回收站，恢复后仍使用原 Task id。处理 Task 时，平台不启动独立执行引擎，而是只在一个 Channel 中发送普通消息：默认发给项目主控，带结构化提及或命中自动处理规则时发给指定角色，由既有 Channel 协作流程接管。接收频道默认是 Task 的首个绑定 Channel（没有绑定时用 `general`）；Task 详情里的「交给角色处理」可以改选项目内任一活跃 Channel，API 对应 `process` 请求的 `channel_id` 字段，选中未绑定的 Channel 时会同时把它加入 Task 的绑定。
 
 主要 API：
 
 - `POST /api/tasks`
+- `GET /api/projects/<project-id>/tasks?scope=active|archived|all[&channel=<channel-id>]`（列表不含正文；`channel` 只取绑定该频道的 Task）
 - `GET /api/tasks/<task-id>`
 - `PATCH /api/tasks/<task-id>`
 - `DELETE /api/tasks/<task-id>`（移入项目回收站）
@@ -83,13 +88,18 @@ Agent harness 同时提供 `.missioncrew/tasks/` Markdown 快照。Agent 使用 
 
 ### 面板
 
-自定义面板的事实源是平台数据库中的 `Board`。面板包含 12 列布局及 `markdown`、`table`、`card`、`chart`、`list`、`log`、`code` 等组件；组件也可以从任务、文档、审计或频道消息读取实时数据。
+自定义面板的事实源是平台数据库中的 `Board`。面板包含 12 列布局及 `markdown`、`table`、`card`、`chart`、`list`、`log`、`code`、`taskboard` 等组件；组件也可以从任务、文档、审计或频道消息读取实时数据。读任务的两种组件与任务看板同一口径，只取一个数据源，用 `source` 指定（缺省内置源 `built-in`）：表格绑定 `{"from":"tasks","source":"pr-dev",...}` 列出任务行，`taskboard` 组件用 `content.source` 加 `content.label`（标签表达式）列出活跃任务卡片。任务状态药丸的颜色取任务所属数据源声明的状态颜色，内置四态与自定义状态同一规则。
 
 内置任务看板不是可删除的 `Board` 记录，而是平台根据项目任务实时生成的特殊面板，因此使用保留地址 `/dashboards/tasks`。代码内部仍使用 `boards` 命名模型和 API，但公开 URL 统一使用面向用户的 `dashboards`。
+
+独立任务看板页面支持搜索、多选筛选、属性分列、列内排序及列折叠；个人视图按项目、看板和数据源保存在当前浏览器，不回写共享配置。自定义表达式列和自动处理规则仍是共享配置。交互、标签匹配与只读查询参数见[任务看板筛选与分列](automation.md#任务看板筛选与分列)。
 
 主要 API：
 
 - `GET /api/projects/<project>/boards`
+- `GET /api/projects/<project>/builtin_board/data`
+- `GET /api/projects/<project>/boards/<board-id>/data`
+- `GET /api/projects/<project>/task_rules/preview?query=<条件>&rule=<原条件>`
 - `POST /api/projects/<project>/boards`
 - `DELETE /api/projects/<project>/boards/<board-id>`
 - `POST /api/projects/<project>/widget_data`
@@ -139,7 +149,7 @@ Skill 的事实源是项目托管 Skill 目录，每个 Skill 至少包含 `SKIL
 
 准则、Skill 和自动化页面可把当前项目中的一个或多个条目复制到其他项目。目标存在同标识条目时必须显式选择 `skip`（默认）或 `overwrite`；接口对每个条目分别返回 `copied`、`skipped`、`overwritten` 或 `failed` 及原因，不会静默覆盖。复制过程中捕获的异常会写入 `project_resource_import_failed` 审计项，包含源/目标项目、资源类型、条目、冲突策略、异常类名与完整信息，供本机管理员排查；前端保留 frontmatter 缺失等具体校验提示，项目目录和数据目录的绝对路径前缀替换为 `.`；编码异常统一显示「资源数据格式不合法」。
 
-Skill 复制当前完整目录快照（包括脚本、引用、素材和可执行权限），目标项目生成一条新的导入版本；源项目的历史提交不会嫁接到目标项目，两个项目之后各自维护历史。自动化在目标项目按 `<目标项目>:<短 id>` 重建，一律以停用状态落地，并清空最近运行时间、状态和创建角色，等待人在目标项目确认后启用。覆盖自动化会丢弃目标原脚本（不进回收站），同时清掉目标的旧运行记录并回收其脚本令牌；目标自动化正在运行时该条返回 `failed`。复制过程不会修改源项目。逐条失败原因不包含数据目录绝对路径，单条失败不影响同批其他条目的结果。
+Skill 复制当前完整目录快照（包括脚本、引用、素材和可执行权限），目标项目生成一条新的导入版本；源项目的历史提交不会嫁接到目标项目，两个项目之后各自维护历史。自动化在目标项目按 `<目标项目>:<短 id>` 重建，一律关闭 cron 与 webhook，并清空 webhook 密钥、最近运行时间、状态和创建角色，等待人在目标项目确认后启用；源项目的 webhook 密钥不会迁移。覆盖自动化会丢弃目标原脚本（不进回收站），同时清掉目标的旧运行记录并回收其脚本令牌；目标自动化正在运行时该条返回 `failed`。复制过程不会修改源项目。逐条失败原因不包含数据目录绝对路径，单条失败不影响同批其他条目的结果。
 
 主要 API：
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from ..collab import board_sources
 from ..collab.documents import library_for
 from ..collab.recycle_bin import recycle_dashboard
 from ..collab.resource_urls import dashboard_resource_url
-from ..core.models import BOARD_KINDS, BOARD_WIDGET_TYPES, Board, BoardWidget
+from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, LEGACY_STATUS_TEXT,
+                           Board, BoardWidget)
 from .context import MENTION_ID_RE, ApiContext
 from .schemas import BoardInput, WidgetDataInput
 
@@ -31,8 +32,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return board_sources.describe_sources(store, project_id)
 
     @app.get("/api/projects/{project_id}/boards/{board_id}/data")
-    def taskboard_data(project_id: str, board_id: str, scope: str = "active"):
-        """解析任务看板数据:数据源取数 + 服务端按筛选列分列。"""
+    def taskboard_data(project_id: str, board_id: str, scope: str = "active",
+                       view_group_by: Optional[str] = None,
+                       filter_query: str = "", search: str = "",
+                       filter_label: list[str] = Query(default=[]),
+                       missing_property: list[str] = Query(default=[])):
+        """解析任务看板数据,可用临时视图参数独立筛选/分列,不修改保存的配置。"""
         ctx.must_project(project_id)
         full_id = ctx.namespaced_id(project_id, board_id, "面板")
         board = store.get_board(full_id)
@@ -43,48 +48,69 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         try:
             return board_sources.resolve_board_data(
                 store, project_id, board.source, board.filters,
-                group_by=board.group_by, scope=scope)
+                group_by=board.group_by, scope=scope,
+                view_group_by=view_group_by, filter_query=filter_query,
+                search=search, filter_labels=filter_label,
+                missing_properties=missing_property)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
     @app.get("/api/projects/{project_id}/builtin_board/data")
-    def builtin_board_data(project_id: str, scope: str = "active"):
+    def builtin_board_data(project_id: str, scope: str = "active",
+                           view_group_by: Optional[str] = None,
+                           filter_query: str = "", search: str = "",
+                           filter_label: list[str] = Query(default=[]),
+                           missing_property: list[str] = Query(default=[])):
         """内置任务看板:与自定义任务看板同一渲染协议,只差数据源固定为 built-in、
         四个状态筛选列锁定不可删,以及配置(自定义列/分列属性)存在项目对象上。"""
         project = ctx.must_project(project_id)
         pinned = board_sources.default_filters(
             board_sources.source_status_values(
                 store, project_id, board_sources.BUILTIN_SOURCE_ID))
-        extras = list(project.task_board_filters)
+        # 自定义列中与锁定列同表达式的条目只标记该锁定列被排到的位置;
+        # 未标记的锁定列按默认顺序排在最前。
+        by_query = {item["query"].casefold(): item for item in pinned}
+        placed = {item["query"].casefold() for item in project.task_board_filters}
+        ordered = [(item, True) for item in pinned if item["query"].casefold() not in placed]
+        for item in project.task_board_filters:
+            hit = by_query.get(item["query"].casefold())
+            ordered.append((hit, True) if hit else (item, False))
         try:
             data = board_sources.resolve_board_data(
                 store, project_id, board_sources.BUILTIN_SOURCE_ID,
-                pinned + extras, group_by=project.task_board_group_by,
-                scope=scope)
+                [item for item, _ in ordered], group_by=project.task_board_group_by,
+                scope=scope, view_group_by=view_group_by,
+                filter_query=filter_query, search=search,
+                filter_labels=filter_label, missing_properties=missing_property)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         if not data["group_by"]:   # 分组模式下列是属性取值,没有锁定概念
-            for index, column in enumerate(data["columns"]):
-                column["locked"] = index < len(pinned)
-        # 筛选配置带 locked 标记回传:锁定的状态列不可删,自定义列可增删
-        data["filters"] = ([{**item, "locked": True} for item in pinned]
-                           + [{**item, "locked": False} for item in extras])
+            for column, (_, locked) in zip(data["columns"], ordered):
+                column["locked"] = locked
+        # 筛选配置带 locked 标记回传:锁定的状态列不可删,自定义列可增删,两者都可排序
+        data["filters"] = [{**item, "locked": locked} for item, locked in ordered]
         return data
 
     def _resolve_widget_source(project_id: str, source: dict):
         """解析卡片数据源:卡片是通用展示原语,领域数据从平台实时取。"""
         kind = source.get("from")
         if kind == "tasks":
-            want_status = source.get("status") or []
+            # 与任务看板同口径:只取一个数据源(缺省内置源)的任务
+            try:
+                source_id = board_sources.require_source(
+                    store, project_id, source.get("source"))
+            except ValueError as exc:
+                return {"error": str(exc)}
+            # 状态按文本比较(不区分大小写);旧枚举(open/in_progress…)映射成状态文本
+            want_status = {LEGACY_STATUS_TEXT.get(str(s).lower(), str(s)).lower()
+                           for s in source.get("status") or []}
             want_labels = source.get("labels") or []
             want_channels = source.get("channel_ids") or []
             rows = []
-            for t in store.list_tasks():
-                if t.project_id != project_id:
-                    continue
+            for t in store.list_tasks(project_id, source_id=source_id):
                 if t.archived and not source.get("include_archived", False):
                     continue
-                if want_status and t.status not in want_status:
+                if want_status and t.status.lower() not in want_status:
                     continue
                 if want_channels and not set(t.channel_ids) & set(want_channels):
                     continue
@@ -135,9 +161,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         ctx.must_project(project_id)
         resolved = {}
         for w in body.widgets:
-            source = ((w.get("content") or {}).get("source")) or None
-            if isinstance(source, dict) and w.get("id"):
-                resolved[w["id"]] = _resolve_widget_source(project_id, source)
+            content = w.get("content") or {}
+            if not w.get("id"):
+                continue
+            if w.get("type") == "taskboard":   # content.source 是数据源 id,不是取数绑定
+                resolved[w["id"]] = board_sources.resolve_taskboard_widget(
+                    store, project_id, content)
+            elif isinstance(content.get("source"), dict):
+                resolved[w["id"]] = _resolve_widget_source(
+                    project_id, content["source"])
         return resolved
 
     @app.post("/api/projects/{project_id}/boards")

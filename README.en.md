@@ -23,6 +23,8 @@ uv run mc serve    # start the web service on 127.0.0.1:8321
 
 Open `http://127.0.0.1:8321`, go to **Global settings** and click **Re-detect** in the runtime list. The platform scans the installed Agent CLIs, registers them, and creates a `default` project with a set of default roles (`@lead` orchestrator, `@dev`, `@reviewer`, …) and a `general` channel. Each role's runtime/model and persona can be adjusted in **Project settings**. Everything else happens in the browser; the three scenarios below go from simple to fully automated. (The screenshots show the Chinese UI.)
 
+The top left corner shows the running MissionCrew version; `GET /api/overview` returns the same value in `version`.
+
 ### Scenario 1: one task, several agents in the same conversation
 
 Getting several agents to cooperate used to mean asking one tool for a plan, copying the answer into another tool for review, and pasting the feedback back. In MissionCrew a channel is one topic and every agent reads the same channel history, so whoever replies next already has the context — no relaying prompts by hand.

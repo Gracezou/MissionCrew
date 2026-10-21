@@ -10,6 +10,7 @@ import time
 
 from fastapi import FastAPI, Request
 
+from .. import __version__
 from ..collab import board_sources
 from ..collab.skills import sync_all_project_skill_libraries
 from ..collab.resource_urls import (automation_resource_url,
@@ -51,6 +52,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             return data
 
         return etag_json_response(request, {
+            "version": __version__,
             "projects": [project_data(p) for p in store.list_projects()],
             "backends": [b.to_dict() for b in store.list_backends()],
             "role_templates": [r.to_dict() for r in store.list_role_templates()],

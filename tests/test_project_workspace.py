@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from missioncrew import __version__
 from missioncrew.runtime import adapters, runtime_manager
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.documents import (document_resource_url, library_for,
@@ -1688,7 +1689,7 @@ def test_opening_document_reveals_its_sidebar_entry(seeded):
 
 
 def test_top_bar_lives_in_sidebar_column_on_desktop(seeded):
-    """顶栏只有 logo/标题/主题按钮,不该横贯整页:桌面并入侧栏列让主区占满整高,
+    """顶栏不横贯整页:桌面并入侧栏列让主区占满整高,
     窄屏抽屉模式下由 main.js 挪回页面顶部,保证 ☰ 常驻可见。"""
     client = _client(seeded)
     html = client.get("/").text
@@ -1704,6 +1705,22 @@ def test_top_bar_lives_in_sidebar_column_on_desktop(seeded):
     assert "placeTopBar(m.matches);" in main
     # 侧栏内抵消内边距贴齐边缘,底边线与侧栏同宽
     assert "#sidebar > #top-bar { margin: -12px -12px 12px;" in css
+
+
+def test_top_bar_version_uses_overview_and_keeps_title_and_buttons_visible(seeded):
+    client = _client(seeded)
+    html = client.get("/").text
+    router = client.get("/assets/js/router.js").text
+    css = client.get("/assets/css/app.css").text
+
+    assert '<h1>MissionCrew</h1><span id="app-version" hidden></span>' in html
+    assert 'id="top-bar-brand" title="MissionCrew"' in html
+    assert 'version.hidden = !global.version;' in router
+    assert 'global.version ? `v${global.version}` : ""' in router
+    assert '`MissionCrew v${global.version}` : "MissionCrew"' in router
+    assert '.top-bar-brand { display: flex; align-items: center; flex: 1; min-width: 0;' in css
+    assert '#app-version { flex: none;' in css
+    assert '.theme-btn { flex: none;' in css
 
 
 # ---- 文档库:恢复 / 软链可达性 / 二进制读取 / 审计 ----
@@ -2295,7 +2312,8 @@ def test_overview_is_layered_thin_with_on_demand_content_and_etag(seeded):
     # 全局总览只含全局集合;项目内数据走分层端点
     response = client.get("/api/overview")
     overview = response.json()
-    assert sorted(overview) == ["backends", "projects", "role_templates"]
+    assert sorted(overview) == ["backends", "projects", "role_templates", "version"]
+    assert overview["version"] == __version__
     project = next(p for p in overview["projects"] if p["id"] == "webshop")
     guideline = next(g for g in project["guidelines"]
                      if g["name"] == "release-flow")

@@ -426,6 +426,146 @@ def test_role_template_keeps_both_enabled_and_manual_only_across_save_and_import
     assert template.enabled is False and template.manual_only is True
 
 
+@pytest.mark.parametrize("scope", ["project", "global"])
+@pytest.mark.parametrize("operation", ["save", "import"])
+def test_legacy_role_request_keeps_manual_only(client, seeded, scope, operation):
+    """旧请求仅携带 enabled 时，不能撤掉已有角色的仅人工权限边界。"""
+    is_project = scope == "project"
+    get_role = ((lambda: seeded.get_role("webshop", "dev")) if is_project
+                else (lambda: seeded.get_role_template("dev")))
+    role = get_role()
+    role.manual_only = True
+    if is_project:
+        seeded.put_role(role)
+    else:
+        seeded.put_role_template(role)
+    endpoint = "/api/roles" if is_project else "/api/role-templates"
+
+    def submit(item, overwrite=False):
+        if operation == "import":
+            payload = {"roles": [item], "overwrite_ids": [item["id"]] if overwrite else []}
+            target = endpoint + "/import"
+        else:
+            payload = dict(item)
+            target = endpoint
+        if is_project:
+            payload["project_id"] = "webshop"
+        return client.post(target, json=payload)
+
+    legacy = {"id": "dev", "runtime_id": "std-1", "model": "pro", "enabled": False}
+    saved = submit(legacy, overwrite=True)
+    assert saved.status_code == 200, saved.text
+    assert get_role().manual_only is True
+    assert get_role().enabled is is_project  # 项目实时启停不随配置迁移
+
+    cleared = submit({**legacy, "manual_only": False}, overwrite=True)
+    assert cleared.status_code == 200, cleared.text
+    assert get_role().manual_only is False   # 显式 False 仍可关闭
+
+    added = submit({**legacy, "id": "legacy-new"})
+    assert added.status_code == 200, added.text
+    new_role = (seeded.get_role("webshop", "legacy-new") if is_project
+                else seeded.get_role_template("legacy-new"))
+    assert new_role.manual_only is False
+
+
+@pytest.mark.parametrize("operation", ["save", "import"])
+def test_role_guard_uses_effective_manual_only_before_writing(client, seeded, operation):
+    # API 无法生成此状态；用底层存储模拟旧数据，验证纵深守卫。
+    lead = seeded.get_role("webshop", "lead")
+    lead.manual_only = True
+    seeded.put_role(lead)
+    legacy = {"id": "lead", "runtime_id": "std-1", "model": "pro"}
+    if operation == "import":
+        payload = {"project_id": "webshop", "roles": [
+            {**legacy, "id": "must-not-save"}, legacy], "overwrite_ids": ["lead"]}
+        endpoint = "/api/roles/import"
+    else:
+        payload = {**legacy, "project_id": "webshop"}
+        endpoint = "/api/roles"
+
+    response = client.post(endpoint, json=payload)
+
+    assert response.status_code == 409, response.text
+    assert "不能设为仅人工点名" in response.json()["detail"]
+    assert seeded.get_role("webshop", "lead").to_dict() == lead.to_dict()
+    assert seeded.get_role("webshop", "must-not-save") is None
+    if operation == "import":
+        payload["roles"][-1] = {**legacy, "manual_only": False}
+    else:
+        payload["manual_only"] = False
+    cleared = client.post(endpoint, json=payload)
+    assert cleared.status_code == 200, cleared.text
+    assert seeded.get_role("webshop", "lead").manual_only is False
+
+
+def test_role_file_item_preserves_absent_manual_only():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser role file serializer")
+    script = r"""
+const fs = require("fs"), vm = require("vm");
+const context = vm.createContext({esc: value => String(value ?? "")});
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
+vm.runInContext(`
+  for (const withEnabled of [false, true]) {
+    const legacy = roleFileItem({id: "dev", enabled: false}, withEnabled);
+    if ("manual_only" in legacy) throw new Error("legacy file fabricated manual_only");
+    for (const manual_only of [true, false]) {
+      const item = roleFileItem({id: "dev", manual_only}, withEnabled);
+      if (item.manual_only !== manual_only) throw new Error("explicit flag lost");
+    }
+  }
+  const marked = roleTransferRows([{id: "manual", enabled: false, manual_only: true}]);
+  if (!marked.includes(">仅人工</span>") || !marked.includes(">默认停用</span>"))
+    throw new Error("import preview badges missing");
+  const plain = roleTransferRows([{id: "legacy"}, {id: "off", manual_only: false}]);
+  if (plain.includes(">仅人工</span>")) throw new Error("manual-only badge fabricated");
+`, context);
+"""
+    subprocess.run([node, "-e", script, str(WEB / "js" / "roles.js")],
+                   capture_output=True, text=True, check=True)
+
+
+@pytest.mark.parametrize("state", ["disabled", "missing", "manual-only"])
+def test_project_update_without_orchestrator_keeps_unavailable_role(client, seeded, state):
+    lead = seeded.get_role("webshop", "lead")
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead.enabled = state != "disabled"
+        lead.manual_only = state == "manual-only"
+        seeded.put_role(lead)
+
+    response = client.post("/api/projects", json={"id": "webshop", "name": "改名"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["orchestrator_role_id"] == "lead"
+    assert seeded.get_project("webshop").name == "改名"
+
+
+@pytest.mark.parametrize("state,reason", [
+    ("disabled", "主控角色已停用"), ("missing", "主控角色不属于当前项目"),
+    ("manual-only", "仅人工点名的角色不能作为主控"),
+])
+def test_project_update_explicit_orchestrator_validates_role(client, seeded, state, reason):
+    original_name = seeded.get_project("webshop").name
+    lead = seeded.get_role("webshop", "lead")
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead.enabled = state != "disabled"
+        lead.manual_only = state == "manual-only"
+        seeded.put_role(lead)
+
+    response = client.post("/api/projects", json={
+        "id": "webshop", "name": "改名", "orchestrator_role_id": "lead"})
+
+    assert response.status_code == 400
+    assert reason in response.json()["detail"]
+    assert seeded.get_project("webshop").name == original_name
+
+
 def test_platform_bootstrap_skips_instead_of_failing_when_all_templates_disabled(store):
     """全部模板默认停用是合法的重配中间态:平台自举静默跳过,不抛 RuntimeError。"""
     for backend in seed_mod.DEMO_BACKENDS:
@@ -1005,6 +1145,7 @@ def test_role_settings_expose_selective_file_import_export_with_overwrite_previe
     assert "function roleFileItem(role, withTemplateEnabled = false)" in js
     assert 'roleFileItem(role, scope === "global")' in js
     assert 'scope === "global" && payload.scope === "global"' in js
+    assert "仅人工点名：文件未包含时保持不变，显式 false 才清除" in js
     assert 'data-role-transfer-index="${index}"' in js
     assert "将覆盖现有角色" in js
     assert "不会覆盖现有角色" in js

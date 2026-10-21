@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import yaml
 
 from typer.testing import CliRunner
@@ -89,6 +90,32 @@ def test_project_add_rejects_manual_only_orchestrator_on_existing_project(
     assert result.exit_code != 0
     assert "仅人工点名的角色不能作为主控: @dev" in result.output
     assert seeded.get_project("webshop").name == original_name
+
+
+@pytest.mark.parametrize("specified", [False, True])
+@pytest.mark.parametrize("state", ["disabled", "missing", "manual-only"])
+def test_project_add_orchestrator_validation_matches_explicitness(
+        seeded, tmp_path, specified, state):
+    lead = seeded.get_role("webshop", "lead")
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead.enabled = state != "disabled"
+        lead.manual_only = state == "manual-only"
+        seeded.put_role(lead)
+    original_name = seeded.get_project("webshop").name
+    data = {"id": "webshop", "name": "改名"}
+    if specified:
+        data["orchestrator_role_id"] = "lead"
+    project_file = tmp_path / "project.yaml"
+    project_file.write_text(yaml.safe_dump(data))
+
+    result = CliRunner().invoke(
+        cli.app, ["project", "add", "--file", str(project_file)])
+
+    assert (result.exit_code != 0) is specified, result.output
+    assert seeded.get_project("webshop").orchestrator_role_id == "lead"
+    assert seeded.get_project("webshop").name == (original_name if specified else "改名")
 
 
 def test_project_add_rejects_when_all_role_templates_are_disabled(seeded, tmp_path):

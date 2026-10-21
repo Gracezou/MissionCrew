@@ -47,11 +47,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     400, f"模型 {body.model or '(CLI 默认)'} 的 effort "
                          f"必须是 {'/'.join(allowed)} 之一")
 
-    def reject_manual_only_orchestrator(project, body: RoleTemplateInput) -> None:
-        """主控是执行角色回报的默认去向,不能设为仅人工点名。"""
-        if body.manual_only and project.orchestrator_role_id == body.id:
+    def reject_manual_only_orchestrator(project, role: Role) -> None:
+        """按合并后的生效值判断，主控不能为仅人工点名。"""
+        if role.manual_only and project.orchestrator_role_id == role.id:
             raise HTTPException(
-                409, f"主控角色 @{body.id} 不能设为仅人工点名；请先为项目选择其他主控")
+                409, f"主控角色 @{role.id} 不能设为仅人工点名；请先为项目选择其他主控")
 
     def validate_import_roles(
             roles: list[RoleTemplateInput], existing_ids: set[str],
@@ -82,9 +82,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         project = store.get_project(body.project_id)
         if project is None:
             raise HTTPException(400, f"项目不存在: {body.project_id}")
-        reject_manual_only_orchestrator(project, body)
         data = body.model_dump()
         existing = store.get_role(body.project_id, body.id)
+        # fork-divergence: 旧请求未携带时保留仅人工权限边界，新建默认 False。
+        if "manual_only" not in body.model_fields_set and existing:
+            data["manual_only"] = existing.manual_only
         # 临时启停只允许走独立端点；编辑名称、模型等字段时保留实时状态，
         # 避免旧表单保存时覆盖另一个页面刚完成的开关操作。
         data["enabled"] = existing.enabled if existing else True
@@ -92,6 +94,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             data["sort_order"] = existing.sort_order if existing else 10 + max(
                 (r.sort_order for r in store.list_roles(body.project_id)), default=0)
         role = Role(**data)
+        reject_manual_only_orchestrator(project, role)
         store.put_role(role)
         ctx.role_usage_linkage.role_updated(role, previous=existing)
         store.audit("human", "role_saved", detail=f"project={role.project_id} role={role.id}")
@@ -132,13 +135,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         current = {role.id: role for role in store.list_roles(project.id)}
         overwritten = validate_import_roles(
             body.roles, set(current), body.overwrite_ids)
-        for item in body.roles:
-            reject_manual_only_orchestrator(project, item)
         next_order = 10 + max((role.sort_order for role in current.values()), default=0)
         imported: list[str] = []
+        prepared: list[tuple[Role, Role | None]] = []
         for item in body.roles:
             previous = current.get(item.id)
             data = item.model_dump(exclude={"sort_order", "enabled"})
+            # fork-divergence: 旧文件未携带时不撤掉已有角色的仅人工限制。
+            if "manual_only" not in item.model_fields_set and previous:
+                data["manual_only"] = previous.manual_only
             role = Role(
                 **data,
                 project_id=project.id,
@@ -146,8 +151,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 enabled=previous.enabled if previous else True,
                 sort_order=previous.sort_order if previous else next_order,
             )
+            reject_manual_only_orchestrator(project, role)
+            prepared.append((role, previous))
             if previous is None:
                 next_order += 10
+        # 全部按生效配置校验通过后再写入，拒绝后续条目时不留下半批数据。
+        for role, previous in prepared:
             store.put_role(role)
             ctx.role_usage_linkage.role_updated(role, previous=previous)
             imported.append(role.id)
@@ -183,6 +192,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         data = body.model_dump()
         data["project_id"] = ""
         existing = store.get_role_template(body.id)
+        # fork-divergence: 与 enabled 一样，缺省保留已有模板的权限设置。
+        if "manual_only" not in body.model_fields_set and existing:
+            data["manual_only"] = existing.manual_only
         # 旧客户端不带 enabled 时保留模板现有的新项目默认启停状态。
         if "enabled" not in body.model_fields_set and existing:
             data["enabled"] = existing.enabled
@@ -216,6 +228,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         for item in body.roles:
             previous = current.get(item.id)
             data = item.model_dump(exclude={"sort_order"})
+            # fork-divergence: 旧导出文件不能静默清除仅人工限制。
+            if "manual_only" not in item.model_fields_set and previous:
+                data["manual_only"] = previous.manual_only
             if "enabled" not in item.model_fields_set and previous:
                 data["enabled"] = previous.enabled   # 文件未携带时不改已有模板
             role = Role(

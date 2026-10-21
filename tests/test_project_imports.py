@@ -482,6 +482,71 @@ def test_cross_project_import_copy_error_reason_hides_absolute_paths(
     assert home not in response.text
 
 
+@pytest.mark.parametrize("error_type", [OSError, ValueError, UnicodeError])
+def test_cross_project_import_failure_audits_full_exception(seeded, monkeypatch, error_type):
+    client = TestClient(create_app())
+    _create_target(client)
+    home = os.environ["MISSIONCREW_HOME"]
+    error = error_type(f"invalid resource at {home}/private/SKILL.md")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(project_imports, "_copy_guideline", fail)
+    response = _import(client, "guideline", ["release-check"])
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["status"] == "failed"
+    entries = [row for row in seeded.list_audit()
+               if row["action"] == "project_resource_import_failed"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["actor"] == "human"
+    assert f"{type(error).__name__}: {error}" in entry["detail"]
+    for field in ("source_project=webshop", "target_project=target",
+                  "resource_type=guideline", "item=release-check", "strategy=skip"):
+        assert field in entry["detail"]
+
+
+@pytest.mark.parametrize("error_type", [ValueError, UnicodeError])
+def test_cross_project_import_data_error_response_hides_home(seeded, monkeypatch, error_type):
+    client = TestClient(create_app())
+    _create_target(client)
+    home = os.environ["MISSIONCREW_HOME"]
+
+    def fail(*args, **kwargs):
+        raise error_type(f"invalid resource at {home}/private/SKILL.md")
+
+    monkeypatch.setattr(project_imports, "_copy_guideline", fail)
+    response = _import(client, "guideline", ["release-check"])
+
+    assert response.status_code == 200
+    reason = ("资源数据格式不合法" if error_type is UnicodeError
+              else "invalid resource at ./private/SKILL.md")
+    assert response.json()["results"] == [{
+        "id": "release-check", "status": "failed", "reason": reason}]
+    assert home not in response.text
+
+
+def test_cross_project_import_value_error_strips_data_directory_prefixes(seeded, monkeypatch):
+    client = TestClient(create_app())
+    _create_target(client)
+    home = os.environ["MISSIONCREW_HOME"]
+
+    def fail(*args, **kwargs):
+        raise ValueError(
+            f"frontmatter 缺失: {home}/projects/webshop/skills/bad/SKILL.md; "
+            f"来源: {home}/imports/bad")
+
+    monkeypatch.setattr(project_imports, "_copy_guideline", fail)
+    response = _import(client, "guideline", ["release-check"])
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["reason"] == (
+        "frontmatter 缺失: ./webshop/skills/bad/SKILL.md; 来源: ./imports/bad")
+    assert home not in response.text
+
+
 def test_automation_overwrite_replaces_definition_in_one_transaction(seeded):
     """删旧 + 写新必须同一事务：写入失败时不能留下「旧的已删、新的没写」。"""
     old, _ = save_automation(
@@ -508,6 +573,23 @@ def test_automation_overwrite_replaces_definition_in_one_transaction(seeded):
     assert seeded.list_automation_runs(old.id) == []
 
 
+def test_automation_overwrite_rejects_different_id_without_mutation(seeded):
+    old, _ = save_automation(seeded, "webshop", id="old", script="echo old")
+    other, _ = save_automation(seeded, "webshop", id="other", script="echo other")
+    run_id = seeded.start_automation_run(old.id, "webshop", "manual")
+    seeded.finish_automation_run(run_id, "succeeded", exit_code=0, stdout="old")
+    replacement = replace(other, script="echo replacement")
+    timestamp = replacement.updated_at
+
+    with pytest.raises(AssertionError, match="仅用于同 id 覆盖"):
+        seeded.replace_automation(old.id, replacement)
+
+    assert replacement.updated_at == timestamp
+    assert seeded.get_automation(old.id).to_dict() == old.to_dict()
+    assert seeded.get_automation(other.id).to_dict() == other.to_dict()
+    assert len(seeded.list_automation_runs(old.id)) == 1
+
+
 def test_cross_project_import_skill_failure_reason_only_mentions_item(seeded):
     client = TestClient(create_app())
     _create_target(client)
@@ -526,6 +608,10 @@ def test_cross_project_import_skill_failure_reason_only_mentions_item(seeded):
     assert result["status"] == "failed"
     assert "frontmatter" in result["reason"]
     assert "broken" not in result["reason"]
+    failure = next(row for row in seeded.list_audit()
+                   if row["action"] == "project_resource_import_failed")
+    assert "frontmatter" in failure["detail"]
+    assert "broken" not in failure["detail"]
 
 
 def test_cross_project_import_controls_are_exposed_on_all_three_pages(seeded):

@@ -42,6 +42,42 @@ def test_mention_triggers_agent_reply(chat, seeded):
     assert json.loads(agents[0]["mentions"]) == []
 
 
+@pytest.mark.parametrize("state,reason", [
+    ("disabled", "项目主控角色已停用，请先启用"),
+    ("missing", "项目主控角色不存在"),
+])
+def test_human_unmentioned_message_rejects_unavailable_orchestrator(chat, seeded, state, reason):
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead = seeded.get_role("webshop", "lead")
+        lead.enabled = False
+        seeded.put_role(lead)
+
+    with pytest.raises(ValueError, match=reason):
+        chat.post("general", "human", "请检查购物车。")
+
+    response = TestClient(create_app()).post(
+        "/api/chat/general/messages", json={"author": "human", "content": "请检查购物车。"})
+    assert response.status_code == 400
+    assert reason in response.json()["detail"]
+    assert "@lead" in response.json()["detail"]
+    assert _log(seeded) == []
+    assert seeded._query("SELECT role_id FROM chat_runs") == []
+
+
+def test_human_can_mention_enabled_role_when_orchestrator_disabled(chat, seeded):
+    lead = seeded.get_role("webshop", "lead")
+    lead.enabled = False
+    seeded.put_role(lead)
+
+    message_id = chat.post("general", "human", "@[dev] 请检查购物车。")
+    chat.wait_idle()
+
+    assert json.loads(seeded.get_message(message_id)["mentions"]) == ["dev"]
+    assert [row["role_id"] for row in seeded._query("SELECT role_id FROM chat_runs")] == ["dev"]
+
+
 def test_message_context_is_persisted_and_added_to_runtime_trigger(chat, seeded):
     page_context = {
         "page_collaboration": {

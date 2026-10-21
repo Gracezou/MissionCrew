@@ -491,6 +491,11 @@ class ChatEngine:
                 # 无主控项目只靠人类点名启动角色,不点名的消息谁也不会处理;
                 # 直接拒收,免得人类以为发出去就有人接手。
                 raise ValueError("本项目没有主控，请先 @ 至少一个角色再发送")
+            # fork-divergence: 主控缺失/停用时也拒收未点名的人类消息，不能静默无人处理。
+            if not orchestrator_available:
+                if orchestrator_role is None:
+                    raise ValueError(f"项目主控角色不存在: @{orchestrator}")
+                raise ValueError(f"项目主控角色已停用，请先启用: @{orchestrator}")
             if orchestrator_available and author != orchestrator:
                 mentions = [orchestrator]
         dispatch_targets = list(mentions)

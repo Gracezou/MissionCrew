@@ -58,6 +58,8 @@ A channel name can use `/` for grouping: `backend/api` appears in the sidebar as
 
 Archived channels are outside agent visibility by default. Humans can still view the history when they open an archived channel; before an agent posts a new message to an archived channel, the platform reactivates that channel. The project's internal `general` channel is the reserved default channel, and its resource URL uses the short ID `general`.
 
+A human message without an explicit role mention requires an existing, enabled project orchestrator. If the orchestrator is disabled or missing, the message is rejected before storage with an explanation; the Web API returns 400. Explicitly mentioning another enabled role still works when the orchestrator is disabled. Projects without an orchestrator still require at least one role mention.
+
 A channel-level stop ends all `queued`, `running`, and `waiting_user` chat runs in that channel at once, releases pending interactions, terminates the corresponding runtime processes, and leaves a visible platform message and an audit record. The platform keeps the persisted native session/thread IDs, so later runs can restart the process and try to resume the context; file writes that have already completed are not rolled back. Even when the database has no active run, calling the stop API again cleans up orphan processes based on the runtime session saved for the channel.
 
 Main APIs:

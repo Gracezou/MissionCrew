@@ -8,7 +8,7 @@ from collections.abc import Collection
 from dataclasses import replace
 from functools import partial
 
-from ..core.config import projects_dir
+from ..core.config import mc_home, projects_dir
 from ..core.models import Automation, Project
 from ..core.store import Store
 from .agent_tools import AgentActionService
@@ -35,7 +35,7 @@ def _result(item_id: str, status: str, *, reason: str = "",
 
 
 def _failure_reason(exc: Exception) -> str:
-    """逐条失败原因会返回前端：系统异常只保留错误类别，不带命令行与绝对路径。"""
+    """逐条原因保留可操作的校验提示，系统异常与数据目录绝对路径脱敏。"""
     if isinstance(exc, subprocess.CalledProcessError):
         return "版本库写入失败"
     if isinstance(exc, shutil.Error):
@@ -44,6 +44,11 @@ def _failure_reason(exc: Exception) -> str:
         return "文件复制失败"
     if isinstance(exc, OSError):
         return f"文件操作失败：{exc.strerror or type(exc).__name__}"
+    if isinstance(exc, UnicodeError):  # 必须先于其父类 ValueError。
+        return "资源数据格式不合法"
+    if isinstance(exc, ValueError):
+        return str(exc).replace(str(projects_dir()), ".").replace(str(mc_home()), ".")
+    # 防御性兜底：当前调用点捕获的异常已被以上分支穷尽，不会走到这里。
     return str(exc)
 
 
@@ -199,6 +204,12 @@ def import_project_resources(store: Store, *, source_project_id: str,
                 store, source, target, item_id, conflict_strategy, actor))
         except (OSError, UnicodeError, ValueError,
                 subprocess.CalledProcessError) as exc:
+            store.audit(
+                actor, "project_resource_import_failed",
+                detail=(f"source_project={source.id} target_project={target.id} "
+                        f"resource_type={resource_type} item={item_id} "
+                        f"strategy={conflict_strategy} error={type(exc).__name__}: {exc}"),
+            )
             results.append(_result(item_id, "failed", reason=_failure_reason(exc)))
 
     return {

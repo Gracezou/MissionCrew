@@ -1098,11 +1098,12 @@ class Store:
         self._delete("automations", id)
 
     def replace_automation(self, old_id: str, automation: Automation) -> None:
-        """覆盖式替换:删旧定义与旧运行记录、写新定义在同一事务里完成。
+        """仅用于同 id 覆盖：删旧定义与旧运行记录、写新定义在同一事务里完成。
 
         跨项目复制覆盖同名自动化时用它;分成 delete + put 两次提交的话,中途
         失败会只留下"旧的已删、新的没写"的空档。
         """
+        assert old_id == automation.id, "replace_automation 仅用于同 id 覆盖"
         automation.updated_at = time.time()
         with self._lock, self._conn:
             self._conn.execute(

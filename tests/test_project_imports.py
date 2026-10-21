@@ -552,6 +552,23 @@ def test_automation_overwrite_replaces_definition_in_one_transaction(seeded):
     assert seeded.list_automation_runs(old.id) == []
 
 
+def test_automation_overwrite_rejects_different_id_without_mutation(seeded):
+    old, _ = save_automation(seeded, "webshop", id="old", script="echo old")
+    other, _ = save_automation(seeded, "webshop", id="other", script="echo other")
+    run_id = seeded.start_automation_run(old.id, "webshop", "manual")
+    seeded.finish_automation_run(run_id, "succeeded", exit_code=0, stdout="old")
+    replacement = replace(other, script="echo replacement")
+    timestamp = replacement.updated_at
+
+    with pytest.raises(AssertionError, match="仅用于同 id 覆盖"):
+        seeded.replace_automation(old.id, replacement)
+
+    assert replacement.updated_at == timestamp
+    assert seeded.get_automation(old.id).to_dict() == old.to_dict()
+    assert seeded.get_automation(other.id).to_dict() == other.to_dict()
+    assert len(seeded.list_automation_runs(old.id)) == 1
+
+
 def test_cross_project_import_skill_failure_reason_only_mentions_item(seeded):
     client = TestClient(create_app())
     _create_target(client)

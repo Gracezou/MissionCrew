@@ -505,7 +505,7 @@ def test_role_file_item_preserves_absent_manual_only():
         pytest.skip("node is required to execute the browser role file serializer")
     script = r"""
 const fs = require("fs"), vm = require("vm");
-const context = vm.createContext({});
+const context = vm.createContext({esc: value => String(value ?? "")});
 vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
 vm.runInContext(`
   for (const withEnabled of [false, true]) {
@@ -516,6 +516,11 @@ vm.runInContext(`
       if (item.manual_only !== manual_only) throw new Error("explicit flag lost");
     }
   }
+  const marked = roleTransferRows([{id: "manual", enabled: false, manual_only: true}]);
+  if (!marked.includes(">仅人工</span>") || !marked.includes(">默认停用</span>"))
+    throw new Error("import preview badges missing");
+  const plain = roleTransferRows([{id: "legacy"}, {id: "off", manual_only: false}]);
+  if (plain.includes(">仅人工</span>")) throw new Error("manual-only badge fabricated");
 `, context);
 """
     subprocess.run([node, "-e", script, str(WEB / "js" / "roles.js")],
@@ -1140,6 +1145,7 @@ def test_role_settings_expose_selective_file_import_export_with_overwrite_previe
     assert "function roleFileItem(role, withTemplateEnabled = false)" in js
     assert 'roleFileItem(role, scope === "global")' in js
     assert 'scope === "global" && payload.scope === "global"' in js
+    assert "仅人工点名：文件未包含时保持不变，显式 false 才清除" in js
     assert 'data-role-transfer-index="${index}"' in js
     assert "将覆盖现有角色" in js
     assert "不会覆盖现有角色" in js

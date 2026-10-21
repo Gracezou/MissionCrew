@@ -42,7 +42,8 @@ function roleTransferRows(roles, conflicts = null) {
       <span class="role-transfer-main"><b>@${esc(role.id)}</b>
         ${role.name ? `<span class="role-transfer-name">· ${esc(role.name)}</span>` : ""}
         <small>· ${execution}</small>
-        ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}</span>
+        ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}
+        ${role.manual_only ? `<span class="pill">仅人工</span>` : ""}</span>
       ${conflicts ? (conflict ? `<span class="pill role-overwrite-pill">将覆盖现有角色</span>`
         : `<span class="pill">新增</span>`) : ""}
     </label>`;
@@ -186,7 +187,8 @@ async function previewRoleImportFile(scope, file) {
     <div class="role-transfer-list">${roleTransferRows(roleTransferState.roles, conflicts)}</div>
     <p class="muted">${scope === "global"
       ? "已有模板保留原排序；新增模板按文件顺序追加。新项目中的默认启停以文件为准，文件未包含时新增模板默认启用、已有模板保持不变。"
-      : "已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。"}</p>`,
+      : "已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。"}</p>
+    <p class="muted">仅人工点名：文件未包含时保持不变，显式 false 才清除；新增角色默认关闭。</p>`,
     `<button class="action" onclick="importSelectedRoles()">导入所选</button>
      <button class="ghost" onclick="fdlg.close()">取消</button>`);
   updateRoleTransferSummary();

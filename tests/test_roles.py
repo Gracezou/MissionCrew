@@ -469,6 +469,36 @@ def test_legacy_role_request_keeps_manual_only(client, seeded, scope, operation)
     assert new_role.manual_only is False
 
 
+@pytest.mark.parametrize("operation", ["save", "import"])
+def test_role_guard_uses_effective_manual_only_before_writing(client, seeded, operation):
+    # API 无法生成此状态；用底层存储模拟旧数据，验证纵深守卫。
+    lead = seeded.get_role("webshop", "lead")
+    lead.manual_only = True
+    seeded.put_role(lead)
+    legacy = {"id": "lead", "runtime_id": "std-1", "model": "pro"}
+    if operation == "import":
+        payload = {"project_id": "webshop", "roles": [
+            {**legacy, "id": "must-not-save"}, legacy], "overwrite_ids": ["lead"]}
+        endpoint = "/api/roles/import"
+    else:
+        payload = {**legacy, "project_id": "webshop"}
+        endpoint = "/api/roles"
+
+    response = client.post(endpoint, json=payload)
+
+    assert response.status_code == 409, response.text
+    assert "不能设为仅人工点名" in response.json()["detail"]
+    assert seeded.get_role("webshop", "lead").to_dict() == lead.to_dict()
+    assert seeded.get_role("webshop", "must-not-save") is None
+    if operation == "import":
+        payload["roles"][-1] = {**legacy, "manual_only": False}
+    else:
+        payload["manual_only"] = False
+    cleared = client.post(endpoint, json=payload)
+    assert cleared.status_code == 200, cleared.text
+    assert seeded.get_role("webshop", "lead").manual_only is False
+
+
 def test_role_file_item_preserves_absent_manual_only():
     node = shutil.which("node")
     if node is None:

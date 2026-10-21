@@ -6,3 +6,5 @@ __pycache__/
 dist/
 CLAUDE.local.md
 .tmp/
+# 本机起步包,含个人模型接入,不进仓库
+examples/starter-kit/

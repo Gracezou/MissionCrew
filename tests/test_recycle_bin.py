@@ -443,6 +443,7 @@ def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
     for thread in threads:
         thread.join(timeout=30)
 
+    assert reached_archive.is_set(), "删除线程未命中归档窗口钩子"
     stuck = [thread.name for thread in threads if thread.is_alive()]
     assert not stuck, f"线程未结束: {stuck}"
     assert not failures, failures

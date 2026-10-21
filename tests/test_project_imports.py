@@ -521,8 +521,29 @@ def test_cross_project_import_data_error_response_hides_home(seeded, monkeypatch
     response = _import(client, "guideline", ["release-check"])
 
     assert response.status_code == 200
+    reason = ("资源数据格式不合法" if error_type is UnicodeError
+              else "invalid resource at ./private/SKILL.md")
     assert response.json()["results"] == [{
-        "id": "release-check", "status": "failed", "reason": "资源数据格式不合法"}]
+        "id": "release-check", "status": "failed", "reason": reason}]
+    assert home not in response.text
+
+
+def test_cross_project_import_value_error_strips_data_directory_prefixes(seeded, monkeypatch):
+    client = TestClient(create_app())
+    _create_target(client)
+    home = os.environ["MISSIONCREW_HOME"]
+
+    def fail(*args, **kwargs):
+        raise ValueError(
+            f"frontmatter 缺失: {home}/projects/webshop/skills/bad/SKILL.md; "
+            f"来源: {home}/imports/bad")
+
+    monkeypatch.setattr(project_imports, "_copy_guideline", fail)
+    response = _import(client, "guideline", ["release-check"])
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["reason"] == (
+        "frontmatter 缺失: ./webshop/skills/bad/SKILL.md; 来源: ./imports/bad")
     assert home not in response.text
 
 
@@ -585,7 +606,7 @@ def test_cross_project_import_skill_failure_reason_only_mentions_item(seeded):
         agent_tools=ChatEngine(seeded).agent_tools)
     result = response["results"][0]
     assert result["status"] == "failed"
-    assert result["reason"] == "资源数据格式不合法"
+    assert "frontmatter" in result["reason"]
     assert "broken" not in result["reason"]
     failure = next(row for row in seeded.list_audit()
                    if row["action"] == "project_resource_import_failed")

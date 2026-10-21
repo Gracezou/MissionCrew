@@ -8,7 +8,7 @@ from collections.abc import Collection
 from dataclasses import replace
 from functools import partial
 
-from ..core.config import projects_dir
+from ..core.config import mc_home, projects_dir
 from ..core.models import Automation, Project
 from ..core.store import Store
 from .agent_tools import AgentActionService
@@ -35,7 +35,7 @@ def _result(item_id: str, status: str, *, reason: str = "",
 
 
 def _failure_reason(exc: Exception) -> str:
-    """逐条失败原因会返回前端：只保留错误类别，不带命令行与绝对路径。"""
+    """逐条原因保留可操作的校验提示，系统异常与数据目录绝对路径脱敏。"""
     if isinstance(exc, subprocess.CalledProcessError):
         return "版本库写入失败"
     if isinstance(exc, shutil.Error):
@@ -44,8 +44,11 @@ def _failure_reason(exc: Exception) -> str:
         return "文件复制失败"
     if isinstance(exc, OSError):
         return f"文件操作失败：{exc.strerror or type(exc).__name__}"
-    if isinstance(exc, ValueError):  # 包含 UnicodeError，解析错误同样可能含路径。
+    if isinstance(exc, UnicodeError):  # 必须先于其父类 ValueError。
         return "资源数据格式不合法"
+    if isinstance(exc, ValueError):
+        return str(exc).replace(str(projects_dir()), ".").replace(str(mc_home()), ".")
+    # 防御性兜底：当前调用点捕获的异常已被以上分支穷尽，不会走到这里。
     return str(exc)
 
 

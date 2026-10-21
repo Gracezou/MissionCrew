@@ -9,7 +9,7 @@ const ROLE_FILE_FORMAT = "missioncrew.roles";
 const ROLE_FILE_VERSION = 1;
 const ROLE_FILE_FIELDS = [
   "id", "name", "description", "runtime_id", "model", "effort",
-  "usage_linkage_enabled", "manual_only", "capabilities", "preference", "color",
+  "usage_linkage_enabled", "capabilities", "preference", "color",
 ];
 let roleTransferState = null;
 
@@ -23,9 +23,11 @@ function roleTransferSource(scope) {
 function roleFileItem(role, withTemplateEnabled = false) {
   const item = Object.fromEntries(ROLE_FILE_FIELDS.map(field => {
     const fallback = field === "capabilities" ? []
-      : (field === "usage_linkage_enabled" || field === "manual_only") ? false : "";
+      : field === "usage_linkage_enabled" ? false : "";
     return [field, role[field] ?? fallback];
   }));
+  // fork-divergence: 旧文件缺少 manual_only 时不伪造 false，让服务端保留现值。
+  if (typeof role.manual_only === "boolean") item.manual_only = role.manual_only;
   if (withTemplateEnabled && typeof role.enabled === "boolean") item.enabled = role.enabled;
   return item;
 }
@@ -40,7 +42,8 @@ function roleTransferRows(roles, conflicts = null) {
       <span class="role-transfer-main"><b>@${esc(role.id)}</b>
         ${role.name ? `<span class="role-transfer-name">· ${esc(role.name)}</span>` : ""}
         <small>· ${execution}</small>
-        ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}</span>
+        ${role.enabled === false ? `<span class="pill">默认停用</span>` : ""}
+        ${role.manual_only ? `<span class="pill">仅人工</span>` : ""}</span>
       ${conflicts ? (conflict ? `<span class="pill role-overwrite-pill">将覆盖现有角色</span>`
         : `<span class="pill">新增</span>`) : ""}
     </label>`;
@@ -184,7 +187,8 @@ async function previewRoleImportFile(scope, file) {
     <div class="role-transfer-list">${roleTransferRows(roleTransferState.roles, conflicts)}</div>
     <p class="muted">${scope === "global"
       ? "已有模板保留原排序；新增模板按文件顺序追加。新项目中的默认启停以文件为准，文件未包含时新增模板默认启用、已有模板保持不变。"
-      : "已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。"}</p>`,
+      : "已有角色保留原排序和实时启停状态；新增角色按文件顺序追加并默认启用。"}</p>
+    <p class="muted">仅人工点名：文件未包含时保持不变，显式 false 才清除；新增角色默认关闭。</p>`,
     `<button class="action" onclick="importSelectedRoles()">导入所选</button>
      <button class="ghost" onclick="fdlg.close()">取消</button>`);
   updateRoleTransferSummary();

@@ -435,6 +435,11 @@ async function ensureTasksLoaded() {
 
 async function loadOverview() {
   const global = await (await fetch("/api/overview")).json();
+  const version = document.getElementById("app-version");
+  version.hidden = !global.version;
+  version.textContent = global.version ? `v${global.version}` : "";
+  document.getElementById("top-bar-brand").title = global.version
+    ? `MissionCrew v${global.version}` : "MissionCrew";
   overview.projects = global.projects;
   overview.backends = global.backends;
   overview.role_templates = global.role_templates;

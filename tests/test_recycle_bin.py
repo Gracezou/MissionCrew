@@ -368,7 +368,7 @@ def test_skill_restore_and_overwrite_import_do_not_deadlock(seeded, tmp_path, mo
 
 
 def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
-        seeded, tmp_path):
+        seeded, tmp_path, monkeypatch):
     """删除 Skill 必须归档并删掉自己检查过的那个包。
 
     recycle_skill 曾在「检查目录 → 归档 → 删除」之间不持 Skill 锁，并发的覆盖
@@ -406,7 +406,7 @@ def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
             proceed.wait(handshake)
         return original_archive_directory(*args, **kwargs)
 
-    recycle_bin._archive_directory = archive_after_window
+    monkeypatch.setattr(recycle_bin, "_archive_directory", archive_after_window)
 
     def recycle():
         try:
@@ -438,13 +438,10 @@ def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
 
     threads = [threading.Thread(target=recycle, name="recycle", daemon=True),
                threading.Thread(target=overwrite_import, name="import", daemon=True)]
-    try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30)
-    finally:
-        recycle_bin._archive_directory = original_archive_directory
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
 
     stuck = [thread.name for thread in threads if thread.is_alive()]
     assert not stuck, f"线程未结束: {stuck}"

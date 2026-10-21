@@ -400,8 +400,10 @@ def test_recycle_skill_archives_the_package_it_checked_not_a_concurrent_import(
 
     def archive_after_window(*args, **kwargs):
         # 此刻已过「目录存在」检查、尚未归档：旧代码的窗口就在这一行之前
-        reached_archive.set()
-        proceed.wait(handshake)
+        # 只卡删除线程，覆盖导入归档旧包时直接透传，避免钩子自身制造互等。
+        if threading.current_thread().name == "recycle":
+            reached_archive.set()
+            proceed.wait(handshake)
         return original_archive_directory(*args, **kwargs)
 
     recycle_bin._archive_directory = archive_after_window

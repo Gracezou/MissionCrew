@@ -9,7 +9,7 @@ const ROLE_FILE_FORMAT = "missioncrew.roles";
 const ROLE_FILE_VERSION = 1;
 const ROLE_FILE_FIELDS = [
   "id", "name", "description", "runtime_id", "model", "effort",
-  "usage_linkage_enabled", "manual_only", "capabilities", "preference", "color",
+  "usage_linkage_enabled", "capabilities", "preference", "color",
 ];
 let roleTransferState = null;
 
@@ -23,9 +23,11 @@ function roleTransferSource(scope) {
 function roleFileItem(role, withTemplateEnabled = false) {
   const item = Object.fromEntries(ROLE_FILE_FIELDS.map(field => {
     const fallback = field === "capabilities" ? []
-      : (field === "usage_linkage_enabled" || field === "manual_only") ? false : "";
+      : field === "usage_linkage_enabled" ? false : "";
     return [field, role[field] ?? fallback];
   }));
+  // fork-divergence: 旧文件缺少 manual_only 时不伪造 false，让服务端保留现值。
+  if (typeof role.manual_only === "boolean") item.manual_only = role.manual_only;
   if (withTemplateEnabled && typeof role.enabled === "boolean") item.enabled = role.enabled;
   return item;
 }

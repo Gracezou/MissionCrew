@@ -426,6 +426,72 @@ def test_role_template_keeps_both_enabled_and_manual_only_across_save_and_import
     assert template.enabled is False and template.manual_only is True
 
 
+@pytest.mark.parametrize("scope", ["project", "global"])
+@pytest.mark.parametrize("operation", ["save", "import"])
+def test_legacy_role_request_keeps_manual_only(client, seeded, scope, operation):
+    """旧请求仅携带 enabled 时，不能撤掉已有角色的仅人工权限边界。"""
+    is_project = scope == "project"
+    get_role = ((lambda: seeded.get_role("webshop", "dev")) if is_project
+                else (lambda: seeded.get_role_template("dev")))
+    role = get_role()
+    role.manual_only = True
+    if is_project:
+        seeded.put_role(role)
+    else:
+        seeded.put_role_template(role)
+    endpoint = "/api/roles" if is_project else "/api/role-templates"
+
+    def submit(item, overwrite=False):
+        if operation == "import":
+            payload = {"roles": [item], "overwrite_ids": [item["id"]] if overwrite else []}
+            target = endpoint + "/import"
+        else:
+            payload = dict(item)
+            target = endpoint
+        if is_project:
+            payload["project_id"] = "webshop"
+        return client.post(target, json=payload)
+
+    legacy = {"id": "dev", "runtime_id": "std-1", "model": "pro", "enabled": False}
+    saved = submit(legacy, overwrite=True)
+    assert saved.status_code == 200, saved.text
+    assert get_role().manual_only is True
+    assert get_role().enabled is is_project  # 项目实时启停不随配置迁移
+
+    cleared = submit({**legacy, "manual_only": False}, overwrite=True)
+    assert cleared.status_code == 200, cleared.text
+    assert get_role().manual_only is False   # 显式 False 仍可关闭
+
+    added = submit({**legacy, "id": "legacy-new"})
+    assert added.status_code == 200, added.text
+    new_role = (seeded.get_role("webshop", "legacy-new") if is_project
+                else seeded.get_role_template("legacy-new"))
+    assert new_role.manual_only is False
+
+
+def test_role_file_item_preserves_absent_manual_only():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser role file serializer")
+    script = r"""
+const fs = require("fs"), vm = require("vm");
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
+vm.runInContext(`
+  for (const withEnabled of [false, true]) {
+    const legacy = roleFileItem({id: "dev", enabled: false}, withEnabled);
+    if ("manual_only" in legacy) throw new Error("legacy file fabricated manual_only");
+    for (const manual_only of [true, false]) {
+      const item = roleFileItem({id: "dev", manual_only}, withEnabled);
+      if (item.manual_only !== manual_only) throw new Error("explicit flag lost");
+    }
+  }
+`, context);
+"""
+    subprocess.run([node, "-e", script, str(WEB / "js" / "roles.js")],
+                   capture_output=True, text=True, check=True)
+
+
 def test_platform_bootstrap_skips_instead_of_failing_when_all_templates_disabled(store):
     """全部模板默认停用是合法的重配中间态:平台自举静默跳过,不抛 RuntimeError。"""
     for backend in seed_mod.DEMO_BACKENDS:

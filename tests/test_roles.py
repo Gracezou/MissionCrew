@@ -492,6 +492,45 @@ vm.runInContext(`
                    capture_output=True, text=True, check=True)
 
 
+@pytest.mark.parametrize("state", ["disabled", "missing", "manual-only"])
+def test_project_update_without_orchestrator_keeps_unavailable_role(client, seeded, state):
+    lead = seeded.get_role("webshop", "lead")
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead.enabled = state != "disabled"
+        lead.manual_only = state == "manual-only"
+        seeded.put_role(lead)
+
+    response = client.post("/api/projects", json={"id": "webshop", "name": "改名"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["orchestrator_role_id"] == "lead"
+    assert seeded.get_project("webshop").name == "改名"
+
+
+@pytest.mark.parametrize("state,reason", [
+    ("disabled", "主控角色已停用"), ("missing", "主控角色不属于当前项目"),
+    ("manual-only", "仅人工点名的角色不能作为主控"),
+])
+def test_project_update_explicit_orchestrator_validates_role(client, seeded, state, reason):
+    original_name = seeded.get_project("webshop").name
+    lead = seeded.get_role("webshop", "lead")
+    if state == "missing":
+        seeded.delete_role("webshop", "lead")
+    else:
+        lead.enabled = state != "disabled"
+        lead.manual_only = state == "manual-only"
+        seeded.put_role(lead)
+
+    response = client.post("/api/projects", json={
+        "id": "webshop", "name": "改名", "orchestrator_role_id": "lead"})
+
+    assert response.status_code == 400
+    assert reason in response.json()["detail"]
+    assert seeded.get_project("webshop").name == original_name
+
+
 def test_platform_bootstrap_skips_instead_of_failing_when_all_templates_disabled(store):
     """全部模板默认停用是合法的重配中间态:平台自举静默跳过,不抛 RuntimeError。"""
     for backend in seed_mod.DEMO_BACKENDS:

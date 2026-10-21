@@ -41,7 +41,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         else:
             orchestrator = body.orchestrator_role_id.strip()
         orchestrator_role = None
-        if orchestrator and existing:
+        # fork-divergence: 保留现值时不重校验，与 CLI 缺省字段的行为一致；
+        # 用量联动停用主控不能阻断改名等无关更新，显式选择仍完整校验。
+        if orchestrator and existing and body.orchestrator_role_id is not None:
             orchestrator_role = store.get_role(body.id, orchestrator)
             if orchestrator_role is None:
                 raise HTTPException(400, f"主控角色不属于当前项目: @{orchestrator}")

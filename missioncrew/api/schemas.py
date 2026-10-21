@@ -1,7 +1,7 @@
 """API 请求体模型(pydantic)。"""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,12 @@ class TaskCreate(BaseModel):
     labels: list[str] = Field(default_factory=list)
     channel_ids: list[str] = Field(default_factory=list)
     status: Optional[str] = None   # 状态文本;None = labels 已带则保留,否则默认
+    source: Optional[str] = None   # 数据源 id;None = 内置源
+    url: Optional[str] = None      # 外部条目链接
+    meta: Optional[list[str]] = None   # 看板卡片附注
+    external_id: Optional[str] = None  # 外部条目 id(同源唯一,自定义源的整体同步键)
+    # 外部系统更新时间:Unix 秒或带时区的 ISO 8601;系统 updated_at 不可设置
+    external_updated_at: Optional[Union[float, str]] = None
 
 
 class TaskUpdate(BaseModel):
@@ -22,8 +28,14 @@ class TaskUpdate(BaseModel):
     summary: Optional[str] = None
     body: Optional[str] = None
     labels: Optional[list[str]] = None
+    # 逐个设置属性:{属性名: 值 | [值...] | null},null 清空;没提到的属性不动
+    properties: Optional[dict[str, Optional[Union[str, list[str]]]]] = None
     channel_ids: Optional[list[str]] = None
     status: Optional[str] = None
+    url: Optional[str] = None
+    meta: Optional[list[str]] = None
+    external_id: Optional[str] = None   # "" 去掉同步键
+    external_updated_at: Optional[Union[float, str]] = None   # 0 或 "" 清空
 
 
 class TaskBriefInput(BaseModel):
@@ -41,6 +53,8 @@ class TaskProcessInput(BaseModel):
     message: str = ""
     # message 内由角色选择器生成的结构化提及;为空时按默认流程交给项目主控
     mentions: list[MessageMentionInput] = Field(default_factory=list, max_length=50)
+    # 接收派发消息的唯一频道;为空时用 Task 的首个绑定频道
+    channel_id: str = Field(default="", max_length=200)
 
 
 class AutomationInput(BaseModel):
@@ -48,8 +62,9 @@ class AutomationInput(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     script: Optional[str] = None
-    cron: Optional[str] = None           # 五段 crontab;空字符串 = 仅手动触发
-    enabled: Optional[bool] = None
+    cron: Optional[str] = None           # 五段 crontab;空字符串 = 不定时
+    enabled: Optional[bool] = None       # 只管定时触发
+    webhook: Optional[bool] = None       # 是否接受专用 webhook 端口的投递
     actions: Optional[list[str]] = None  # None = 保留现值
     timeout_seconds: Optional[int] = Field(None, ge=1)
 
@@ -83,12 +98,19 @@ class AgentToolCallInput(BaseModel):
 
 
 class ChannelCreate(BaseModel):
-    id: str
+    id: str = ""      # 留空 = 由 name 推导(`group/topic` -> `group-topic`)
     name: str = ""
     project_id: Optional[str] = None
     workdir: Optional[str] = None
     purpose: str = ""
     actor_role_id: Optional[str] = None
+
+
+class ChannelUpdate(BaseModel):
+    # None = 保留;workdir 传空字符串 = 改回平台内置工作区
+    name: Optional[str] = None
+    purpose: Optional[str] = None
+    workdir: Optional[str] = None
 
 
 class ContentChannelInput(BaseModel):

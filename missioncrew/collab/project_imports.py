@@ -137,6 +137,8 @@ def _copy_automation(store: Store, source: Project, target: Project,
     # 复制的是定义而非执行身份/状态。replace 保留模型校验，再显式生成目标归属。
     copied = replace(
         automation, id=target_id, project_id=target.id, enabled=False,
+        # fork-divergence: enabled 只管 cron，复制不能继承源 webhook 的触发身份。
+        webhook=False, webhook_secret="",
         created_by_role_id="", last_run_at=0.0, last_status="",
     )
     # 目标项目中的复制条目是新定义，时间戳由目标存储重新维护。

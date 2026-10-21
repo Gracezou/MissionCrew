@@ -1,4 +1,5 @@
 """ACP stdio 协议:客户端流程、权限自动决策、适配器路由。"""
+import json
 import queue
 import sys
 import threading
@@ -124,11 +125,21 @@ def test_acp_list_models_from_config_options():
     assert models == ["fake/base", "fake/pro"]
 
 
-def test_acp_list_models_from_trae_models_block():
-    """trae 形态:目录在 models.availableModels(无 configOptions)。"""
+def test_acp_list_models_from_models_block():
+    """只有 models.availableModels(无 configOptions)的形态,如旧版 traecli。"""
     from missioncrew.runtime import acp
-    models = acp.list_models([sys.executable, FAKE, "trae"], timeout=15)
+    models = acp.list_models([sys.executable, FAKE, "models_block"], timeout=15)
     assert models == ["GLM-5.2", "Kimi-K2.6"]
+
+
+def test_acp_catalog_prefers_config_options_over_trae_combo_models():
+    """traecli 0.209:models 块是「模型/档位」组合 id,目录以 configOptions 为准;
+    档位由 thought_level 选项逐模型读回,没有该选项的模型不入表。"""
+    models, efforts = acp.list_model_catalog(
+        [sys.executable, FAKE, "trae"], timeout=15)
+
+    assert models == ["glm-5.3", "Doubao_1_6"]
+    assert efforts == {"glm-5.3": ["low", "high", "xhigh"]}
 
 
 def test_acp_catalog_reads_per_model_reasoning_efforts():
@@ -150,11 +161,11 @@ def test_acp_catalog_reads_per_model_reasoning_efforts():
 
 
 def test_acp_catalog_empty_efforts_without_parser():
-    """既无解析回调、也不自报 thought_level 的工具(trae 等)档位表恒为空
+    """既无解析回调、也不自报 thought_level 的工具档位表恒为空
     = 回退静态档位。"""
     from missioncrew.runtime import acp
     models, efforts = acp.list_model_catalog(
-        [sys.executable, FAKE, "trae"], timeout=15)
+        [sys.executable, FAKE, "models_block"], timeout=15)
 
     assert models == ["GLM-5.2", "Kimi-K2.6"] and efforts == {}
 
@@ -237,13 +248,82 @@ def test_acp_effort_without_thought_level_option_warns(tmp_path):
     """既不在命令里、Runtime 也不自报 thought_level 的组合:本轮照常执行,
     但明确上报 effort 未生效,不静默吞掉配置。"""
     events = []
-    backend = Backend(id="trae", name="t", adapter="trae")
-    result = _adapter("trae", "trae").run(
+    backend = Backend(id="qoder", name="q", adapter="qoder")
+    result = _adapter("qoder", "models_block").run(
         _effort_cfg(tmp_path, backend, "high", events))
 
     assert result.success, result.summary
     statuses = "".join(t for k, t in events if k == "status")
     assert "effort=high 未生效" in statuses
+
+
+def test_trae_effort_switches_reasoning_effort_option(tmp_path):
+    backend = Backend(id="trae", name="t", adapter="trae", model="glm-5.3")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "xhigh"))
+
+    assert result.success, result.summary
+    assert "模型=glm-5.3" in result.output and "思考=xhigh" in result.output
+
+
+def test_trae_effort_on_model_without_reasoning_option_fails_the_turn(tmp_path):
+    backend = Backend(id="trae", name="t", adapter="trae", model="Doubao_1_6")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "low"))
+
+    assert not result.success
+    assert "effort=low" in result.output
+    assert "Unsupported reasoning effort" in result.output
+
+
+def test_acp_passes_additional_dirs_only_when_session_capability_declared(tmp_path):
+    """trae 声明 sessionCapabilities.additionalDirectories:工作目录之外的授权
+    目录随 session/new 传入;未声明的工具(kimi 形态)协议里不带。"""
+    workdir = tmp_path / "work"
+    inner = workdir / "docs"
+    shared = tmp_path / "shared"
+    for path in (inner, shared):
+        path.mkdir(parents=True)
+
+    def run(adapter, *extra):
+        cfg = _cfg(workdir, Backend(id=adapter, name=adapter, adapter=adapter))
+        cfg.allowed_dirs = [str(workdir), str(inner), str(shared)]
+        return _adapter(adapter, *extra).run(cfg)
+
+    trae = run("trae", "trae")
+    assert trae.success, trae.summary
+    assert f";目录={shared.resolve()}" in trae.output   # 工作根内的目录不重复授权
+
+    kimi = run("kimi")
+    assert kimi.success, kimi.summary
+    assert "目录=" not in kimi.output
+
+
+def test_trae_changed_dirs_restart_live_session_and_reload_with_new_dirs(tmp_path):
+    """额外目录只在建会话时生效:清单变化要换进程,再 session/load 带上新清单。"""
+    workdir = tmp_path / "work"
+    first_dir, second_dir = tmp_path / "a", tmp_path / "b"
+    for path in (workdir, first_dir, second_dir):
+        path.mkdir()
+    saved = {}
+
+    def run(extra_dir):
+        cfg = _chat_cfg(workdir, saved)
+        cfg.backend = Backend(id="trae", name="t", adapter="trae")
+        cfg.session_id = saved.get("id", "")
+        cfg.allowed_dirs = [str(workdir), str(extra_dir)]
+        return _adapter("trae", "trae").run(cfg)
+
+    try:
+        first = run(first_dir)
+        assert first.success, first.summary
+        assert "new=1;load=0" in first.output
+        assert f";目录={first_dir.resolve()}" in first.output
+
+        second = run(second_dir)
+        assert second.success, second.summary
+        assert "new=0;load=1" in second.output
+        assert f";目录={second_dir.resolve()}" in second.output
+    finally:
+        acp.close_sessions()
 
 
 def test_acp_one_shot_execution_appears_in_runtime_status(tmp_path):
@@ -354,6 +434,38 @@ def test_acp_drops_provider_marked_replay_notifications():
     })
 
     assert client.chunks == [] and events == []
+
+
+def test_acp_subagent_messages_stay_out_of_reply(tmp_path):
+    """并行子代理的正文分片与主代理同一 sessionId、交错到达,只能凭
+    parentToolCallId 分开;并入回复会把几段 Markdown 逐字搅在一起。"""
+    client = acp._AcpClient(["cat"], str(tmp_path), {}, timeout=5)
+    client._write = lambda obj: None
+    events = []
+
+    def chunk(text, parent=""):
+        meta = {"parentToolCallId": parent} if parent else {}
+        client._handle({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "s1", "_meta": meta, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}}})
+    try:
+        client.begin_turn(5, lambda kind, text: events.append((kind, text)))
+        chunk("## 1. 主报告")
+        chunk("# 子代理 A", "call-a")
+        chunk("# 子代理 B", "call-b")
+        chunk("\n## 2. 结论")
+        assert "".join(client.chunks) == "## 1. 主报告\n## 2. 结论"
+        assert [t for k, t in events if k == "text"] == ["## 1. 主报告", "\n## 2. 结论"]
+        assert [t for k, t in events if k == "thinking"] == ["# 子代理 A", "# 子代理 B"]
+        # 后台子代理在 turn 之外的正文同样不进唤醒汇报
+        client.end_turn()
+        chunk("# 后台子代理", "call-c")
+        with client._wake_lock:
+            assert client._wake_chunks == []
+            assert client._wake_events == [("thinking", "# 后台子代理")]
+    finally:
+        client.close()
 
 
 def test_runtime_manager_stops_acp_live_session(tmp_path, monkeypatch):
@@ -695,4 +807,102 @@ def test_idle_cleanup_spares_clients_with_live_terminals(tmp_path):
     finally:
         with acp._LIVE_SESSIONS_GUARD:
             acp._LIVE_SESSIONS.pop(key, None)
+        client.close()
+
+
+def _usage_events(events):
+    return [json.loads(text) for kind, text in events if kind == "usage"]
+
+
+def test_trae_turn_emits_unified_usage_event(tmp_path):
+    """标准 usage(本轮)+ usage_update(上下文)+ 私有 _meta 会话累计归一成 usage/v1。"""
+    events = []
+    backend = Backend(id="trae", name="t", adapter="trae", model="glm-5.3")
+    result = _adapter("trae", "trae").run(_effort_cfg(tmp_path, backend, "", events))
+
+    assert result.success, result.summary
+    [usage] = _usage_events(events)
+    assert usage["schema"] == "usage/v1"
+    assert usage["turn"] == {"input": 27082, "cache_read": 13504, "cache_write": 0,
+                             "output": 35, "reasoning": 0, "total": 27117}
+    assert usage["total"] == {"input": 40666, "cache_read": 27008,
+                              "output": 54, "total": 40720}
+    # 上下文占用取 usage_update.used,而不是一轮两次请求的合计 27117
+    assert (usage["context_used"], usage["context_window"]) == (13564, 190000)
+    assert usage["raw"]["usage_update"] == {"used": 13564, "size": 190000}
+    assert "stopReason" not in usage["raw"]["responses"][0]
+
+
+def test_acp_without_usage_reports_no_usage_event(tmp_path):
+    """kimi 形态的响应不带用量:不发空的 usage 事件。"""
+    events = []
+    backend = Backend(id="kimi", name="k", adapter="kimi")
+    result = _adapter("kimi").run(_effort_cfg(tmp_path, backend, "", events))
+
+    assert result.success, result.summary
+    assert _usage_events(events) == []
+
+
+def test_turn_usage_sums_continuation_prompts_and_prefers_standard_cost():
+    first = {"stopReason": "end_turn",
+             "usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}}
+    second = {"stopReason": "end_turn",
+              "usage": {"inputTokens": 200, "outputTokens": 20, "totalTokens": 220}}
+    context = {"sessionUpdate": "usage_update", "used": 230, "size": 1000,
+               "cost": {"amount": 0.5, "currency": "USD"}}
+    vendor = lambda response: {"cost_usd": 0.01, "duration_ms": 40}
+
+    usage = acp._turn_usage([first, second], context, vendor)
+
+    assert usage["turn"] == {"input": 300, "output": 30, "total": 330}
+    assert (usage["context_used"], usage["context_window"]) == (230, 1000)
+    assert usage["cost_usd"] == 0.5          # 标准会话累计费用优先
+    assert usage["duration_ms"] == 80        # 续接 prompt 的耗时逐项相加
+
+
+def test_turn_usage_ignores_non_usd_cost_and_failing_vendor_hook():
+    def broken(response):
+        raise KeyError("boom")
+
+    usage = acp._turn_usage(
+        [{"usage": {"inputTokens": 5, "outputTokens": 1, "totalTokens": 6}}],
+        {"used": 6, "size": 100, "cost": {"amount": 3, "currency": "EUR"}}, broken)
+
+    assert usage["turn"]["total"] == 6 and "cost_usd" not in usage
+    assert acp._turn_usage([{"stopReason": "end_turn"}], {}, None) == {}
+
+
+def test_grok_prompt_usage_reads_xai_meta():
+    """grok 不填标准 usage,本轮用量、费用与耗时在 _meta(真实响应截取)。"""
+    from missioncrew.runtime.clis import grok
+    response = {"stopReason": "end_turn", "_meta": {
+        "totalTokens": 22886, "modelId": "grok-4.7",
+        "usage": {"inputTokens": 22774, "outputTokens": 103, "totalTokens": 22877,
+                  "cachedReadTokens": 2176, "cacheCreationTokens": 0,
+                  "reasoningTokens": 102, "modelCalls": 1, "apiDurationMs": 3258,
+                  "costUsdTicks": 145866800}}}
+
+    usage = acp._turn_usage([response], {}, grok.parse_prompt_usage)
+
+    assert usage["turn"] == {"input": 22774, "cache_read": 2176, "cache_write": 0,
+                             "output": 103, "reasoning": 102, "total": 22877}
+    assert usage["context_used"] == 22886 and "context_window" not in usage
+    assert usage["cost_usd"] == pytest.approx(0.01458668)
+    assert usage["duration_ms"] == 3258
+    assert grok.parse_prompt_usage({"stopReason": "end_turn"}) == {}
+
+
+def test_usage_update_outside_turn_is_recorded_not_woken(tmp_path):
+    """回合外的 usage_update 只更新上下文状态,不进自唤醒缓冲。"""
+    client = acp._AcpClient(["cat"], str(tmp_path), {}, timeout=5)
+    try:
+        client.end_turn()
+        client._handle({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "s", "update": {"sessionUpdate": "usage_update",
+                                         "used": 10, "size": 100}}})
+        assert client.context_usage["used"] == 10
+        assert client._wake_events == [] and client._wake_chunks == []
+        client.begin_turn(5, None)
+        assert client.context_usage == {}
+    finally:
         client.close()

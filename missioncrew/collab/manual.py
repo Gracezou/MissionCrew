@@ -2,6 +2,7 @@
 
 Prompt 只保留必须时刻遵守的规则;平台各动作的用法、格式约定、边界细节都放在
 这份手册里,由 Agent 在需要时读取。每次装配都会重新渲染,保证与当前项目一致。
+手册与 Prompt 一样用英文书写;示例里的 `待处理` 等状态是项目真实的标签取值,保持原样。
 """
 from __future__ import annotations
 
@@ -10,242 +11,454 @@ from .documents import document_resource_url
 from .resource_urls import missioncrew_project_url
 
 _MANUAL = """\
-# MissionCrew 手册
+# MissionCrew Manual
 
-本文件由平台每轮刷新,是 MissionCrew 平台能力与规则的完整参考。Prompt 里只保留
-必须时刻遵守的规则;做下面这些事之前先读对应章节:文档发布、Task、消息派发、频道、
-面板与数据源、准则与 Skill、自动化、回收站、配置页协作。
+The platform refreshes this file every turn; it is the reference for how to work with
+MissionCrew. The prompt keeps only the rules that always apply; read the matching
+section before you do any of the following: publish documents, work with Tasks, dispatch
+messages, manage channels, dashboards and data sources, guidelines and skills, automation,
+the recycle bin, or config-page collaboration. For the full details of a platform mechanism,
+search `platform-docs/`: MissionCrew's own documentation, indexed by
+`platform-docs/README.md`.
 
-## 0. 典型流程
+## 0. Typical Flow
 
-执行角色的一轮:
-1. 读任务:任务只来自触发消息里的简报;信息不足就在回复中提出,不要扩大范围。
-2. 补背景:需要时再看频道历史、准则、Skill、项目文档,不要预加载。
-3. 干活:在工作目录读写代码、运行命令;只碰授权目录;临时文件放约定目录或工作区 `temp/`。
-4. 写回平台:发布文档、创建或更新 Task、追加状态简报一律走 Agent Tool。
-5. 回复:先说结论,再说做了什么;引用资源用 `/resources/...` 链接;主控派发的任务结果会自动交回主控。
+An executor's turn:
+1. Read the task: the task comes only from the brief in the trigger message; if information is missing, raise it in your reply instead of widening the scope.
+2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
+3. Do the work: read/write code and run commands in the working directory; touch only authorized directories; put temporary files in the conventional directory or the workspace `temp/`.
+4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool.
+5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links; results of tasks the orchestrator dispatched go back to it automatically.
 
-主控的一轮:
-1. 读需求:人类请求或执行角色的回报就是本轮输入;多角色点名时只有你被启动,名单在触发消息里。
-2. 定人和定地方:按角色名册选人;是否新建频道按项目准则;引用或派发到其他频道前先 `channel.list`。
-3. 派发:`message.publish` 传 `channel`、`mentions` 和写清背景、要求、验收标准的简报。
-4. 收尾等回报:`dispatched` 非空就说一句已派发并结束 turn;不轮询、不追问、不代劳,平台会自动唤起你。
-5. 验收汇总:对照验收标准核对,继续派发或写结论;阶段结论用 `task.brief` 记账;验收要跑命令到代码仓目录做。
+An orchestrator's turn:
+1. Read the request: a human request or an executor's report is this turn's input; when several roles are mentioned at once only you are started, and the list is in the trigger message.
+2. Choose who and where: pick roles from the role roster; whether to open a new channel follows the project guidelines; run `channel.list` before referencing or dispatching to another channel.
+3. Dispatch: `message.publish` with `channel`, `mentions` and a brief stating the background, requirements and acceptance criteria.
+4. Wrap up and wait for reports: when `dispatched` is non-empty, say in one sentence that the work was dispatched and end the turn; do not poll, chase or take over; the platform wakes you up automatically.
+5. Review and summarize: check against the acceptance criteria, then dispatch further or write the conclusion; record milestone conclusions with `task.brief`; run verification commands in the repository directories.
 
-## 1. 平台与工作区
+## 1. Platform and Workspace
 
-- MissionCrew 是本地多 Agent harness,负责装配角色、Runtime/模型、项目上下文、共享
-  资料和 Channel 协作;Task 是进入 Channel 的 Issue,不是独立执行流程;它不是业务代码仓。
-- 本 `.missioncrew` 工作区位于业务代码仓之外(路径见 Prompt 与 `MISSIONCREW_WORKSPACE`),
-  其中的文件不会进入业务源码或业务代码提交;源代码仍在 Prompt 给出的工作目录或项目代码仓中修改。
-- 目录:`documents/` 项目版本化文档库入口(协作草稿、报告、验证记录也归入这里);
-  `tasks/` Task 只读快照;`guidelines/` 已启用准则实时视图;`skills/` 已启用 Skill 实时视图
-  (先读 SKILL.md,再按需用同目录 scripts/、references/、assets/);`project.md` 项目简介与代码仓;
-  `channel-history.json` 频道完整历史(执行角色为脱敏视图);`temp/` 无项目约定时的临时目录;
-  `manual.md` 本手册。
-- 不要读取或打印 `.agent-tool-token`;Agent Tool CLI 会自行读取令牌文件。
+- MissionCrew is a local multi-agent harness that assembles roles, runtimes/models, project
+  context, shared materials and channel collaboration; a Task is an issue that enters a channel,
+  not a separate execution flow; MissionCrew is not the business repository.
+- This `.missioncrew` workspace lives outside the business repositories (its path is in the
+  prompt and `MISSIONCREW_WORKSPACE`); its files never enter business source code or commits.
+  Source code is still changed in the working directory or project repositories given in the prompt.
+- Layout: `documents/` entry to the project's versioned document library (collaboration drafts,
+  reports and verification records belong here too); `tasks/` read-only Task snapshots;
+  `guidelines/` read-only view of enabled guidelines; `skills/` read-only view of enabled skills
+  (read SKILL.md first, then use scripts/, references/, assets/ in the same directory as needed);
+  the platform regenerates both views every turn; `project.md` project summary and repositories; `channel-history.json` full channel history
+  (executors get a redacted view); `temp/` temporary directory when the project has no convention;
+  `manual.md` this manual; `platform-docs/` read-only copy of MissionCrew's own documentation
+  (`README.md` there lists every document).
+- Do not read or print `.agent-tool-token`; the Agent Tool CLI reads the token file itself.
 
-## 2. 资源 URL 与对外引用
+## 2. Resource URLs and External References
 
-- 项目资源前缀 `__PROJECT_URL__`:频道 `/channels/<频道 id>`、任务 `/tasks/<任务 id>`、
-  面板 `/dashboards/<面板 id>`(内置任务看板 id 为 `tasks`)、准则 `/guidelines/<name>`、
-  Skill `/skills/<id>`、文档 `/documents/<文档库相对路径>`、回收站 `/recycle-bin`。
-- 这些 URL 是 Web 标识,不是文件路径。回复里引用平台资源必须用这些链接,引用文档写成
-  `[标题](__DOCUMENTS_URL__/路径)`;不要输出工作区绝对路径、`.missioncrew` 真实路径或
-  `file://` 链接。
-- 文档资源 URL `__DOCUMENTS_URL__/<相对路径>` 直接映射为 `$MISSIONCREW_DOCUMENTS_DIR/<相对路径>`;
-  不要猜测或搜索 `.missioncrew` 的物理位置。
+- Project resource prefix `__PROJECT_URL__`: channel `/channels/<channel id>`, task `/tasks/<task id>`,
+  dashboard `/dashboards/<dashboard id>` (the built-in task board id is `tasks`), guideline
+  `/guidelines/<name>`, skill `/skills/<id>`, document `/documents/<path in the document library>`,
+  recycle bin `/recycle-bin`.
+- These URLs are web identifiers, not file paths. Replies must reference platform resources with
+  these links and documents as `[title](__DOCUMENTS_URL__/path)`; never output absolute workspace
+  paths, the real `.missioncrew` path or `file://` links.
+- The document resource URL `__DOCUMENTS_URL__/<relative path>` maps directly to
+  `$MISSIONCREW_DOCUMENTS_DIR/<relative path>`; do not guess or search for the physical location
+  of `.missioncrew`.
 
-## 3. 文件系统边界与路径失败处理
+## 3. File System Boundary and Path Failures
 
-- 只能读写 Prompt 中「本次可读写目录」列出的路径及其子目录。禁止访问 `/tmp`、`/var/tmp`、
-  其他项目目录、用户主目录中的未授权文件和未作为本地代码仓显式列出的 MissionCrew 源码目录;
-  Shell 重定向、后台日志和工具自动生成文件同样受此限制。
-- 临时文件优先放在业务仓已有的任务目录(如项目约定的 `.tmp/`、`.e2e/`);没有项目约定时
-  使用工作区的 `temp/`,任务结束后清理。不要先尝试外部路径再等待权限批准。
-- 若工具报告 `external_directory`、`permission denied` 或其他硬路径拒绝:不要改为搜索共同
-  父目录、兄弟目录或其他未列出的路径,也不要重复提交同一越界请求;先把目标路径与清单逐项
-  对照,再改用清单内的精确绝对路径;若完成任务确实依赖清单外的材料,停止该项访问并在结果中
-  写明被拒绝的精确路径和已尝试的授权根目录,交由主控或人类调整。
-- 清单内路径报 `Read-only file system` 时先看位置:授权目录下的 `.git`、`.codex`、`.agents`,以及
-  git worktree 对应的主仓 `.git/worktrees/<名字>`,是 Runtime 沙箱(如 Codex 的 workspace-write)
-  在沙箱内挂成只读的,宿主并未只读挂载,同目录其他文件仍可写。这类失败应带一句理由申请提升权限,
-  原样重跑同一命令;平台在 auto 审批下自动批准并记录 permission_request 事件,prompt 下交人类决定。
-  不要据此判定环境只读而放弃;只有申请被拒绝时才按上一条停止并报告。典型症状:worktree 里 `git add/commit/fetch` 报
-  `index.lock`/`FETCH_HEAD` 只读,仓内 `.agents/skills` 下的 Skill 文档写不了。
+- Read and write only the read/write directories listed in the prompt and their subdirectories.
+  Do not access `/tmp`, `/var/tmp`, other project directories, unauthorized files in the user's
+  home directory, or MissionCrew source directories not explicitly listed as local repositories;
+  shell redirections, background logs and files generated by tools are bound by this too.
+- Put temporary files in a task directory the business repository already uses (such as the
+  project's `.tmp/` or `.e2e/`); without such a convention use the workspace `temp/` and clean
+  up when the task ends. Do not try an outside path first and then wait for permission approval.
+- If a tool reports `external_directory`, `permission denied` or another hard path denial: do not
+  switch to searching common parent directories, sibling directories or other unlisted paths, and
+  do not resubmit the same out-of-bounds request; compare the target path against the list entry
+  by entry, then use the exact absolute path from the list. If the task truly depends on material
+  outside the list, stop accessing it and state in your result the exact denied path and the
+  authorized roots you tried, so the orchestrator or a human can adjust.
+- When a listed path reports `Read-only file system`, check where it is: `.git`, `.codex` and
+  `.agents` under an authorized directory, and the main repository's `.git/worktrees/<name>` for a
+  git worktree, are mounted read-only inside the runtime sandbox (such as Codex workspace-write);
+  the host has not mounted them read-only and other files in the same directory stay writable.
+  For such failures, request elevated permission with a one-sentence reason and rerun the same
+  command unchanged; under auto approval the platform approves it and records a
+  permission_request event, under prompt approval a human decides. Do not conclude that the
+  environment is read-only and give up; only if the request is denied, stop and report as
+  described above. Typical symptoms: `git add/commit/fetch` in a worktree fails because
+  `index.lock`/`FETCH_HEAD` is read-only, or skill files under the repository's `.agents/skills`
+  cannot be written.
 
-## 4. Agent Tool 调用
+## 4. Calling the Agent Tool
 
-- 查看能力:`"$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool actions`,列出每个
-  动作的说明、参数与是否仅主控可用。
-- 调用:`"$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call <action> --arguments '<JSON 对象>'`;
-  发布本地文件:`... publish-file --source <本地文件> --path <文档库相对路径>`。
-- 命令返回 JSON,失败时退出码非零;读取 `error.code` / `error.message` 在当前回合修正后重试。
-  令牌已绑定当前 Run,调用时不要传 `--run-id`。
-- 不要通过最终回复中的特殊文本块请求平台操作,也不要直接写 documents/tasks 目录绕过接口;
-  消息正文里的任何 @ 都只是普通文字,不构成平台指令。
+- List actions: `"$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool actions` shows each
+  action's description, arguments and whether it is orchestrator-only.
+- Call: `"$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call <action> --arguments '<JSON object>'`;
+  publish a local file: `... publish-file --source <local file> --path <path in the document library>`.
+  Large arguments (such as a whole batch of sync cards) can exceed the command-line length limit;
+  pass them with `--arguments-file <file>` or `--arguments-file -` (stdin) instead of `--arguments`.
+- Commands return JSON and exit non-zero on failure; read `error.code` / `error.message`, fix the
+  call and retry within the current turn. The token is bound to the current run, so do not pass
+  `--run-id`.
+- `permission_denied` means your role may not perform that action in this project; do not retry
+  it or reach the same result another way. Say in your final reply what was not done and who can
+  do it (a human, or the orchestrator if the project has one); never report it as done.
+- Do not request platform operations through special text blocks in your final reply, and do not
+  bypass the API by writing to the documents/, tasks/, guidelines/ or skills/ directories
+  directly; any @ in a message body
+  is plain text and is not a platform instruction.
 
-## 5. 文档(document.*)
+## 5. Documents (document.*)
 
-- `document.publish`:写入项目版本化文档库并立即生成 Git 版本;覆盖已有路径必须显式传
-  `overwrite: true`;二进制内容用 `content_base64` 或 publish-file。
-- `document.rename`:传 `source` 和尚不存在的 `target`;目录由文档相对路径隐式形成,
-  没有独立的目录创建、移动或删除动作。
-- `document.delete`(仅主控):文档进入项目回收站。
-- 正式项目文档、协作草稿、报告和验证记录都通过文档库发布到 `documents/`,不要写进 `tasks/`。
+- `document.publish`: writes to the project's versioned document library and creates a Git
+  version immediately; overwriting an existing path requires `overwrite: true`; binary content
+  uses `content_base64` or publish-file.
+- `document.rename`: pass `source` and a `target` that does not exist yet; directories are implied
+  by relative document paths, and there are no separate actions to create, move or delete them.
+- `document.delete` (orchestrator only): moves the document to the project recycle bin.
+- `document.history`: the version history is not in `documents/`; without `revision` it lists a
+  document's versions newest first (also after renames or deletion), and with `revision` it
+  returns that version's content (`content_base64` for non-UTF-8 files). To roll a document
+  back, read the old version and publish it again with `overwrite: true`.
+- Formal project documents, collaboration drafts, reports and verification records are all
+  published to `documents/` through the document library; never write them into `tasks/`.
 
-## 6. Task(task.*)
+## 6. Tasks (task.*)
 
-- Task 包含标题、简介、正文、状态(`status: 文本` 标签)、标签和 Channel 绑定;每个 Task
-  至少绑定一个可用 Channel。状态就是标签,人、Agent、脚本都可直接改,最后写入者生效。
-- `tasks/*.md` 全部是平台生成的只读快照,回合结束只刷新快照,不会把文件修改同步回 Task;
-  frontmatter 中的 status_briefs 是只读历史。创建、更新、追加状态简报或删除必须用
-  `task.create` / `task.update` / `task.brief` / `task.delete`(删除仅主控)。
+- A Task has a title, summary, body, status (a `status: text` label), labels and optional channel
+  bindings: `task.create` without `channel_ids` binds the current channel, `task.update` with
+  `channel_ids: []` unbinds all, and dispatching a Task needs at least one channel (tasks synced
+  from a data source have none until they are dispatched). The status is just a label that
+  humans, agents and scripts can all change directly; the last writer wins. To set a single
+  `property: value` label (such as `owner`) without rewriting the whole label list, pass
+  `task.update` a `properties` object, e.g. `{"owner": "张三"}`; null clears it.
+- `tasks/*.md` are all read-only snapshots generated by the platform: they are refreshed when a
+  turn is assembled and right after your own `task.*` calls, and file edits are never synced
+  back to Tasks. `status_briefs` in the frontmatter is read-only history. Creating, updating,
+  appending status briefs to or deleting a Task must use `task.create` / `task.update` /
+  `task.brief` / `task.delete` (deletion is orchestrator only).
+- `task.archive` (orchestrator only) takes a finished Task off the boards and out of `tasks/`
+  while keeping its body and briefs; `task.restore` brings an archived Task back (archived
+  tasks are not in the snapshot, so the id comes from the human or an earlier result).
+- `task.update` needs the task's current version as `snapshot_updated_at`: take the snapshot's
+  `snapshot_updated_at`, or `updated_at` of the `task` in your previous `task.*` result. On `version_conflict`,
+  `error.details.task` is the current task and the snapshot is already refreshed; check what
+  changed, then retry with its `updated_at`. `task.brief` needs no version, so use it to record
+  progress or to change only the status.
+- Every Task belongs to a data source: the built-in `built-in` by default, or a custom source
+  when `task.create` is given `source` (its snapshot then carries `source`). Tasks of either
+  kind are changed one at a time with the same `task.*` actions; use the source's own status
+  values (in the data source list of your context, or as seen on that source's tasks in
+  `tasks/`). To add or remove a single task of a custom source, use `task.create` /
+  `task.delete`, never a partial `board_source.save` card list: that whole sync deletes every
+  task with an `external_id` missing from it.
+- When a task copies an external item (such as an issue), pass `external_id` (the id the sync
+  cards use, e.g. the issue number), `url` and `external_updated_at` (the item's update time in
+  the external system: Unix seconds or ISO 8601 with a time zone) to `task.create`, in either
+  kind of source; boards show and sort by that time. `updated_at` is MissionCrew's own system
+  time, set on every write and never by you. In a
+  custom source the next whole sync then updates that task instead of creating a duplicate, and
+  deletes it once the item leaves the card list. `external_id` is unique within a source:
+  `already_exists` returns the existing task in `error.details.task`, so update that one instead.
+- Tasks with an `external_id` also carry it and `url` (the original item, such as a GitHub
+  issue) in their snapshot, and their dispatch message includes the link. The
+  sync script owns the fields its cards carry (usually title, summary, url and plain labels) and
+  rewrites them on every sync; keep local progress in the status, `property: value` labels and
+  status briefs, which a sync changes only when its cards carry them.
+- Details: `platform-docs/agent-tool-api.md` (actions, results and errors) and
+  `platform-docs/automation.md` (data source sync and automatic handling rules).
 
-## 7. 消息与派发(主控)
+## 7. Messages and Dispatch (Orchestrator)
 
-- 派发是唯一的调度方式:`message.publish` 传 `channel`(频道短 id,当前频道的 id 见 Prompt)、
-  `mentions` 角色数组,content 写清背景、要求和验收标准;返回值里 `dispatched` 是实际启动的
-  角色,`chain_budget` 是本条协作链已用次数与上限。你发出的任何消息正文(包括最终回复)里的 @角色ID、@[角色ID] 都只是普通文字,
-  永不触发执行。不需要协作就不传 mentions;不要调度自己,不要编造不存在的角色。
-- 角色的 runtime/模型在项目定义角色时已固定,你不能也不需要调整;调度就是在角色名册里
-  结合定位、能力与偏好选人。
-- `message.publish` 返回非空 `dispatched` 时,当前 turn 的派发职责已完成:立即在最终回复里
-  简短说明已派发,然后结束当前 turn。不要 `sleep`,不要周期性轮询频道历史、工作树或运行
-  状态,不要代替执行角色继续其任务,也不要向仍在执行的角色再次 publish 追问中间状态——
-  同一频道同一角色的持久会话无法中途插入新 turn,这类请求只会排在原任务后面。执行角色
-  完成或失败后,平台自动启动新的主控 turn 并交回完整结果,届时再验收、继续调度或汇总。
-- 活动 Run 状态不会自动写入上下文;人类询问运行情况或要求停止角色时,用 `channel.runs.list`
-  取当前 Channel 的一次性快照,用返回的 `run_id` 调 `channel.run.stop`;不要把按需查询变成等待循环。
-- 跨频道核对:`channel.runs.list` 与 `channel.history` 都可传 `channel`(项目内频道短 id)查看
-  其他频道的活动运行与最近消息(`limit` 默认 20、最多 200,`before_id` 向前翻页),用于在续接被
-  中断的工作时确认某频道是否已派发、执行角色进展到哪一步;`channel.run.stop` 仍只能停当前频道的运行。
-- 人类在同一条触发消息中选择多个角色时,平台只启动主控;触发消息 JSON 的 `mentions` 和
-  `mention_spans` 保留完整名单,由主控决定并行、顺序或调整人选,再分别派发。
-- 回答人类、汇总结论或说明当前状态时直接写最终回复,平台会发布到触发消息所在的 Channel;
-  除非确实要向另一个 Channel 单独发布,不要再调用空 `mentions` 的 `message.publish` 复制同一份答复。
+- Dispatching is the only way to schedule work: `message.publish` with `channel` (short channel
+  id; the current channel's id is in the prompt), a `mentions` array of roles, and content stating
+  the background, requirements and acceptance criteria; in the result, `dispatched` lists the roles
+  actually started and `chain_budget` shows the runs used and the limit of this collaboration
+  chain. Any @roleID or @[roleID] in a message body you send (including your final reply) is plain
+  text and never triggers execution. Do not pass mentions unless you need collaboration; do not
+  dispatch to yourself or invent roles.
+- Each role's runtime/model is fixed when the project defines the role; you cannot and need not
+  change it. Scheduling means choosing from the role roster by profile, capabilities and
+  preferences.
+- Once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is
+  done: say briefly in your final reply that the work was dispatched, then end the turn. Do not
+  `sleep`, do not poll channel history, worktrees or run status, do not take over an executor's
+  task, and do not publish to a still-running role to ask for interim status: a role's persistent
+  session in a channel cannot accept a new turn mid-run, so such requests just queue behind the
+  original task. When the executor finishes or fails, the platform automatically starts a new orchestrator turn with its full result; review, dispatch further, or summarize then.
+- Active run status is not written into your context automatically; when a human asks about runs
+  or asks to stop a role, take a one-off snapshot of the current channel with `channel.runs.list`
+  and pass the returned `run_id` to `channel.run.stop`; do not turn on-demand queries into a wait
+  loop.
+- Cross-channel checks: both `channel.runs.list` and `channel.history` accept `channel` (a short
+  channel id in the project) to inspect another channel's active runs and recent messages (`limit`
+  defaults to 20, at most 200; `before_id` pages backwards), for confirming whether a channel was
+  dispatched and how far its executor got when resuming interrupted work; `channel.run.stop` can
+  still only stop runs in the current channel.
+- When a human picks several roles in one trigger message, the platform starts only the orchestrator; the trigger message JSON's `mentions` and
+  `mention_spans` keep the full list, and the orchestrator decides on parallel or sequential order or different assignees, then dispatches each.
+- Your output this turn (the final reply) is automatically published by the platform as the
+  result to the trigger message's channel: put answers to humans, conclusions, current status and
+  anything else you need to include into it. Use `message.publish` only when necessary, i.e. to
+  dispatch or to post to another channel; do not call `message.publish` with empty `mentions` to
+  post the same answer again, or the channel shows two copies of the result.
 
-## 8. 频道(channel.*)
+## 8. Channels (channel.*)
 
-- `channel.list`(仅主控,scope=active 默认 / archived / all):返回 id、name、purpose、
-  workdir(及是否已不存在)、archived、last_message_at、active_run_count、resource_url。
-  频道清单不预先写入上下文,引用其他频道、派发到其他频道或新建频道前先查。
-- `channel.history`(仅主控,channel 默认当前频道 / limit / before_id):返回该频道最新消息记录,
-  格式与工作区 `channel-history.json` 相同(含 agent_tool 回执、agent_stop 等平台消息),
-  `message_count` 是频道消息总数。要看某频道最近发生了什么就查它,不要去猜。
-- `channel.create` 的 workdir 只能是项目代码仓路径或其子目录;不填时若项目只配了一个代码仓
-  则自动使用它。新频道创建后是空的,用 `message.publish` 把任务简报发进去并在 `mentions` 里
-  显式点名执行者开工。
-- 频道绑定目录被删除后(例如任务 worktree 已清理),后续轮次回退到平台默认目录并在 Prompt
-  中提示;要继续该目录的工作,先重建目录(如 git worktree add)或新建频道绑定正确目录。
+- `channel.list` (orchestrator only, scope=active by default / archived / all): returns id, name,
+  purpose, workdir (and whether it no longer exists), archived, last_message_at,
+  active_run_count and resource_url. The channel list is not preloaded into your context; check
+  it before referencing, dispatching to, or creating another channel.
+- `channel.history` (orchestrator only, channel defaults to the current one / limit / before_id):
+  returns the latest messages of that channel in the same format as the workspace
+  `channel-history.json` (including platform messages such as agent_tool receipts and
+  agent_stop); `message_count` is the channel's total message count. Check it to see what happened
+  in a channel recently instead of guessing.
+- The workdir of `channel.create` must be a project repository path or a subdirectory of one; if
+  omitted and the project has exactly one repository, that repository is used. A new channel
+  starts empty: post the task brief into it with `message.publish` and name the executor
+  explicitly in `mentions` to start the work.
+- `channel.update` (orchestrator only, id defaults to the current channel) changes the name,
+  purpose or workdir; the workdir follows the same rule as `channel.create`, an empty string
+  switches back to the platform's built-in workspace, and a new workdir takes effect from the
+  next run in that channel. Archived and page-conversation channels cannot be changed.
+- `channel.archive` makes a finished channel read-only and stops its persistent runtimes; it is
+  refused for general, page-conversation channels and channels with active runs (so you cannot
+  archive the channel you are running in). `channel.restore` reverses it; find archived
+  channels with `channel.list` scope=archived.
+- After a channel's bound directory is deleted (for example, the task worktree was cleaned up),
+  later turns fall back to the platform default directory and the prompt says so; to continue
+  work in that directory, recreate it first (e.g. `git worktree add`) or create a new channel
+  bound to the correct directory.
 
-## 9. 面板与看板数据源(dashboard.* / board_source.*)
+## 9. Dashboards and Board Data Sources (dashboard.* / board_source.*)
 
-- `dashboard.save` 不携带 layout 字段时保留现有布局;携带则全量替换。layout 每项含 id、type、
-  title、x、y、width、height、content。type 是通用展示原语(领域含义来自数据,不是类型):
-  markdown(content.markdown)、table(columns+rows)、card(metrics 数值卡)、
-  chart(kind=bar|line|pie + data + x_key/y_key)、list(items)、log(lines)、code(code+language)。
-- 卡片可用 content.source 绑定平台实时数据,渲染时自动取数:
-  `{"from":"tasks","status":["待处理"],"labels":[]}`(项目任务→表格行)、
-  `{"from":"document","path":"specs/x.md"}`(文档库文件→markdown)、
-  `{"from":"audit","actions":[],"limit":30}`(审计事件→列表)、
-  `{"from":"messages","channel":"general","limit":20}`(频道消息→列表)。
-  例:需求管理面板 = table 卡片(静态 columns/rows 由你维护)+ tasks 源的实时任务表;
-  测试记录面板 = table + list;日志分析 = list/log + markdown 结论。
-- 任务看板:`dashboard.save` 传 `kind: "taskboard"` 与 `source`(数据源 id,内置 `built-in`
-  或自定义源短 id)。看板按 `filters` 分列,每项 `{"title","query","color"}`,query 是标签
-  表达式(& | ! 与括号,`属性: *` 匹配带该属性标签的任务);状态就是 `status: 待处理` 这样的
-  标签,可写 `status: 处理中 & bug`;也可传 `group_by`(如 `"owner"`)改为按该属性的取值
-  横向分列(每个取值一列,末尾「未设置」列),此时 filters 的并集只划定进入看板的卡片范围;
-  不传 filters 时按数据源状态取值生成默认列,用户也可在看板页直接增删筛选列。
-- `board_source.save` 创建或更新自定义任务数据源:cards 按 id 整体同步为该源的任务(新增/
-  覆盖/删除本次未出现的),每张必须有 id、title,可选 summary、status、labels、updated_at、
-  meta、url(外部链接);新任务会走项目自动处理规则。典型用法:配合 `automation.save` 的定时
-  脚本同步 GitCode/GitHub Issue 到数据源,再用 `dashboard.save` 建任务看板绑定该源。
-  删除用 `board_source.delete`(仍被面板引用时会拒绝,删除连带该源全部任务)。
-- `dashboard.delete` 删除面板,进入回收站。
+- Dashboards and data sources are not in your workspace: `dashboard.list` lists dashboards, and
+  with `id` returns one dashboard's full configuration (layout, filters, group_by);
+  `board_source.list` lists custom data sources with their status values, task counts and bound
+  dashboards. Read the current configuration before changing it.
+- `dashboard.save` keeps the existing layout when no layout field is given and replaces it
+  entirely when one is. Each layout item has id, type, title, x, y, width, height and content.
+  type is a generic display primitive (domain meaning comes from the data, not the type):
+  markdown (content.markdown), table (columns+rows), card (metrics value cards),
+  chart (kind=bar|line|pie + data + x_key/y_key), list (items), log (lines), code (code+language),
+  taskboard (content.label = a label expression, content.source = data source id, default
+  `built-in`; shows the matching active tasks of that source as cards).
+- A card can bind live platform data through content.source, fetched automatically at render time:
+  `{"from":"tasks","source":"built-in","status":["待处理"],"labels":[]}` (one data source's
+  tasks → table rows; source defaults to `built-in`, like task boards),
+  `{"from":"document","path":"specs/x.md"}` (document library file → markdown),
+  `{"from":"audit","actions":[],"limit":30}` (audit events → list),
+  `{"from":"messages","channel":"general","limit":20}` (channel messages → list).
+  Examples: a requirements dashboard = a table card (static columns/rows you maintain) + a live
+  task table from the tasks source; a test record dashboard = table + list; log analysis =
+  list/log + a markdown conclusion.
+- Task boards: `dashboard.save` with `kind: "taskboard"` and `source` (data source id: the
+  built-in `built-in` or a custom source's short id). The board is split into columns by
+  `filters`, each `{"title","query","color"}`, where query is a label expression (& | ! and
+  parentheses; `property: *` matches tasks with a label of that property, and a bare term
+  without a colon such as `owner` matches the plain label or any `owner: ...` label, so
+  `!owner` means "no owner"); the status is just a label such as `status: 待处理`, so
+  `status: 处理中 & bug` works. You can also pass `group_by`
+  (e.g. `"owner"`) as the page's default grouping by that property's values (one column per value
+  plus a trailing "unset" column); it covers every task in the board's scope, and filters do not
+  narrow it. Without filters, default columns are generated from the data source's status values.
+  Search, quick filters, grouping, sorting and collapsed columns on the page are each viewer's
+  personal view stored in their browser and never change the saved board; users maintain the
+  shared expression columns (titles, expressions, order) with the ✎ button shown next to the
+  column dropdown when custom expression columns are selected. Details:
+  `platform-docs/automation.md` (Task board filtering and columns).
+- `board_source.save` creates or updates a custom task data source: cards are synced by id as
+  that source's tasks (added / updated / removed if absent this time; removal deletes the task and
+  its briefs permanently, without the recycle bin); each card needs id (and title when it creates
+  a task), optionally summary, status, labels, properties, updated_at (the item's update time in
+  the external system, stored as the task's `external_updated_at`), meta (an array of strings)
+  and url (external link). An existing task only changes what its card carries: omit status to
+  keep the status set locally (new tasks default to the first status value); plain labels in
+  `labels` replace the task's plain labels as a set (an empty or property-only `labels` clears
+  them; omit `labels` to leave them alone), while `property: value` labels and
+  `properties` replace only those properties (null clears one). New tasks go through the
+  project's automatic handling rules. Full merge rules and card formats are in
+  `platform-docs/automation.md`. Typical use: a scheduled script saved with
+  `automation.save` syncs GitCode/GitHub issues into the data source, then `dashboard.save` creates
+  a task board bound to it. Delete with `board_source.delete` (refused while a dashboard still
+  references it; deletion removes all of the source's tasks).
+- `dashboard.delete` deletes a dashboard into the recycle bin.
 
-## 10. 准则与 Skill(guideline.* / skill.*)
+## 10. Guidelines and Skills (guideline.* / skill.*)
 
-- `guideline.save` 接收完整 markdown,文件必须以只含 name、description 的 YAML frontmatter
-  开头;后端直接读取这两个属性,不使用 id/title/summary,也不做字段转换。修改并重命名现有
-  准则时传 original_name。
-- `skill.save` 按 id 新建或覆盖,markdown 是完整 SKILL.md 原文:frontmatter 至少含 name、
-  description,附加属性原样保留。不要建立文件、Runtime 或角色绑定列表;需要关联项目文档时
-  在正文中写标准相对 Markdown 链接(以文档库目录为根)。
-- description 应简洁说明适用场景:所有执行者只会收到已启用准则/Skill 的 description,
-  并在相关时才读取全文。验证、审查、安全和审批等项目要求也统一写入准则 Markdown,由 Agent
-  根据任务判断是否适用;平台不维护独立的验证规则。
-- MissionCrew 注入的 Skill 是额外能力,不替代代码仓原有的 Agent 配置或 Skill(`AGENTS.md`、
-  `CLAUDE.md`、`.agent/skills`、`.agents/skills`、`.claude/skills` 等仍按原生规则发现)。
-- 删除分别用 `guideline.delete` / `skill.delete`(仅主控),进入回收站。
+- The workspace `guidelines/` and `skills/` are read-only views generated by the platform; create
+  or change guidelines and skills only with `guideline.save` / `skill.save`. These views only
+  hold enabled entries: `guideline.list` / `skill.list` (orchestrator only) list every entry
+  including disabled ones, and with `name` / `id` return the full markdown (for a skill also its
+  file list) to edit, or to re-enable by saving it again with `enabled: true`.
+  `guideline.history` / `skill.history` (orchestrator only) list an entry's versions and, with
+  `revision`, return that version's full markdown (for a skill also its file list, and one
+  file's content with `file`); to roll back, save the old content again. If the call is
+  refused, publish the draft to the document library with `document.publish`, link it in your
+  final reply and state that the guideline or skill is not saved yet, so a human (or the
+  orchestrator) can save it.
+- `guideline.save` takes the full markdown; the file must start with YAML frontmatter containing
+  only name and description. The backend reads these two properties directly, does not use
+  id/title/summary, and does not convert fields. Pass original_name when modifying and renaming an
+  existing guideline.
+- `skill.save` creates or overwrites by id; markdown is the full SKILL.md text: the frontmatter
+  contains at least name and description, and extra properties are kept as they are. Do not build
+  lists of file, runtime or role bindings; to link project documents, write standard relative
+  Markdown links in the body (rooted at the document library directory).
+- A description should briefly state when to use it: every executor receives only the
+  descriptions of enabled guidelines/skills and reads the full text when relevant. Project
+  requirements on verification, review, security and approval also go into guideline Markdown,
+  and agents judge whether they apply to the task; the platform keeps no separate verification
+  rules.
+- Skills injected by MissionCrew are extra capabilities and do not replace the repository's own
+  agent configuration or skills (`AGENTS.md`, `CLAUDE.md`, `.agent/skills`, `.agents/skills`,
+  `.claude/skills` and so on are still discovered under their native rules).
+- Delete with `guideline.delete` / `skill.delete` (orchestrator only); they go to the recycle bin.
 
-## 11. 自动化(automation.*)
+## 11. Automation (automation.*)
 
-- `automation.save` 创建或更新项目自动化脚本:script 是脚本全文(有 shebang 按可执行文件
-  运行,否则用 bash),cron 是五段 crontab(空字符串 = 仅手动触发),actions 是脚本 token
-  允许调用的动作白名单。脚本由平台统一定时入口触发,运行时可用 `missioncrew.agent_tool` CLI
-  调用平台动作(定时刷新面板数据、同步外部系统生成 Task、向频道发布巡检报告等)。
-- 脚本内 `message.publish` 只有显式传 mentions 才会触发角色;用户可在项目设置中按 Task label
-  配置自动处理规则,脚本同步进来的 Task 会按规则自动派发。删除用 `automation.delete`。
+- `automation.save` creates or updates a project automation script: script is the full script
+  text (run as an executable when it has a shebang, otherwise with bash), cron is a five-field
+  crontab (empty string = no schedule), webhook true also accepts deliveries from external
+  systems (GitHub, GitCode, ...) on the platform's dedicated webhook port, and actions is the
+  allowlist of actions the script token may call. Scripts are triggered by cron, webhook
+  deliveries or manually, and can call platform actions through the `missioncrew.agent_tool` CLI
+  at runtime (refreshing dashboard data on a schedule, syncing external systems into Tasks,
+  posting inspection reports to channels, etc.).
+- A webhook's signing secret is shown only to humans on the automation page and never to you:
+  after enabling it, give the human the `webhook_path` from the result and ask them to configure
+  the external system with the secret from that page. A script reads what triggered it from
+  `MISSIONCREW_TRIGGER` and the webhook event from `MISSIONCREW_WEBHOOK_EVENT_FILE`, and filters
+  the events it cares about itself.
+- Scripts are not in your workspace: `automation.list` lists them, and with `id` returns the full
+  script and its recent runs (status, exit code, the tail of stdout/stderr), so read it before
+  changing or fixing a script. `automation.run` starts a manual run in the background (scripts
+  cannot call it themselves); check the result later with `automation.list` instead of waiting
+  in a loop.
+- Before writing a script, read `platform-docs/automation.md`: it covers the environment
+  variables the platform injects, the working directory that persists across runs, how a script
+  calls actions, webhook triggers (event file, verification, queueing) and a complete sync
+  example.
+- A sync script must exit non-zero when fetching the external list fails instead of saving a
+  partial list, because tasks missing from `board_source.save` are deleted; keep card ids stable
+  across runs (for example, the issue number).
+- `message.publish` inside a script triggers roles only when mentions is passed explicitly.
+  Automatic handling rules are separate from scripts: a human sets them on the page (label
+  query, instructions and roles), either from the ⚡ icon on a task board column header or on the
+  "自动处理规则" page under the built-in task board in the sidebar. There is no Agent Tool action
+  for rules, so when asked to set one up, tell the human where it is and suggest the expression
+  and instructions. Rules cover every data source in the project; each newly created Task (by a
+  human, `task.create` or a data source sync) is dispatched by the first enabled rule, in list
+  order, whose expression matches its labels, except tasks already in the 已完成 status;
+  `task.create` then returns `auto_dispatch`. Delete scripts with `automation.delete`.
 
-## 12. 回收站(recycle.*)
+## 12. Recycle Bin (recycle.*)
 
-- 文档、准则、Skill、面板、频道等平台资源删除后进入项目统一回收站(删除仅主控)。
-  `recycle.list` 查看,`recycle.restore` 恢复;只有用户明确要求永久删除时才用 `recycle.purge`。
+- Deleted platform resources such as documents, guidelines, skills, dashboards and channels go to
+  the project's unified recycle bin (deletion is orchestrator only). `recycle.list` lists it and
+  `recycle.restore` restores; use `recycle.purge` only when the user explicitly asks for permanent
+  deletion.
 
-## 13. 配置页协作
+## 13. Config-Page Collaboration
 
-- 配置页面的协作消息会明确给出当前页面、当前条目、未保存草稿,以及用户选中的字段、行号
-  和原文。只提问或讨论时直接回答,不要改配置;明确要求创建或修改时,必须用对应的
-  `guideline.save` / `skill.save` / `document.publish` 动作实际落库。
+- Collaboration messages from a config page state the current page, the current item, unsaved
+  drafts, and the fields, line numbers and original text the user selected. If the user only asks
+  or discusses, just answer and do not change the configuration; when explicitly asked to create
+  or modify, persist it with the corresponding `guideline.save` / `skill.save` /
+  `document.publish` action.
 
-## 14. 协作链预算
+## 14. Collaboration Chain Budget
 
-- 本项目单条协作链最多 __MAX_RUNS__ 次 Agent 执行。这只是防止失控循环的总次数兜底,
-  不限制调度层级;请在预算内自主拆解、分派、验收并推进任务。
+- A single collaboration chain in this project allows at most __MAX_RUNS__ agent runs. This is
+  only a total cap against runaway loops and does not limit dispatch depth; break down, assign,
+  review and drive the work autonomously within the budget.
 """
 
 
 _PEER_FLOW = """\
-## 0. 典型流程
+## 0. Typical Flow
 
-本项目没有主控,所有角色权限相同:每个角色既执行任务,也可以把工作派发给其他角色。
-一轮的流程:
-1. 读任务:触发消息是人类请求、其他角色派发的简报或回报;信息不足就在回复中提出,不要扩大范围。
-2. 补背景:需要时再看频道历史、准则、Skill、项目文档,不要预加载。
-3. 干活或派发:能自己完成的在工作目录读写代码、运行命令;需要其他角色时按角色名册选人,
-   `message.publish` 传 `channel`、`mentions` 和写清背景、要求、验收标准的简报。
-4. 写回平台:发布文档、创建或更新 Task、追加状态简报一律走 Agent Tool。
-5. 回复:先说结论,再说做了什么;引用资源用 `/resources/...` 链接。`dispatched` 非空就说一句
-   已派发并结束 turn,不轮询、不追问、不代劳,平台会在被派发角色完成后自动唤起你并交回结果。
+This project has no orchestrator: every role holds the orchestrator-level management actions
+(channels, dashboards, data sources, guidelines, skills, automations, the recycle bin), but roles
+cannot dispatch each other; only humans start roles.
+A turn:
+1. Read the task: the trigger message is a human request or an automation script message; if information is missing, raise it in your reply instead of widening the scope.
+2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
+3. Do the work: read/write code and run commands in the working directory; when part of the work needs another role, finish what you can and name that role in your reply so a human can mention it.
+4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool.
+5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links. The result is only published to the channel and triggers no other role.
 """
 
-# 无主控项目:去掉"仅主控"限定,派发与回传按派发者口径描述
+# 无主控项目的第 7 节:只发布消息、不派发,整节替换主控版
+_PEER_MESSAGES = """\
+## 7. Messages
+
+- This project has no orchestrator, so roles cannot dispatch each other: `message.publish`
+  rejects `mentions`, and any @roleID or @[roleID] in a message body you send (including your
+  final reply) is plain text and never triggers execution. Only humans start roles; when a human
+  picks several roles in one trigger message, each starts on its own without waiting for the
+  others, and each result is only published to the channel.
+- When the work needs another role, finish what you can and say in your final reply which role
+  should take it and why; a human decides whether to mention it.
+- Active run status is not written into your context automatically; when a human asks about runs
+  or asks to stop a role, take a one-off snapshot of the current channel with `channel.runs.list`
+  and pass the returned `run_id` to `channel.run.stop`; do not turn on-demand queries into a wait
+  loop.
+- Cross-channel checks: both `channel.runs.list` and `channel.history` accept `channel` (a short
+  channel id in the project) to inspect another channel's active runs and recent messages (`limit`
+  defaults to 20, at most 200; `before_id` pages backwards); `channel.run.stop` can still only
+  stop runs in the current channel.
+- Your output this turn (the final reply) is automatically published by the platform as the
+  result to the trigger message's channel: put answers to humans, conclusions, current status and
+  anything else you need to include into it. Use `message.publish` only to post to another
+  channel; do not call it to post the same answer again, or the channel shows two copies of the
+  result.
+
+"""
+
+# 无主控项目:去掉"仅主控"限定和派发相关说明
 _PEER_REPLACEMENTS = (
-    ("(仅主控)", ""),
-    ("(删除仅主控)", ""),
-    ("(仅主控,scope=", "(scope="),
-    ("(仅主控,channel 默认", "(channel 默认"),
-    ("动作的说明、参数与是否仅主控可用。", "动作的说明与参数(本项目无主控,所有动作对每个角色开放)。"),
-    ("## 7. 消息与派发(主控)", "## 7. 消息与派发"),
-    ("交由主控或人类调整", "交由派发者或人类调整"),
-    ("完成或失败后,平台自动启动新的主控 turn 并交回完整结果,届时再验收、继续调度或汇总。",
-     "完成或失败后,平台自动启动派发者的新 turn 并交回完整结果,届时再验收、继续派发或汇总。"),
-    ("- 人类在同一条触发消息中选择多个角色时,平台只启动主控;触发消息 JSON 的 `mentions` 和\n"
-     "  `mention_spans` 保留完整名单,由主控决定并行、顺序或调整人选,再分别派发。",
-     "- 本项目没有主控:人类在同一条触发消息中选择多个角色时,每个被点名的角色都会启动、互不等待;\n"
-     "  由角色 `message.publish` 派发的结果自动交回派发者,人类直接点名的结果只留在频道。"),
+    (" (orchestrator only)", ""),
+    (" (deletion is orchestrator only)", ""),
+    ("(orchestrator only, scope=", "(scope="),
+    ("(orchestrator only, channel defaults", "(channel defaults"),
+    ("(orchestrator only, id defaults", "(id defaults"),
+    ("action's description, arguments and whether it is orchestrator-only.",
+     "action's description and arguments (this project has no orchestrator, so every action is "
+     "open to every role; `message.publish` only posts and cannot dispatch)."),
+    ("work with Tasks, dispatch\nmessages", "work with Tasks, post\nmessages"),
+    ("so the orchestrator or a human can adjust", "so a human can adjust"),
+    ("so a human (or the\n  orchestrator) can save it", "so a human can save it"),
+    ("check\n  it before referencing, dispatching to, or creating another channel.",
+     "check\n  it before referencing or creating another channel."),
+    ("A new channel\n  starts empty: post the task brief into it with `message.publish` and name the "
+     "executor\n  explicitly in `mentions` to start the work.",
+     "A new channel\n  starts empty; a human mentions the roles that should work there."),
 )
+
+
+def _replace_section(text: str, heading: str, next_heading: str, body: str) -> str:
+    """把从 heading 到 next_heading(不含)之间的整节换成 body;next_heading 为空则换到结尾。"""
+    head, _, rest = text.partition(heading)
+    tail = rest[rest.index(next_heading):] if next_heading else ""
+    return head + body + tail
 
 
 def render_manual(project: Project) -> str:
     """按项目渲染手册;占位用字符串替换而非 format,正文里的 JSON 花括号不必转义。"""
     text = _MANUAL
     if not project.has_orchestrator:
-        head, _, rest = text.partition("## 0. 典型流程")
-        rest = rest[rest.index("## 1. "):]
-        text = head + _PEER_FLOW + "\n" + rest
+        text = _replace_section(text, "## 0. Typical Flow", "## 1. ", _PEER_FLOW + "\n")
+        text = _replace_section(text, "## 7. Messages", "## 8. ", _PEER_MESSAGES)
+        # 协作链预算只约束派发,角色不能派发时整节不适用
+        text = _replace_section(text, "## 14. ", "", "").rstrip() + "\n"
         for old, new in _PEER_REPLACEMENTS:
             assert old in text, old
             text = text.replace(old, new)

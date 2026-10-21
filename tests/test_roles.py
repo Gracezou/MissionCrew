@@ -801,6 +801,18 @@ def test_channel_id_namespaced_by_project(client, seeded):
                        json={"id": "x", "project_id": "ghost"}).status_code == 400
 
 
+def test_channel_id_derived_from_grouped_name(client, seeded):
+    # 名称里的 `/` 只用于侧栏分组;不给 id 时由名称推导,`/` 换成连字符
+    r = client.post("/api/chat/channels",
+                    json={"name": "backend / api", "project_id": "webshop"})
+    assert r.status_code == 200
+    assert (r.json()["id"], r.json()["name"]) == ("webshop:backend-api", "backend / api")
+    assert client.post("/api/chat/channels", json={
+        "name": "backend/api", "project_id": "webshop"}).status_code == 400
+    assert client.post("/api/chat/channels", json={
+        "name": "/", "project_id": "webshop"}).status_code == 400
+
+
 def test_channel_archive_restore_and_delete_api(client, seeded):
     created = client.post("/api/chat/channels", json={
         "id": "release", "project_id": "webshop", "purpose": "发布讨论",
@@ -891,11 +903,11 @@ def test_channel_sidebar_exposes_filter_archive_restore_and_delete(client):
     assert "输入 @ 后从列表选择角色；单个角色直接执行，多个角色交给主控协调" in html
     assert "CHANNEL_FILTERS" in ui and "channelIsGeneral" in ui
     assert "channelActivity" in ui and "visibleProjChannels" in ui
-    assert "visibleProjChannels()" in router and "channelSidebarItem" in router
+    assert "visibleProjChannels()" in router and "channelSidebarHtml(chans)" in router
     for function in ("archiveChannel", "restoreChannel", "deleteChannel",
                      "renderChannelFilter", "renderChannelState"):
         assert f"function {function}" in channels
-    assert "const managed = general;" in channels
+    # general 菜单只能编辑、不能归档/删除:见 test_sidebar_channel_menu_offers_edit_where_allowed
     assert "永久清空对话" in channels and "内容专属频道" in channels
     assert all(label in channels for label in ("用途", "工作目录", "创建者"))
     assert ".channel-filter-menu" in css and ".channel-actions-menu" in css
@@ -922,7 +934,8 @@ def test_automation_ui_uses_sidebar_and_full_detail_view(client):
     assert "registerViewerDirtyChecker(automationFormDirty)" in automations
     assert 'openFormDialog(automation ? `编辑脚本' not in automations
     assert '<textarea id="af-desc" class="automation-description-input"' in automations
-    assert "crontab(五段;留空 = 仅手动触发)" in automations
+    assert "crontab(五段;留空 = 不定时)" in automations
+    assert 'id="af-webhook"' in automations   # 定时与 webhook 两种触发可同时开启
     assert 'class="automation-trigger-editor"' in automations
     assert automations.index('class="automation-trigger-editor"') > automations.index("<h3>配置</h3>")
     assert all(label in automations for label in
@@ -977,6 +990,72 @@ def test_global_settings_exposes_new_project_role_templates(client):
     assert "role.enabled !== false && !role.manual_only" in ui
     assert "defaultOrchestratorTemplate()" in js and "defaultOrchestratorTemplate()" in projects_js
     assert 'document.getElementById("np-create").disabled = !defaultOrchestrator' in projects_js
+
+
+def test_fork_role_ui_survives_upstream_merge_with_dom_stubs():
+    """执行真实 UI/模板/项目 JS，验证 fork 开关与上游渲染能同时工作。"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the role UI integration check")
+    script = r"""
+const fs = require('fs'), vm = require('vm'), assert = require('assert/strict');
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {
+    id, value: '', innerHTML: '', textContent: '', hidden: false, disabled: false,
+    dataset: {}, classList: {toggle() {}, contains() {return false;}},
+    addEventListener() {}, showModal() {this.open = true;}, querySelector: () => null,
+  });
+  return elements.get(id);
+}
+const context = vm.createContext({
+  assert, element, window: {}, setTimeout() {}, matchMedia: () => ({matches: false}),
+  localStorage: {getItem: () => null, setItem() {}},
+  document: {getElementById: element, addEventListener() {},
+    documentElement: {dataset: {}}, querySelectorAll: () => []},
+  traitMeta: {abilities: {}},
+});
+for (const name of ['ui.js', 'roles.js', 'settings-runtime.js', 'projects.js'])
+  vm.runInContext(fs.readFileSync(process.argv[1] + '/' + name, 'utf8'), context);
+vm.runInContext(`
+  refreshModelOptions = () => {};
+  refreshEffortOptions = () => {};
+  modelCatalogLabel = () => '<label>Model</label>';
+  overview.backends = [{id: 'mock', name: 'Mock', enabled: true}];
+  overview.role_templates = [
+    {id: 'disabled', enabled: false, manual_only: true, usage_linkage_enabled: true},
+    {id: 'manual', enabled: true, manual_only: true},
+    {id: 'eligible', enabled: true, manual_only: false},
+  ];
+  renderGlobalRoleTable();
+  const table = element('global-role-table').innerHTML;
+  for (const label of ['新项目默认主控', '默认停用', '用量联动', '仅人工'])
+    assert(table.includes('>' + label + '</span>'), label);
+  assert(table.match(/data-id="disabled"[\\s\\S]*?默认停用[\\s\\S]*?用量联动[\\s\\S]*?仅人工/));
+  editGlobalRoleTemplate('disabled');
+  let form = element('fdlg-body').innerHTML;
+  assert(form.includes('id="rf-enabled" role="switch"\\n      aria-checked="false"'));
+  assert(form.includes('id="rf-manual-only" role="switch"\\n      aria-checked="true"'));
+  assert.equal((form.match(/class="role-toggle-field"/g) || []).length, 3);
+  editGlobalRoleTemplate(null);
+  form = element('fdlg-body').innerHTML;
+  assert(form.includes('id="rf-enabled" role="switch"\\n      aria-checked="true"'));
+  assert(form.includes('id="rf-manual-only" role="switch"\\n      aria-checked="false"'));
+  openNewProject();
+  assert(element('np-role-summary').textContent.includes('默认主控为 @eligible'));
+  assert.equal(element('np-create').disabled, false);
+  const preview = roleTransferRows([roleFileItem(overview.role_templates[0], true)]);
+  assert(preview.includes('>仅人工</span>') && preview.includes('>默认停用</span>'));
+  overview.role_templates = overview.role_templates.slice(0, 2);
+  renderGlobalRoleTable();
+  openNewProject();
+  assert.equal(element('global-role-warning').hidden, false);
+  assert.equal(element('np-create').disabled, true);
+  assert(element('np-role-summary').textContent.includes('没有可作主控的模板'));
+`, context);
+"""
+    subprocess.run([node, "-e", script, str(WEB / "js")],
+                   text=True, capture_output=True, check=True, timeout=10)
 
 
 def test_system_runtime_status_page_and_api_cover_all_instance_modes(

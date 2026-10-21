@@ -221,6 +221,17 @@ def _validate_tree(directory: Path) -> tuple[list[str], int]:
     return files, total
 
 
+def skill_package(project_id: str, skill_id: str) -> tuple[str, list[str]]:
+    """Skill 包当前的 SKILL.md 全文与包内相对文件清单(不含本机路径)。"""
+    directory = project_skill_library_dir(project_id) / skill_id
+    if not directory.is_dir():
+        return "", []
+    skill_file = _skill_file(directory)
+    files, _total = _validate_tree(directory)
+    markdown = skill_file.read_text(encoding="utf-8") if skill_file else ""
+    return markdown, files
+
+
 def read_skill_file(directory: Path, relative: str) -> tuple[str, bool]:
     """读取 Skill 目录内单个文本文件，返回 (内容, 是否截断)。"""
     files, _ = _validate_tree(directory)

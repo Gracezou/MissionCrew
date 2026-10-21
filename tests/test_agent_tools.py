@@ -44,27 +44,30 @@ def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     assert lead_run_again != lead_run and next_lead_token != lead_token
     assert "# MissionCrew Agent Tool" in lead.common_prompt
     assert "message.publish" in lead.common_prompt
-    assert "最终回复会由平台自动发布" in lead.common_prompt
-    assert "不要再调用空 `mentions` 的 `message.publish`" in lead.common_prompt
-    assert "派工仍必须使用 `message.publish`" in lead.common_prompt
-    assert "返回非空 `dispatched` 时" in lead.common_prompt
-    assert "不要使用 `sleep`" in lead.common_prompt
-    assert "不要向仍在执行的角色再次 `message.publish` 追问" in lead.common_prompt
-    assert "不能提供实时进度" in lead.common_prompt
+    assert "automatically published in full as this turn's result" in lead.common_prompt
+    assert "do not call `message.publish` with empty `mentions`" in lead.common_prompt
+    assert "Dispatching always goes through `message.publish`" in lead.common_prompt
+    assert "returns a non-empty `dispatched`" in lead.common_prompt
+    assert "do not use `sleep`" in lead.common_prompt
+    assert "do not send `message.publish` to a role that is still running" in lead.common_prompt
+    assert "cannot give live progress" in lead.common_prompt
     assert "channel.runs.list" in lead.common_prompt
     assert "channel.run.stop" in lead.common_prompt
-    assert "活动 Run 状态不会自动写入你的上下文" in lead.common_prompt
-    assert "不要为这条说明再调用一次 `message.publish`" in lead.common_prompt
+    assert "Active run status is not written into your context automatically" in lead.common_prompt
+    assert "do not call `message.publish` again for that note" in lead.common_prompt
     assert "document.publish" in dev.common_prompt
     assert "document.rename" in dev.common_prompt
     assert "message.publish" not in dev.common_prompt
     assert "channel.runs.list" not in dev.common_prompt
     assert "channel.run.stop" not in dev.common_prompt
-    assert "返回非空 `dispatched` 时" not in dev.common_prompt
+    assert "returns a non-empty `dispatched`" not in dev.common_prompt
     assert "is_current_run" not in lead.common_prompt
     assert "missioncrew-action>" not in lead.common_prompt
-    assert "不要传 `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
+    assert "do not pass `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
     assert "本轮上下文" not in lead.turn_prompt
+    # 能 publish 的角色每轮都带回复方式提醒,防止长会话里先 publish 再回复的重复输出
+    assert "# How Your Reply Is Delivered" in lead.turn_prompt
+    assert "# How Your Reply Is Delivered" not in dev.turn_prompt
     assert "MISSIONCREW_AGENT_RUN_ID" not in lead.env
     assert lead_token not in lead.prompt and dev_token not in dev.prompt
     assert Path(lead.env["MISSIONCREW_AGENT_TOKEN_FILE"]).stat().st_mode & 0o777 == 0o600
@@ -135,7 +138,7 @@ def test_agent_tool_api_returns_structured_results_and_permission_errors(seeded)
     capabilities = client.get("/api/agent/v1/actions", headers=headers)
     assert capabilities.status_code == 200
     assert set(capabilities.json()["result"]["actions"]) == {
-        "document.publish", "document.rename",
+        "document.publish", "document.rename", "document.history",
         "task.brief", "task.create", "task.update"}
 
     published = client.post("/api/agent/v1/actions", headers=headers, json={
@@ -439,8 +442,8 @@ def test_orchestrator_message_tool_uses_explicit_mentions_and_chain_context(seed
     assert "dev" in roles and "reviewer" not in roles
     assert result["dispatched"] == ["dev"]
     assert result["handoff"] == "end_turn"
-    assert "不要向仍在执行的角色追问中间状态" in result["resume"]
-    assert "自动启动你的新 turn" in result["resume"]
+    assert "Do not ask still-running roles for interim status" in result["resume"]
+    assert "starts a new turn for you" in result["resume"]
     assert "not_dispatched" not in result
 
 
@@ -822,6 +825,19 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     task_file = Path(_config.env["MISSIONCREW_TASKS_DIR"]) / f"{task['id']}.md"
     assert "title: 补齐接口与权限测试" in task_file.read_text(encoding="utf-8")
 
+    # 外部更新时间可由 Agent 设置并出现在快照里;系统 updated_at 仍是版本号
+    stamped = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-external-time",
+        "arguments": {
+            "id": task["id"],
+            "snapshot_updated_at": updated.json()["result"]["task"]["updated_at"],
+            "external_updated_at": "1970-01-01T00:16:40Z",
+        },
+    })
+    assert stamped.status_code == 200, stamped.text
+    assert stamped.json()["result"]["task"]["external_updated_at"] == 1000.0
+    assert "external_updated_at: 1000.0" in task_file.read_text(encoding="utf-8")
+
     briefed = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "task.brief", "run_id": run_id, "request_id": "task-brief",
         "arguments": {
@@ -841,6 +857,31 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     })
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "version_conflict"
+
+    # 别人(这里是人类)改过任务后冲突:快照当场刷新,错误带回当前任务,按它的版本即可重试
+    from missioncrew.collab.tasks import update_task
+    current = seeded.get_task(task["id"])
+    update_task(seeded, current, snapshot_updated_at=current.updated_at,
+                changes={"summary": "人类补充了范围"})
+    briefed_at = briefed.json()["result"]["task"]["updated_at"]
+    conflict = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-conflict",
+        "arguments": {"id": task["id"], "snapshot_updated_at": briefed_at,
+                      "properties": {"owner": "dev"}},
+    })
+    assert conflict.status_code == 409
+    error = conflict.json()["error"]
+    assert error["code"] == "version_conflict" and "details.task" in error["message"]
+    latest = error["details"]["task"]
+    assert latest["summary"] == "人类补充了范围" and latest["updated_at"] > briefed_at
+    assert "人类补充了范围" in task_file.read_text(encoding="utf-8")
+    retried = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-retry",
+        "arguments": {"id": task["id"], "snapshot_updated_at": latest["updated_at"],
+                      "properties": {"owner": "dev"}},
+    })
+    assert retried.status_code == 200
+    assert "owner: dev" in retried.json()["result"]["task"]["labels"]
 
     other_channel = Channel(
         id="webshop:other", name="其他", project_id="webshop")
@@ -880,6 +921,36 @@ def test_agent_tool_cli_unknown_command_hints_documents_dir(capsys):
     assert "未知子命令: read-document" in err
     assert "$MISSIONCREW_DOCUMENTS_DIR" in err
     assert "publish-file" in err          # 同时列出可用子命令
+
+
+def test_agent_tool_cli_reads_large_arguments_from_file_or_stdin(
+        tmp_path, monkeypatch, capsys):
+    """整批同步卡片可能超出单个命令行参数的长度上限,call 支持从文件或 stdin 读参数。"""
+    import io
+
+    calls = []
+
+    def fake_request(method, payload=None):
+        calls.append(payload)
+        return 200, {"ok": True, "result": {}}
+
+    monkeypatch.setattr(agent_tool, "_request_json", fake_request)
+    arguments = {"id": "gh", "cards": [{"id": f"#{n}", "title": "x" * 200}
+                                       for n in range(1000)]}
+    source = tmp_path / "args.json"
+    source.write_text(json.dumps(arguments), encoding="utf-8")
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(source)]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(arguments)))
+    assert agent_tool.main(["call", "board_source.save", "--arguments-file", "-"]) == 0
+    assert [call["arguments"] for call in calls] == [arguments, arguments]
+
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(tmp_path / "missing.json")]) == 1
+    assert "无法读取参数文件" in capsys.readouterr().out
+    with pytest.raises(SystemExit):   # 两种来源互斥
+        agent_tool.main(["call", "task.create", "--arguments", "{}",
+                         "--arguments-file", str(source)])
 
 
 def test_agent_tool_cli_encodes_file_and_preserves_structured_error(

@@ -4,19 +4,24 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+from . import board_sources
 from .resource_urls import task_resource_url
 from ..core import label_query
-from ..core.models import (Channel, Task, new_id, normalize_labels, status_of,
-                           with_status)
+from ..core.models import (BUILTIN_SOURCE_ID, Channel, Task, new_id,
+                           normalize_labels, normalize_properties, status_of,
+                           with_property, with_status)
 from ..core.store import Store
 
-DEFAULT_STATUS = "待处理"
 DONE_STATUS = "已完成"
 DISPATCHED_STATUS = "处理中"
 
 
-class TaskDispatchError(ValueError):
-    """多 Channel 派发只完成一部分时，保留已经产生的消息。"""
+class TaskConflictError(ValueError):
+    """external_id 在同一数据源里已被另一个 Task 占用;existing 是那个 Task。"""
+
+    def __init__(self, message: str, existing: Task):
+        super().__init__(message)
+        self.existing = existing
 
 
 def _text(value: object, field: str, *, required: bool = False) -> str:
@@ -32,6 +37,23 @@ def _labels(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError("labels 必须是字符串数组")
     return normalize_labels(value)
+
+
+def _external_id(store: Store, project_id: str, source_id: str, value: object,
+                 exclude_task_id: str = "") -> str:
+    """外部条目的同步键(如 Issue 编号):同一数据源内唯一,空串表示没有。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("external_id 必须是字符串")
+    external_id = str(value).strip()
+    twin = board_sources.external_twin(
+        store, project_id, source_id, external_id, exclude_task_id)
+    if twin is not None:
+        raise TaskConflictError(
+            f"数据源 {source_id} 已有 external_id 为 {external_id} 的 Task: {twin.id}",
+            twin)
+    return external_id
 
 
 def task_channels(store: Store, project_id: str, channel_ids: object,
@@ -70,28 +92,46 @@ def task_channels(store: Store, project_id: str, channel_ids: object,
 def create_task(store: Store, project_id: str, *, title: object,
                 summary: object = "", body: object = "", labels: object = None,
                 channel_ids: object = None, status: object = None,
+                source: object = None, url: object = None, meta: object = None,
+                external_id: object = None, external_updated_at: object = None,
                 actor: str = "human", fallback_channel_id: str = "") -> Task:
+    """新建 Task;url/meta/external_id/external_updated_at 与同步卡片同一口径,
+    内置源与自定义源都可带。
+
+    自定义源里带 external_id 的任务归整体同步管理:同 id 的卡片更新它,
+    卡片列表里没有它时被删除。
+    """
     if store.get_project(project_id) is None:
         raise ValueError("项目不存在")
+    source_id = board_sources.require_source(store, project_id, source)
+    external_id = _external_id(store, project_id, source_id, external_id)
+    external_time = board_sources.clean_timestamp(
+        external_updated_at, "external_updated_at")
     channels = task_channels(
         store, project_id, channel_ids if channel_ids is not None else [],
         fallback_channel_id=fallback_channel_id,
     )
     # 状态即标签:显式 status 参数优先,其次保留 labels 里已有的状态标签,
-    # 两者都没有时落默认状态。状态文本不做合法性校验。
+    # 两者都没有时落该源第一个状态取值。状态文本不做合法性校验。
     label_list = _labels(labels if labels is not None else [])
     status_text = str(status).strip() if status is not None else ""
     if status_text or not status_of(label_list):
-        label_list = with_status(label_list, status_text or DEFAULT_STATUS)
+        label_list = with_status(label_list, status_text or board_sources.default_status(
+            store, project_id, source_id))
     task = Task(
         id=new_id("t"), project_id=project_id,
-        title=_text(title, "title", required=True),
+        title=_text(title, "title", required=True), source_id=source_id,
         summary=_text(summary, "summary"), body=_text(body, "body"),
         labels=label_list,
         channel_ids=[channel.id for channel in channels],
+        url=board_sources.clean_url(_text(url, "url")) if url is not None else "",
+        meta=board_sources.clean_meta(meta) if meta is not None else [],
+        external_id=external_id, external_updated_at=external_time,
     )
     store.put_task(task)
-    store.audit(actor, "task_created", task.id, f"project={project_id}")
+    store.audit(actor, "task_created", task.id, f"project={project_id}"
+                + (f" source={source_id}" if source_id != BUILTIN_SOURCE_ID else "")
+                + (f" external_id={external_id}" if external_id else ""))
     return task
 
 
@@ -103,6 +143,20 @@ def update_task(store: Store, task: Task, *, snapshot_updated_at: object,
             or isinstance(snapshot_updated_at, bool)
             or abs(float(snapshot_updated_at) - task.updated_at) > 1e-6):
         raise ValueError("任务已被其他执行更新，请重新读取后再修改")
+    # 先校验会冲突的同步键与时间格式,出错时不留下改了一半的对象
+    if "external_updated_at" in changes:   # null/空串/0 清空
+        external_time = board_sources.clean_timestamp(
+            changes["external_updated_at"], "external_updated_at")
+    if "external_id" in changes:
+        external_id = _external_id(store, task.project_id, task.source_id,
+                                   changes["external_id"], exclude_task_id=task.id)
+        task.external_id = external_id
+    if "external_updated_at" in changes:
+        task.external_updated_at = external_time
+    if "url" in changes:
+        task.url = board_sources.clean_url(_text(changes["url"], "url"))
+    if "meta" in changes:
+        task.meta = board_sources.clean_meta(changes["meta"])
     if "title" in changes:
         task.title = _text(changes["title"], "title", required=True)
     if "summary" in changes:
@@ -111,6 +165,10 @@ def update_task(store: Store, task: Task, *, snapshot_updated_at: object,
         task.body = _text(changes["body"], "body")
     if "labels" in changes:
         task.labels = _labels(changes["labels"])
+    if "properties" in changes:
+        # 逐个属性替换/清空,没提到的属性和普通标签保持原样
+        for prop, values in normalize_properties(changes["properties"]).items():
+            task.labels = with_property(task.labels, prop, values)
     if "status" in changes:
         task.labels = with_status(
             task.labels, _text(changes["status"], "status", required=True))
@@ -146,10 +204,16 @@ def add_task_brief(store: Store, task: Task, *, content: object,
     return brief
 
 
+# 自动处理规则派发消息的作者 id(author_type=automation),聊天侧据此区分规则与脚本
+TASK_RULE_AUTHOR = "task-rule"
+
+
 def _task_block(task: Task) -> str:
+    link = f"**原始链接**\n{task.url}\n\n" if task.url else ""
     return (
         f"请处理 Task [{task.id} · {task.title}]"
         f"({task_resource_url(task.project_id, task.id)})。\n\n"
+        f"{link}"
         f"**简介**\n{task.summary or '（无）'}\n\n"
         f"**正文**\n{task.body or '（无）'}\n\n"
         "请在本 Channel 中协调处理，并通过 Task 编辑或状态简报同步进展。"
@@ -167,9 +231,13 @@ def _require_enabled_role(store: Store, project_id: str, role_id: str) -> None:
 def dispatch_task(store: Store, chat, task: Task, *, message: str = "",
                   mention_spans: Optional[list[dict]] = None,
                   target_role_ids: Optional[list[str]] = None,
+                  channel_id: str = "",
                   author: str = "human",
                   author_type: str = "human") -> tuple[list[dict], dict]:
-    """把 Task 作为普通 Channel 消息派发。
+    """把 Task 作为普通 Channel 消息派发到一个 Channel。
+
+    接收频道只有一个:``channel_id`` 指定的频道,缺省为首个绑定频道(无绑定
+    回退 general);所选频道未绑定时顺带绑定,Task 才会出现在该频道的任务列表里。
 
     三种派发形态:
     - ``mention_spans``:message 内含角色选择器生成的结构化提及,提及目标
@@ -227,47 +295,43 @@ def dispatch_task(store: Store, chat, task: Task, *, message: str = "",
         }]
         target_ids = [lead_id]
 
-    channels = task_channels(store, task.project_id, task.channel_ids)
-    if not channels:
+    picked = task_channels(store, task.project_id,
+                           [channel_id] if channel_id else task.channel_ids)
+    if not picked:
         raise ValueError("Task 派发需要至少一个可用 Channel")
-    task.channel_ids = [channel.id for channel in channels]
+    channel = picked[0]
+    previous_channels = list(task.channel_ids)
     previous_labels = list(task.labels)
-    task.labels = with_status(task.labels, DISPATCHED_STATUS)
+    if channel.id not in task.channel_ids:
+        task.channel_ids.append(channel.id)
+    # 自定义源有自己的状态取值:没声明「处理中」时保持原状态,
+    # 否则卡片会从按状态分列的看板上消失
+    if board_sources.declares_status(
+            store, task.project_id, task.source_id, DISPATCHED_STATUS):
+        task.labels = with_status(task.labels, DISPATCHED_STATUS)
     store.put_task(task)
-    handled_by = "、".join(f"@{role_id}" for role_id in target_ids)
-    sent: list[dict] = []
     try:
-        for channel in channels:
-            message_id = chat.post(
-                channel.id, author, content, author_type=author_type,
-                mention_spans=legal_spans,
-            )
-            sent.append({"channel_id": channel.id, "message_id": message_id})
-    except ValueError as exc:
-        if sent:
-            store.add_task_brief(
-                task.id, "platform", "system",
-                f"已向 {len(sent)} 个 Channel 的 {handled_by} 派发；"
-                f"后续派发失败：{exc}",
-                status_of(task.labels),
-            )
-            store.put_task(task)
-            raise TaskDispatchError(str(exc)) from exc
-        else:
-            task.labels = previous_labels
-            store.put_task(task)
-            raise
+        message_id = chat.post(
+            channel.id, author, content, author_type=author_type,
+            mention_spans=legal_spans,
+        )
+    except ValueError:
+        task.channel_ids = previous_channels
+        task.labels = previous_labels
+        store.put_task(task)
+        raise
+    sent = [{"channel_id": channel.id, "message_id": message_id}]
 
+    handled_by = "、".join(f"@{role_id}" for role_id in target_ids)
     brief = store.add_task_brief(
         task.id, author, author_type,
-        f"已交给 {handled_by} 处理：" + "、".join(channel.name or channel.id
-                                                for channel in channels),
+        f"已交给 {handled_by} 处理：{channel.name or channel.id}",
         status_of(task.labels),
     )
     store.put_task(task)
     store.audit(author, "task_dispatched", task.id,
                 f"project={task.project_id} targets={','.join(target_ids)} "
-                f"channels={','.join(task.channel_ids)}")
+                f"channel={channel.id}")
     return sent, brief
 
 
@@ -284,6 +348,73 @@ def matching_auto_rule(project, task: Task):
     return None
 
 
+RULE_PREVIEW_LIMIT = 50
+MAX_RULE_QUERY_LENGTH = 2000
+
+
+def preview_auto_rule(store: Store, project, query: str,
+                      original_query: str = "",
+                      limit: int = RULE_PREVIEW_LIMIT) -> dict:
+    """规则编辑器预览:用当前未归档任务演示条件命中范围与实际处理归属。
+
+    规则只在任务新建时触发,这里按新建时同一口径标注每个命中任务的去向:
+    已完成的不派发;排在前面的启用规则先命中时由那条规则处理(取第一条命中)。
+    original_query 是正在编辑的规则原条件,决定它在规则列表中的位置;
+    新规则追加在末尾。labels 是本项目各数据源的标签全集,供条件编辑提示。
+    """
+    query = str(query or "").strip()
+    if len(query) > MAX_RULE_QUERY_LENGTH:
+        raise ValueError(f"条件最多 {MAX_RULE_QUERY_LENGTH} 个字符")
+    ast = label_query.parse(query) if query else None
+    rules = list(getattr(project, "task_auto_rules", []))
+    original = str(original_query or "").strip().lower()
+    position = next((index for index, rule in enumerate(rules)
+                     if original and rule.query.strip().lower() == original),
+                    len(rules))
+    earlier = []
+    for index, rule in enumerate(rules[:position]):
+        if not (rule.enabled and rule.query):
+            continue
+        try:
+            earlier.append((index, rule.query, label_query.parse(rule.query)))
+        except ValueError:
+            continue   # 与 matching_auto_rule 一致:非法表达式的规则永不命中
+
+    sources = board_sources.describe_sources(store, project.id, stats=False)
+    source_names = {item["id"]: item["name"] for item in sources}
+    tasks = store.list_tasks(project.id, include_archived=False)
+    labels = {label for task in tasks for label in task.labels}
+    labels.update(f"status: {value['value']}"
+                  for item in sources for value in item["status_values"])
+    labels.discard("")
+
+    matched, handled = [], 0
+    for task in tasks if ast is not None else []:
+        if not label_query.matches(ast, task.labels):
+            continue
+        outcome, shadowed_by = "handled", None
+        if status_of(task.labels) == DONE_STATUS:
+            outcome = "done"
+        else:
+            hit = next(((index, rule_query) for index, rule_query, rule_ast in earlier
+                        if label_query.matches(rule_ast, task.labels)), None)
+            if hit:
+                outcome = "shadowed"
+                shadowed_by = {"index": hit[0] + 1, "query": hit[1]}
+        handled += outcome == "handled"
+        matched.append({
+            "id": task.id, "title": task.title, "status": status_of(task.labels),
+            "labels": list(task.labels), "source": task.source_id,
+            "source_name": source_names.get(task.source_id, task.source_id),
+            "external_id": task.external_id, "updated_at": task.updated_at,
+            "outcome": outcome, "shadowed_by": shadowed_by,
+        })
+    return {"query": query, "position": position + 1,
+            "matched": len(matched), "handled": handled,
+            "tasks": matched[:limit], "truncated": len(matched) > limit,
+            "labels": sorted(labels, key=str.lower)}
+
+
 def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
     """新建 Task 命中自动处理规则时立即派发;派发失败不影响 Task 创建。"""
     project = store.get_project(task.project_id)
@@ -294,15 +425,15 @@ def auto_process_task(store: Store, chat, task: Task) -> Optional[dict]:
     if rule is None:
         return None
     try:
-        # 新规则带结构化提及,与人工"交给主控处理"同一通道;
+        # 新规则带结构化提及,与人工"交给角色处理"同一通道;
         # 旧规则只有 role_ids,平台生成 @前缀保持兼容
         sent, brief = dispatch_task(
             store, chat, task, message=rule.prompt,
             mention_spans=rule.mentions or None,
             target_role_ids=None if rule.mentions else rule.role_ids,
-            author="task-rule", author_type="automation",
+            author=TASK_RULE_AUTHOR, author_type="automation",
         )
-    except (TaskDispatchError, ValueError) as exc:
+    except ValueError as exc:
         store.add_task_brief(
             task.id, "platform", "system",
             f"自动处理规则(`{rule.query}`)派发失败：{exc}",

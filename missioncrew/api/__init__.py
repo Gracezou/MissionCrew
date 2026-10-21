@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
@@ -18,8 +19,14 @@ from . import (agent_tools, automations, backends, boards, chat, documents,
 from .context import ApiContext
 
 
-def create_app() -> FastAPI:
+def create_app(webhook_host: Optional[str] = None,
+               webhook_port: Optional[int] = None) -> FastAPI:
+    """webhook_port 为空或 0 时不启动专用 webhook 端口(测试与旁路进程默认如此)。"""
     ctx = ApiContext.build()
+    if webhook_port:
+        from .webhooks import WebhookListener
+        ctx.webhook_listener = WebhookListener(
+            ctx, webhook_host or "127.0.0.1", webhook_port)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -29,10 +36,14 @@ def create_app() -> FastAPI:
         runtime_manager.start_idle_reaper()
         ctx.role_usage_linkage.start()
         ctx.automation_scheduler.start()
+        if ctx.webhook_listener:
+            ctx.webhook_listener.start()
         try:
             yield
         finally:
             runtime_manager.set_usage_refresh_handler(None)
+            if ctx.webhook_listener:
+                ctx.webhook_listener.stop()
             ctx.automation_scheduler.stop()
             ctx.role_usage_linkage.stop()
             # 先等聊天执行池收尾再关 runtime:工作线程可能仍在驱动 Agent,

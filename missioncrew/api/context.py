@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException, Request, Response
 
@@ -27,6 +27,9 @@ from ..core.models import Channel, Project
 from ..core.store import Store
 from ..runtime import runtime_manager
 from ..runtime.role_usage_linkage import RoleUsageLinkage
+
+if TYPE_CHECKING:   # 只为类型标注;webhooks 模块反过来依赖本模块
+    from .webhooks import WebhookListener
 
 MENTION_ID_RE = re.compile(r"[\w-]+")
 
@@ -51,6 +54,8 @@ class ApiContext:
     role_usage_linkage: RoleUsageLinkage | None = None
     automations: AutomationService | None = None
     automation_scheduler: AutomationScheduler | None = None
+    # 专用 webhook 端口的监听器(api/webhooks.py);mc serve 启用时才有
+    webhook_listener: Optional["WebhookListener"] = None
     # 更新互斥与"更新中"标记:与 ChatEngine 共享同一集合,更新期间不派发该后端
     updating_backends: set[str] = field(default_factory=set)
     updating_guard: threading.Lock = field(default_factory=threading.Lock)
@@ -95,6 +100,7 @@ class ApiContext:
         ctx = cls(store=store, chat=ChatEngine(store))
         ctx.chat.updating_backends = ctx.updating_backends
         ctx.automations = AutomationService(store, ctx.chat.agent_tools)
+        ctx.chat.agent_tools.bind_automation_trigger(ctx.automations.trigger)
         ctx.automation_scheduler = AutomationScheduler(store, ctx.automations)
         ctx.role_usage_linkage = RoleUsageLinkage(
             store,

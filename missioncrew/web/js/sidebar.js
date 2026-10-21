@@ -289,6 +289,41 @@ function renderMentionPicker(query) {
        <b>@${esc(role.id)}</b><span>${esc(role.name || "")}</span>
        <small>${esc(role.description || "")}</small></button>`).join("");
   picker.hidden = false;
+  placeDialogPicker(picker);
+}
+
+/* 弹窗里的选择器(Task 派发、自动处理规则):.dlg-body 是 overflow:auto 的滚动容器,绝对
+   定位的选择器展开后被它裁掉,只露出第一项。改为 fixed 定位贴着输入框——fixed 的包含块
+   是视口,不受祖先 overflow 裁剪;下方放不下且上方更宽裕时向上展开。聊天输入框的选择器
+   不在弹窗里,仍按 CSS 定位。 */
+const PICKER_GAP = 7, PICKER_MARGIN = 8, PICKER_MAX_HEIGHT = 240;
+
+function placeDialogPicker(picker) {
+  if (!picker.closest("dialog")) return;
+  const box = composerBox().getBoundingClientRect();
+  const width = Math.min(360, box.width);
+  // 内容全展开的高度(含边框),不读 offsetHeight:它受上次写入的 max-height 限制
+  const natural = Math.min(PICKER_MAX_HEIGHT,
+    picker.scrollHeight + picker.offsetHeight - picker.clientHeight);
+  const below = innerHeight - box.bottom - PICKER_GAP - PICKER_MARGIN;
+  const above = box.top - PICKER_GAP - PICKER_MARGIN;
+  const up = natural > below && above > below;
+  Object.assign(picker.style, {
+    position: "fixed",
+    left: `${Math.max(PICKER_MARGIN, Math.min(box.left, innerWidth - width - PICKER_MARGIN))}px`,
+    width: `${width}px`,
+    maxHeight: `${Math.min(PICKER_MAX_HEIGHT, up ? above : below)}px`,
+    top: up ? "auto" : `${box.bottom + PICKER_GAP}px`,
+    bottom: up ? `${innerHeight - box.top + PICKER_GAP}px` : "auto",
+  });
+}
+
+// 弹窗正文滚动或窗口缩放时输入框会移动,fixed 选择器跟着重新定位(选择器自身滚动除外)
+for (const type of ["scroll", "resize"]) {
+  window.addEventListener(type, event => {
+    const picker = composerPicker();
+    if (picker && !picker.hidden && event.target !== picker) placeDialogPicker(picker);
+  }, true);
 }
 
 function updateMentionPicker() {
@@ -341,6 +376,7 @@ function insertComposerMention(id) {
   selection.addRange(range);
   savedComposerRange = range.cloneRange();
   hideMentionPicker();
+  if (box.id === "input") setComposerError();
 }
 
 function chooseComposerMention(id) {
@@ -358,6 +394,13 @@ function insertMention(id) {
   }
   if (currentTab !== "chat") switchTab("chat");
   activateComposer("input", "mention-picker");
+  // 无主控项目:输入框只剩自动带上的默认点名时,点角色是切换默认对象而不是追加;
+  // 新插入的提及不再标为默认,继续点其他角色就按普通方式追加(多选)
+  const box = document.getElementById("input");
+  if (box.querySelector(".mention-compose[data-sticky]") && composerHoldsOnlySticky(box)) {
+    box.replaceChildren();
+    savedComposerRange = null;
+  }
   insertComposerMention(id);
 }
 
@@ -367,10 +410,13 @@ function selectChannel(id, jump = true) {
   runCards.clear();
   pendingUploads = [];
   renderPendingUploads();
+  setComposerError();
+  applyStickyMentions();
   updateChatRunControls([]);
   document.getElementById("msgs").innerHTML = "";
   if (jump && currentTab !== "chat") switchTab("chat");
-  renderSidebar(); pollMessages();
+  expandChannelGroupOf(id);
+  renderSidebar(); pollMessages(); void refreshChannelTasks();
   syncUrl();
 }
 
@@ -421,6 +467,21 @@ function toggleMessageBody(button) {
   const expanded = body.classList.toggle("expanded");
   button.setAttribute("aria-expanded", String(expanded));
   button.textContent = expanded ? "收起长回复" : `展开完整回复（${button.dataset.size} 字符）`;
+}
+
+function syncMessageCopyButton(message, content) {
+  const source = String(content ?? "");
+  let button = message.querySelector(".message-copy");
+  if (!source.trim()) { button?.remove(); return; }
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "markdown-copy message-copy";
+    button.title = "复制全文";
+    message.querySelector(".msg-main").appendChild(button);
+  }
+  // 保留原始 Markdown,折叠与实时重绘都不影响复制完整正文。
+  button.copySource = source;
 }
 
 function agentToolReceiptMeta(message) {
@@ -582,6 +643,7 @@ function appendMessagesToSurface(list, surface) {
         ${longReply ? `<button type="button" class="message-fold-toggle" data-size="${m.content.length}"
           aria-expanded="false" onclick="toggleMessageBody(this)">展开完整回复（${m.content.length} 字符）</button>` : ""}
       </div>`;
+    if (isAgent) syncMessageCopyButton(div, m.content);
     pane.appendChild(div);
     surface.lastMsgId = Math.max(surface.lastMsgId, m.id);
   }
@@ -891,6 +953,74 @@ function openImagePreview(url, name = "") {
   document.getElementById("idlg").showModal();
 }
 
+// 发送前校验未通过的提示贴在输入框上方,比右上角 toast 醒目;补选角色或换频道即清除
+function setComposerError(text = "") {
+  const el = document.getElementById("composer-error");
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+/* ---- 无主控项目的默认点名 ----
+   无主控项目只靠人类点名启动角色:发送后按「项目 + 频道」记住本条点到的角色
+   (存浏览器),清空输入框时自动插到下一条消息开头。自动插入的提及带 data-sticky;
+   输入框里只剩这些提及和空白时视为未改动——切频道时换成新频道的默认点名,
+   点角色时替换为所点角色;一旦写了正文就不再自动改写。 */
+const STICKY_MENTIONS_KEY = "mc.stickyMentions";
+
+function stickyMentionStore() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STICKY_MENTIONS_KEY) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (_) { return {}; }
+}
+
+function stickyMentionKey(project = currentProject, channel = currentChan) {
+  return JSON.stringify([project, channel]);
+}
+
+function rememberStickyMentions(mentions) {
+  const ids = [...new Set(mentions.map(item => item.role_id))];
+  if (!peerModeProject() || !currentChan || !ids.length) return;
+  const store = stickyMentionStore();
+  store[stickyMentionKey()] = ids;
+  try { localStorage.setItem(STICKY_MENTIONS_KEY, JSON.stringify(store)); }
+  catch (_) { /* 存储不可用时只在本次会话内失效,不影响发送 */ }
+}
+
+function composerHoldsOnlySticky(box) {
+  return [...box.childNodes].every(node => node.nodeType === Node.TEXT_NODE
+    ? !node.nodeValue.trim()
+    : node.tagName === "BR"
+      || (node.classList?.contains("mention-compose") && node.dataset.sticky !== undefined));
+}
+
+function applyStickyMentions({ focus = false } = {}) {
+  const box = document.getElementById("input");
+  if (!box || !composerHoldsOnlySticky(box)) return;
+  const ids = peerModeProject() && currentChan
+    ? stickyMentionStore()[stickyMentionKey()] || [] : [];
+  const fragment = document.createDocumentFragment();
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const mention = createComposerMention(String(id));   // 已删除或停用的角色跳过
+    if (!mention) continue;
+    mention.dataset.sticky = "";
+    mention.title += "；本频道的默认点名，发送后保留";
+    fragment.append(mention, document.createTextNode(" "));
+  }
+  box.replaceChildren(fragment);
+  savedComposerRange = null;
+  if (!focus || !box.childNodes.length) return;
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  savedComposerRange = range.cloneRange();
+  box.focus();
+}
+
 async function send() {
   const box = document.getElementById("input");
   const payload = composerPayload();
@@ -902,14 +1032,24 @@ async function send() {
     toast("频道已归档，请先恢复后再发送消息", "error");
     return;
   }
+  // 无主控项目只靠点名启动角色:不 @ 就没人处理,保留输入内容让用户补选角色
+  if (peerModeProject() && !mentions.length) {
+    setComposerError("本项目没有主控，请先 @ 至少一个角色再发送");
+    box.focus();
+    return;
+  }
+  setComposerError();
   // 附件路径追加在正文尾部，不影响前面提及范围的字符偏移
   if (attachments.length)
     content = (content ? content + "\n\n" : "") + attachmentBlock(attachments);
+  const hadFocus = document.activeElement === box;
   box.replaceChildren();
   pendingUploads = [];
   renderPendingUploads();
   savedComposerRange = null;
   hideMentionPicker();
+  rememberStickyMentions(mentions);
+  applyStickyMentions({ focus: hadFocus });
   try {
     await api("POST", `/api/chat/${currentChan}/messages`,
               { author: "human", content, mentions,

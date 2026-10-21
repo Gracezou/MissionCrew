@@ -16,6 +16,7 @@ from typing import Callable, Iterator
 from ..core.config import projects_dir
 from ..core.models import Board, Channel, Project, ProjectResource, Role, Task
 from ..core.store import Store
+from . import board_sources
 from .documents import (document_resource_url, guideline_library_for,
                         library_for, safe_relative_path)
 from .guidelines import delete_guideline, save_guideline
@@ -516,6 +517,15 @@ def _restore_snapshot(store: Store, project: Project, manifest: dict) -> str:
             raise ValueError("回收站中的 Task 不属于当前项目")
         if store.get_task(task.id):
             raise RecycleConflictError(f"Task 已存在: {task.id}")
+        if not board_sources.source_exists(store, project.id, task.source_id):
+            raise ValueError(f"Task 所属数据源已删除: {task.source_id}")
+        # 同步条目删除后可能已被下一次整体同步重建(或又用 task.create 登记了一次);
+        # 再恢复会出现两张同一条目的卡片
+        twin = board_sources.external_twin(
+            store, project.id, task.source_id, task.external_id)
+        if twin is not None:
+            raise RecycleConflictError(
+                f"数据源 {task.source_id} 已有同步条目 {task.external_id} 的 Task: {twin.id}")
         store.restore_task(task, briefs)
         return task_resource_url(project.id, task.id)
     if resource_type == "channel":

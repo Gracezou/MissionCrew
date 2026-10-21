@@ -35,7 +35,7 @@ def _result(item_id: str, status: str, *, reason: str = "",
 
 
 def _failure_reason(exc: Exception) -> str:
-    """逐条失败原因会返回前端：系统异常只保留错误类别，不带命令行与绝对路径。"""
+    """逐条失败原因会返回前端：只保留错误类别，不带命令行与绝对路径。"""
     if isinstance(exc, subprocess.CalledProcessError):
         return "版本库写入失败"
     if isinstance(exc, shutil.Error):
@@ -44,6 +44,8 @@ def _failure_reason(exc: Exception) -> str:
         return "文件复制失败"
     if isinstance(exc, OSError):
         return f"文件操作失败：{exc.strerror or type(exc).__name__}"
+    if isinstance(exc, ValueError):  # 包含 UnicodeError，解析错误同样可能含路径。
+        return "资源数据格式不合法"
     return str(exc)
 
 
@@ -199,6 +201,12 @@ def import_project_resources(store: Store, *, source_project_id: str,
                 store, source, target, item_id, conflict_strategy, actor))
         except (OSError, UnicodeError, ValueError,
                 subprocess.CalledProcessError) as exc:
+            store.audit(
+                actor, "project_resource_import_failed",
+                detail=(f"source_project={source.id} target_project={target.id} "
+                        f"resource_type={resource_type} item={item_id} "
+                        f"strategy={conflict_strategy} error={type(exc).__name__}: {exc}"),
+            )
             results.append(_result(item_id, "failed", reason=_failure_reason(exc)))
 
     return {

@@ -1,6 +1,7 @@
 # Runtime (Backend) Integration Guide
 
-A runtime is an Agent CLI installed on the local machine (`Backend` in the code). It is a **global resource**: the registry lives in SQLite and is shared by all projects; global role templates and project roles are each bound to a specific runtime and model, which are used directly at execution time with no runtime routing. A new project copies the global role templates as they exist at that moment, with the first entry as the default orchestrator; after that, the templates and the project roles are maintained independently.
+<!-- fork-divergence: new projects copy each template's default enabled state and pick the first enabled template as the default orchestrator; upstream uses the first entry. Keep aligned with the Chinese runtimes.md. -->
+A runtime is an Agent CLI installed on the local machine (`Backend` in the code). It is a **global resource**: the registry lives in SQLite and is shared by all projects; global role templates and project roles are each bound to a specific runtime and model, which are used directly at execution time with no runtime routing. A new project copies the global role templates as they exist at that moment together with their default enabled state, with the first enabled template in sort order as the default orchestrator; after that, the templates and the project roles are maintained independently.
 
 This document explains which tools are supported, what technology is used to integrate them, how they are detected and upgraded, where model lists come from, and how to integrate a new tool. The providers and the unified management layer under `missioncrew/runtime/` are the source of truth for every fact here.
 

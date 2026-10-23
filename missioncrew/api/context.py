@@ -36,7 +36,7 @@ _AUDIT_CREDENTIAL = re.compile(
     r"(?i)\b((?:api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"token|secret|password|passwd|authorization|cookie|credential|"
     r"client[_-]?secret|webhook[_-]?secret)"
-    r"\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+    r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
 )
 _AUDIT_AUTHORIZATION = re.compile(
     r"(?i)\bAuthorization\s*[:=]\s*(?:(?:Bearer|Basic|Token)\s+)?"

@@ -56,15 +56,18 @@ def test_audit_redacts_credentials_without_truncating_other_detail(seeded):
     client = TestClient(create_app())
     detail = ("project=webshop token=token-value api_key=key-value "
               "Authorization: Bearer bearer-value password=pass-value "
-              'webhook_secret="json-value" '
+              '{"webhook_secret": "json-value"} '
               "Authorization: Basic basic-value "
-              "https://user:url-pass@example.test/path " + "原因详情" * 100)
+              "https://user:url-pass@example.test/path "
+              "tokens revoked path=secrets.yaml https://gitcode.com/u/r.git "
+              + "原因详情" * 100)
     seeded.audit("human", "resource_failed", detail=detail)
     row = client.get("/api/audit").json()["entries"][0]
     for secret in ("token-value", "key-value", "bearer-value", "pass-value",
                    "json-value", "basic-value", "url-pass"):
         assert secret not in row["detail"]
     assert "project=webshop" in row["detail"]
+    assert "tokens revoked path=secrets.yaml https://gitcode.com/u/r.git" in row["detail"]
     assert "原因详情" * 100 in row["detail"]
     assert "[已隐藏]" in row["detail"]
     assert set(row) == {"id", "ts", "actor", "action", "task_id", "detail"}

@@ -325,6 +325,11 @@
     </div>
 
     <div id="runtime-status-view" class="page">
+      <div class="runtime-view-tabs">
+        <button id="runtime-tab-status" class="ghost active" onclick="showRuntimePanel('status')">运行状态</button>
+        <button id="runtime-tab-audit" class="ghost" onclick="showRuntimePanel('audit')">审计记录</button>
+      </div>
+      <div id="runtime-status-panel">
       <div class="section runtime-status-head">
         <div>
           <h2>Runtime 运行状态 <span class="runtime-live-label"><i></i>10 秒刷新</span></h2>
@@ -361,6 +366,20 @@
         <h2>使用历史 <span class="count" id="runtime-history-count"></span></h2>
         <p class="muted">每次 Runtime 调用都会持久记录；服务重启前未结束的调用会标记为“已中断”。当前显示最近 100 条。</p>
         <div class="runtime-table-wrap"><table class="mgr" id="runtime-status-history"></table></div>
+      </div>
+      </div>
+      <div id="runtime-audit-panel" style="display:none">
+        <div class="section">
+          <h2>审计记录</h2>
+          <p class="muted">查看平台和项目操作记录。复制资源失败的完整原因也记录在这里。</p>
+          <div class="audit-filters">
+            <select id="audit-project" aria-label="按项目过滤" onchange="loadAuditRecords()"></select>
+            <input id="audit-search" type="search" placeholder="搜索动作或详情" aria-label="搜索审计记录" onkeydown="if(event.key==='Enter')loadAuditRecords()">
+            <button class="ghost" onclick="loadAuditRecords()">搜索</button>
+          </div>
+          <div class="runtime-table-wrap"><table class="mgr audit-table" id="audit-records"></table></div>
+          <button id="audit-more" class="ghost" style="display:none" onclick="loadAuditRecords(true)">加载更早</button>
+        </div>
       </div>
     </div>
 

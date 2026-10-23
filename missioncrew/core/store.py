@@ -804,13 +804,33 @@ class Store:
             (time.time(), actor, action, task_id, detail),
         )
 
-    def list_audit(self, task_id: Optional[str] = None, limit: int = 200) -> list[dict]:
+    def list_audit(self, task_id: Optional[str] = None, limit: int = 200,
+                   *, project_id: Optional[str] = None, q: str = "",
+                   before: Optional[float] = None) -> list[dict]:
+        where, params = [], []
         if task_id:
-            rows = self._query(
-                "SELECT * FROM audit WHERE task_id=? ORDER BY id DESC LIMIT ?",
-                (task_id, limit))
-        else:
-            rows = self._query("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))
+            where.append("task_id=?")
+            params.append(task_id)
+        if project_id:
+            where.append("(" + " OR ".join(
+                "instr(' ' || audit.detail || ' ', ' " + key + "=' || ? || ' ') > 0"
+                for key in ("project", "source_project", "target_project"))
+                + " OR instr(audit.detail, 'channel=' || ? || ':') > 0"
+                + " OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=audit.task_id "
+                  "AND json_extract(t.data, '$.project_id')=?))")
+            params.extend([project_id] * 5)
+        if q:
+            where.append("(instr(lower(action), lower(?)) > 0 "
+                         "OR instr(lower(detail), lower(?)) > 0)")
+            params.extend([q, q])
+        if before is not None:
+            where.append("ts < ?")
+            params.append(before)
+        sql = "SELECT * FROM audit"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = self._query(sql + " ORDER BY ts DESC, id DESC LIMIT ?",
+                           (*params, limit))
         return [dict(r) for r in rows]
 
     # ---- Agent Tool 身份令牌 ----

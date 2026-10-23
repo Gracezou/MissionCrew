@@ -145,6 +145,19 @@ Main APIs:
 - `POST /api/projects/<project>/skills/<skill-id>/compare`
 - `POST /api/projects/<project>/skills/<skill-id>/restore`
 
+<!-- fork-divergence: cross-project copy of guidelines, skills and automations exists only in this fork; keep it aligned with the Chinese resources.md and the project import API. -->
+### Cross-project copy
+
+The Guidelines, Skills and Automation pages can copy one or more items from the current project into another project. When the target already has an item with the same identifier, a conflict strategy must be chosen explicitly: `skip` (the default) or `overwrite`; the API returns `copied`, `skipped`, `overwritten` or `failed` with a reason for each item separately and never overwrites silently. Exceptions caught during the copy are written to a `project_resource_import_failed` audit entry containing the source and target projects, the resource type, the item, the conflict strategy, the exception class name and the full message, for the local administrator to investigate. The Web UI keeps specific validation hints such as a missing frontmatter, replaces the absolute path prefixes of the project directory and the data directory with `.`, and shows every encoding error uniformly as "invalid resource data format" (资源数据格式不合法).
+
+Copying a skill takes a snapshot of its current complete directory (including scripts, references, assets and executable permissions) and creates one new import revision in the target project; the source project's commit history is not grafted onto the target, and the two projects maintain their histories independently from then on. An automation is recreated in the target project as `<target-project>:<short-id>` with both cron and webhook turned off, and its webhook secret, last run time, status and creating role are cleared, so it waits for a human to confirm and enable it in the target project; the source project's webhook secret is never migrated. Overwriting an automation discards the target's original script (it does not go to the recycle bin), clears the target's old run records and revokes its script tokens; if the target automation is running, that item returns `failed`. The copy never modifies the source project. Per-item failure reasons do not contain absolute paths of the data directory, and a failure of one item does not affect the results of the other items in the same batch.
+
+Main API:
+
+- `POST /api/projects/<target-project>/import`
+
+The request body contains `source_project_id`, `resource_type` (`guideline` / `skill` / `automation`), `item_ids` and an optional `conflict_strategy` (`skip` / `overwrite`). This is an ordinary Web API; this version adds no corresponding Agent Tool action.
+
 ### Project documents
 
 The source of truth for documents is the project document worktree, and a separate bare Git repository keeps the revision history. Chat roles publish files through the `document.publish` Agent Tool action and move or rename files through `document.rename`; end-of-run snapshots taken after direct edits exist only for compatibility with old sessions. Humans can also select several files at once to upload on the Web documents page: when no document is selected, they are saved to the document library root; when a document is selected, they are saved to that document's directory; a file with the same name is overwritten only after confirmation, and each file creates its own revision. The limit per file is 50 MB.

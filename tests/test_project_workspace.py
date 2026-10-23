@@ -2522,12 +2522,12 @@ def test_document_viewer_reloads_body_when_file_version_changes(seeded):
 
 
 def test_docs_have_matching_chinese_and_english_versions():
-    """docs/ 是中文版、docs/en/ 是同名英文版,两边一一对应;中文索引也逐篇列出。"""
+    """平台文档中英一一对应；维护者专用的 fork 分歧清单只保留中文版。"""
     chinese = SOURCE_DIR.parent
     assert SOURCE_DIR == chinese / "en"
     zh = sorted(path.name for path in chinese.glob("*.md"))
     en = sorted(path.name for path in SOURCE_DIR.glob("*.md"))
-    assert zh == en and "README.md" in zh
+    assert set(zh) == set(en) | {"fork-divergences.md"} and "README.md" in zh
     index = (chinese / "README.md").read_text(encoding="utf-8")
     assert all(f"]({name})" in index for name in zh if name != "README.md")
 

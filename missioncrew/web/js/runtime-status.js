@@ -502,3 +502,56 @@ async function renderRuntimeStatus(force = false, refreshUsage = false) {
 function pollRuntimeStatus() {
   renderRuntimeStatus();
 }
+
+/* 运行状态页的只读审计标签，按需读取，不参与 Runtime 的自动轮询。 */
+let auditRows = [];
+let auditLoading = false;
+
+function showRuntimePanel(panel) {
+  document.getElementById("runtime-status-panel").style.display = panel === "audit" ? "none" : "block";
+  document.getElementById("runtime-audit-panel").style.display = panel === "audit" ? "block" : "none";
+  document.getElementById("runtime-tab-status").classList.toggle("active", panel !== "audit");
+  document.getElementById("runtime-tab-audit").classList.toggle("active", panel === "audit");
+  if (panel !== "audit") return;
+  const select = document.getElementById("audit-project");
+  const selected = select.value;
+  select.innerHTML = `<option value="">全部项目（含平台记录）</option>` +
+    (overview.projects || []).map(project =>
+      `<option value="${esc(project.id)}">${esc(project.name || project.id)}</option>`).join("");
+  select.value = selected;
+  if (!auditRows.length) loadAuditRecords();
+}
+
+function renderAuditRecords() {
+  const table = document.getElementById("audit-records");
+  table.innerHTML = `<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>关联 Task</th><th>详情</th></tr></thead><tbody>` +
+    (auditRows.length ? auditRows.map(row => `<tr>
+      <td>${new Date(row.ts * 1000).toLocaleString()}</td>
+      <td>${esc(row.actor)}</td><td><code>${esc(row.action)}</code></td>
+      <td>${row.task_id ? `<code>${esc(row.task_id)}</code>` : "—"}</td>
+      <td><details><summary>查看完整详情</summary><pre class="audit-detail">${esc(row.detail || "")}</pre></details></td>
+    </tr>`).join("") : `<tr><td colspan="5" class="runtime-empty">暂无审计记录</td></tr>`) +
+    `</tbody>`;
+}
+
+async function loadAuditRecords(older = false) {
+  if (auditLoading) return;
+  auditLoading = true;
+  const more = document.getElementById("audit-more");
+  more.disabled = true;
+  try {
+    const params = new URLSearchParams({limit: "100"});
+    const project = document.getElementById("audit-project").value;
+    const query = document.getElementById("audit-search").value.trim();
+    if (project) params.set("project_id", project);
+    if (query) params.set("q", query);
+    if (older && auditRows.length) params.set("before_id", auditRows[auditRows.length - 1].id);
+    const data = await api("GET", `/api/audit?${params}`);
+    auditRows = older ? auditRows.concat(data.entries) : data.entries;
+    renderAuditRecords();
+    more.style.display = data.has_more ? "inline-block" : "none";
+  } finally {
+    more.disabled = false;
+    auditLoading = false;
+  }
+}

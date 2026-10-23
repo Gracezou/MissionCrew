@@ -12,7 +12,7 @@ from ..collab.tasks import (TaskConflictError, add_task_brief,
                             archive_task, auto_process_task, create_task,
                             dispatch_task, preview_auto_rule, restore_task,
                             update_task)
-from .context import ApiContext, etag_json_response
+from .context import ApiContext, etag_json_response, redact_audit_detail
 from .schemas import TaskBriefInput, TaskCreate, TaskProcessInput, TaskUpdate
 
 LIST_SCOPES = {"active", "archived", "all"}
@@ -32,7 +32,8 @@ def _task_data(store, task) -> dict:
                  "resource_url": task_resource_url(task.project_id, task.id)},
         "channels": channels,
         "briefs": store.list_task_briefs(task.id),
-        "audit": store.list_audit(task.id, 100),
+        "audit": [{**row, "detail": redact_audit_detail(row["detail"])}
+                  for row in store.list_audit(task.id, 100)],
     }
 
 

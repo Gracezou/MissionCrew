@@ -11,7 +11,7 @@ from ..collab.recycle_bin import recycle_dashboard
 from ..collab.resource_urls import dashboard_resource_url
 from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, LEGACY_STATUS_TEXT,
                            Board, BoardWidget)
-from .context import MENTION_ID_RE, ApiContext
+from .context import MENTION_ID_RE, ApiContext, redact_audit_detail
 from .schemas import BoardInput, WidgetDataInput
 
 
@@ -132,7 +132,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     # 审计明细里带项目标记的才算本项目(任务审计经 task_id 关联)
                     if f"project={project_id}" not in (a.get("detail") or ""):
                         continue
-                rows.append({"text": f"{a['actor']} {a['action']} {a['detail']}"[:200]})
+                rows.append({"text":
+                             f"{a['actor']} {a['action']} {redact_audit_detail(a['detail'])}"[:200]})
                 if len(rows) >= limit:
                     break
             return {"items": rows}

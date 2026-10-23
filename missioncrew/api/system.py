@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 
 from .. import __version__
 from ..collab import board_sources
@@ -20,7 +20,7 @@ from ..collab.resource_urls import (automation_resource_url,
 from ..core.models import (BOARD_WIDGET_TYPES, ROLE_ABILITIES, TIER_ORDER,
                            text_fingerprint)
 from ..runtime import runtime_manager
-from .context import ApiContext, etag_json_response
+from .context import ApiContext, etag_json_response, redact_audit_detail
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -105,6 +105,24 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     def runtime_status():
         """系统级 Runtime 实例快照；前端轮询实现实时状态页。"""
         return runtime_manager.status(store.list_backends())
+
+    @app.get("/api/audit")
+    def audit(project_id: str = "", q: str = "",
+              limit: int = Query(100, ge=1, le=500),
+              before_id: int | None = Query(None, ge=1)):
+        """按写入顺序读取审计；只返回展示字段，detail 在出口处脱敏。"""
+        rows = store.list_audit(
+            limit=limit + 1, project_id=project_id or None,
+            q=q.strip(), before_id=before_id)
+        return {
+            "entries": [
+                {"id": row["id"], "ts": row["ts"], "actor": row["actor"],
+                 "action": row["action"], "task_id": row["task_id"],
+                 "detail": redact_audit_detail(row["detail"])}
+                for row in rows[:limit]
+            ],
+            "has_more": len(rows) > limit,
+        }
 
     @app.get("/api/runtime/history")
     def runtime_history(limit: int = 100, backend_id: str = ""):

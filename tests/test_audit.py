@@ -70,6 +70,35 @@ def test_audit_redacts_credentials_without_truncating_other_detail(seeded):
     assert set(row) == {"id", "ts", "actor", "action", "task_id", "detail"}
 
 
+def test_task_detail_redacts_audit_but_cli_store_keeps_original(seeded):
+    from missioncrew.core.models import Task
+
+    client = TestClient(create_app())
+    task = Task(id="audit-task", project_id="webshop", title="审计测试")
+    seeded.put_task(task)
+    seeded.audit("human", "task_updated", task.id,
+                 "project=webshop token=task-secret")
+
+    detail = client.get(f"/api/tasks/{task.id}").json()["audit"]
+    assert "task-secret" not in str(detail)
+    assert "[已隐藏]" in detail[0]["detail"]
+    assert "task-secret" in seeded.list_audit(task.id)[0]["detail"]
+
+
+def test_audit_widget_source_redacts_detail(seeded):
+    client = TestClient(create_app())
+    seeded.audit("human", "resource_failed",
+                 detail="project=webshop api_key=board-secret")
+    response = client.post("/api/projects/webshop/widget_data", json={"widgets": [
+        {"id": "audit-widget", "type": "list",
+         "content": {"source": {"from": "audit", "actions": ["resource_failed"]}}},
+    ]})
+    assert response.status_code == 200
+    text = response.json()["audit-widget"]["items"][0]["text"]
+    assert "board-secret" not in text
+    assert "[已隐藏]" in text
+
+
 def test_import_failure_full_reason_is_visible_in_audit(seeded, monkeypatch):
     client = TestClient(create_app())
     assert client.post("/api/projects", json={"id": "target", "name": "Target"}) \

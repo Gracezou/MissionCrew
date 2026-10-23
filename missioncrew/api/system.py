@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import re
 import time
 
 from fastapi import FastAPI, Query, Request
@@ -21,28 +20,7 @@ from ..collab.resource_urls import (automation_resource_url,
 from ..core.models import (BOARD_WIDGET_TYPES, ROLE_ABILITIES, TIER_ORDER,
                            text_fingerprint)
 from ..runtime import runtime_manager
-from .context import ApiContext, etag_json_response
-
-
-_AUDIT_CREDENTIAL = re.compile(
-    r"(?i)\b((?:api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|"
-    r"token|secret|password|passwd|authorization|cookie|credential|"
-    r"client[_-]?secret|webhook[_-]?secret)"
-    r"\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
-)
-_AUDIT_AUTHORIZATION = re.compile(
-    r"(?i)\bAuthorization\s*[:=]\s*(?:(?:Bearer|Basic|Token)\s+)?"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
-)
-_AUDIT_BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;&]+")
-_AUDIT_URL_CREDENTIAL = re.compile(r"://[^\s/@:]+:[^\s/@]+@")
-
-
-def _redact_audit_detail(detail: str) -> str:
-    detail = _AUDIT_AUTHORIZATION.sub("Authorization: [已隐藏]", detail)
-    detail = _AUDIT_BEARER.sub("Bearer [已隐藏]", detail)
-    detail = _AUDIT_CREDENTIAL.sub(r"\1[已隐藏]", detail)
-    return _AUDIT_URL_CREDENTIAL.sub("://[已隐藏]@", detail)
+from .context import ApiContext, etag_json_response, redact_audit_detail
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -140,7 +118,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "entries": [
                 {"id": row["id"], "ts": row["ts"], "actor": row["actor"],
                  "action": row["action"], "task_id": row["task_id"],
-                 "detail": _redact_audit_detail(row["detail"])}
+                 "detail": redact_audit_detail(row["detail"])}
                 for row in rows[:limit]
             ],
             "has_more": len(rows) > limit,

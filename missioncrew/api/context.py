@@ -32,6 +32,26 @@ if TYPE_CHECKING:   # 只为类型标注;webhooks 模块反过来依赖本模块
     from .webhooks import WebhookListener
 
 MENTION_ID_RE = re.compile(r"[\w-]+")
+_AUDIT_CREDENTIAL = re.compile(
+    r"(?i)\b((?:api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"token|secret|password|passwd|authorization|cookie|credential|"
+    r"client[_-]?secret|webhook[_-]?secret)"
+    r"\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
+_AUDIT_AUTHORIZATION = re.compile(
+    r"(?i)\bAuthorization\s*[:=]\s*(?:(?:Bearer|Basic|Token)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
+_AUDIT_BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;&]+")
+_AUDIT_URL_CREDENTIAL = re.compile(r"://[^\s/@:]+:[^\s/@]+@")
+
+
+def redact_audit_detail(detail: str) -> str:
+    """仅在 HTTP 出口遮盖凭据；存储与本机 CLI 保留原始排错信息。"""
+    detail = _AUDIT_AUTHORIZATION.sub("Authorization: [已隐藏]", detail)
+    detail = _AUDIT_BEARER.sub("Bearer [已隐藏]", detail)
+    detail = _AUDIT_CREDENTIAL.sub(r"\1[已隐藏]", detail)
+    return _AUDIT_URL_CREDENTIAL.sub("://[已隐藏]@", detail)
 
 
 def etag_json_response(request: Request, payload) -> Response:

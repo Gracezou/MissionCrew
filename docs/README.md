@@ -2,7 +2,7 @@
 
 English version: [en/README.md](en/README.md)
 
-本目录是 MissionCrew 的详细文档，读者既包括部署、使用和开发 MissionCrew 的人，也包括在 MissionCrew 里执行任务的 Agent。每篇文档都有中英两个版本：中文版在本目录，同名英文版在 [en/](en/README.md)。平台把英文版原样复制到每个 Agent 工作区的 `platform-docs/`，Agent 需要了解平台机制时按其中的索引检索。快速上手与整体介绍见仓库根目录的 [README](https://github.com/zhaozhaozz/MissionCrew#readme)。
+本目录是 MissionCrew 的详细文档，读者既包括部署、使用和开发 MissionCrew 的人，也包括在 MissionCrew 里执行任务的 Agent。平台机制文档都有中英两个版本：中文版在本目录，同名英文版在 [en/](en/README.md)；维护者专用的分歧清单仅有中文版。平台把英文版原样复制到每个 Agent 工作区的 `platform-docs/`，Agent 需要了解平台机制时按其中的索引检索。快速上手与整体介绍见仓库根目录的 [README](https://github.com/zhaozhaozz/MissionCrew#readme)。
 
 ## 使用平台
 
@@ -14,5 +14,6 @@ English version: [en/README.md](en/README.md)
 
 ## 运维与开发
 
+- [与上游的分歧清单](fork-divergences.md)：本 fork 维护者同步上游时核对的行为、测试和步骤；仅有中文版，不进入 Agent 的英文平台文档副本。
 - [命令行工具](cli.md)：`mc` 子命令速查，与 Web、API 走同一套业务校验，适合脚本化和无头环境。
 - [Runtime 接入](runtimes.md)：支持哪些本地 Agent CLI、如何检测和升级、模型清单从哪来，以及接入新工具的步骤。

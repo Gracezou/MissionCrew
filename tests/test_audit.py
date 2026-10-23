@@ -99,6 +99,39 @@ def test_audit_widget_source_redacts_detail(seeded):
     assert "[已隐藏]" in text
 
 
+def test_automation_failures_are_visible_in_project_audit(seeded, monkeypatch):
+    from collections import deque
+
+    from missioncrew.collab.automations import AutomationScheduler, AutomationService
+    from missioncrew.core.models import Automation
+
+    client = TestClient(create_app())
+    service = AutomationService(seeded, None)
+    scheduler = AutomationScheduler(seeded, service)
+    automation = Automation(id="webshop:nightly", project_id="webshop")
+
+    def skip(*args, **kwargs):
+        raise ValueError("仍在运行")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("启动失败")
+
+    try:
+        monkeypatch.setattr(service, "trigger", skip)
+        scheduler._fire("automation:webshop:nightly", automation)
+        monkeypatch.setattr(service, "trigger", fail)
+        scheduler._fire("automation:webshop:nightly", automation)
+        service._pending[automation.id] = deque([{"delivery": "delivery-1"}])
+        service._release(automation.id)
+        rows = client.get("/api/audit", params={
+            "project_id": "webshop", "q": "automation_"}).json()["entries"]
+        assert {row["action"] for row in rows} >= {
+            "automation_run_skipped", "automation_schedule_failed",
+            "automation_webhook_dropped"}
+    finally:
+        service._pool.shutdown(wait=True)
+
+
 def test_import_failure_full_reason_is_visible_in_audit(seeded, monkeypatch):
     client = TestClient(create_app())
     assert client.post("/api/projects", json={"id": "target", "name": "Target"}) \

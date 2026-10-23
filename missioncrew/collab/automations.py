@@ -269,7 +269,8 @@ class AutomationService:
                     reason = f"启动失败: {exc}"
             self.store.audit(
                 "platform", "automation_webhook_dropped",
-                detail=f"automation={automation_id} delivery={event.get('delivery', '')} "
+                detail=f"project={automation_id.partition(':')[0]} "
+                       f"automation={automation_id} delivery={event.get('delivery', '')} "
                        f"reason={reason}")
 
     def _run_script(self, automation: Automation, trigger: str = "manual",
@@ -408,6 +409,7 @@ class AutomationScheduler:
 
     def _fire(self, key: str,
               payload: "Automation | Callable[[], None]") -> None:
+        project = f"project={payload.project_id} " if isinstance(payload, Automation) else ""
         try:
             if callable(payload):
                 payload()
@@ -416,10 +418,10 @@ class AutomationScheduler:
         except ValueError as exc:
             # 上一次运行未结束等业务性跳过,记审计不中断调度
             self.store.audit("platform", "automation_run_skipped",
-                             detail=f"job={key} reason={exc}")
+                             detail=f"{project}job={key} reason={exc}")
         except Exception as exc:
             self.store.audit("platform", "automation_schedule_failed",
-                             detail=f"job={key} error={exc}")
+                             detail=f"{project}job={key} error={exc}")
 
     def _run(self) -> None:
         while not self._stop.is_set():

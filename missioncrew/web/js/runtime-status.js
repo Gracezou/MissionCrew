@@ -545,7 +545,7 @@ async function loadAuditRecords(older = false) {
     const query = document.getElementById("audit-search").value.trim();
     if (project) params.set("project_id", project);
     if (query) params.set("q", query);
-    if (older && auditRows.length) params.set("before", auditRows[auditRows.length - 1].ts);
+    if (older && auditRows.length) params.set("before_id", auditRows[auditRows.length - 1].id);
     const data = await api("GET", `/api/audit?${params}`);
     auditRows = older ? auditRows.concat(data.entries) : data.entries;
     renderAuditRecords();

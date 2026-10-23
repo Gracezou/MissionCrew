@@ -131,11 +131,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     @app.get("/api/audit")
     def audit(project_id: str = "", q: str = "",
               limit: int = Query(100, ge=1, le=500),
-              before: float | None = None):
-        """按时间倒序读取审计；只返回展示字段，detail 在出口处脱敏。"""
+              before_id: int | None = Query(None, ge=1)):
+        """按写入顺序读取审计；只返回展示字段，detail 在出口处脱敏。"""
         rows = store.list_audit(
             limit=limit + 1, project_id=project_id or None,
-            q=q.strip(), before=before)
+            q=q.strip(), before_id=before_id)
         return {
             "entries": [
                 {"id": row["id"], "ts": row["ts"], "actor": row["actor"],

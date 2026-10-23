@@ -806,7 +806,7 @@ class Store:
 
     def list_audit(self, task_id: Optional[str] = None, limit: int = 200,
                    *, project_id: Optional[str] = None, q: str = "",
-                   before: Optional[float] = None) -> list[dict]:
+                   before_id: Optional[int] = None) -> list[dict]:
         where, params = [], []
         if task_id:
             where.append("task_id=?")
@@ -823,13 +823,13 @@ class Store:
             where.append("(instr(lower(action), lower(?)) > 0 "
                          "OR instr(lower(detail), lower(?)) > 0)")
             params.extend([q, q])
-        if before is not None:
-            where.append("ts < ?")
-            params.append(before)
+        if before_id is not None:
+            where.append("id < ?")
+            params.append(before_id)
         sql = "SELECT * FROM audit"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        rows = self._query(sql + " ORDER BY ts DESC, id DESC LIMIT ?",
+        rows = self._query(sql + " ORDER BY id DESC LIMIT ?",
                            (*params, limit))
         return [dict(r) for r in rows]
 

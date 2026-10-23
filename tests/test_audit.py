@@ -31,20 +31,21 @@ def test_audit_filters_by_project_and_searches_action_or_detail(seeded):
         == ["project_saved"]
 
 
-def test_audit_limit_and_before_page_by_timestamp(seeded):
+def test_audit_limit_and_before_id_keep_equal_timestamps(seeded):
     client = TestClient(create_app())
     for i in range(5):
         seeded.audit("human", f"event_{i}")
+    seeded._execute("UPDATE audit SET ts=? WHERE action LIKE 'event_%'", (1234.0,))
 
     first = client.get("/api/audit", params={"limit": 2, "q": "event_"}).json()
     assert [row["action"] for row in first["entries"]] == ["event_4", "event_3"]
     assert first["has_more"] is True
     second = client.get("/api/audit", params={
-        "limit": 2, "q": "event_", "before": first["entries"][-1]["ts"]}).json()
+        "limit": 2, "q": "event_", "before_id": first["entries"][-1]["id"]}).json()
     assert [row["action"] for row in second["entries"]] == ["event_2", "event_1"]
     assert second["has_more"] is True
     third = client.get("/api/audit", params={
-        "limit": 2, "q": "event_", "before": second["entries"][-1]["ts"]}).json()
+        "limit": 2, "q": "event_", "before_id": second["entries"][-1]["id"]}).json()
     assert [row["action"] for row in third["entries"]] == ["event_0"]
     assert third["has_more"] is False
     assert client.get("/api/audit", params={"limit": 0}).status_code == 422
@@ -102,6 +103,6 @@ def test_runtime_status_exposes_read_only_audit_tab(seeded):
     assert 'id="audit-more"' in html
     assert "showRuntimePanel('audit')" in html
     assert "`/api/audit?${params}`" in js
-    assert 'params.set("before", auditRows[auditRows.length - 1].ts)' in js
+    assert 'params.set("before_id", auditRows[auditRows.length - 1].id)' in js
     assert 'esc(row.detail || "")' in js
     assert '<details><summary>查看完整详情</summary>' in js

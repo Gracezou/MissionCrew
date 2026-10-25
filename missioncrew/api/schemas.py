@@ -5,6 +5,8 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from ..collab.role_config import RoleInput, RoleTemplateInput
+
 
 class TaskCreate(BaseModel):
     project_id: str
@@ -117,28 +119,6 @@ class ContentChannelInput(BaseModel):
     content_kind: str = Field(pattern=r"^(docs|guidelines|skills|custom)$")
     content_key: str = Field(min_length=1, max_length=1000)
     label: str = Field(default="", max_length=1000)
-
-
-class RoleTemplateInput(BaseModel):
-    id: str
-    # 复制到新项目时的初始启用状态;仅全局模板生效,
-    # 项目角色的实时启停走 /api/roles/{id}/enabled,不由本字段改写
-    enabled: bool = True
-    runtime_id: str            # 角色定义时固定的 runtime,必填
-    model: str = ""            # 空 = CLI 默认模型
-    effort: str = ""           # 推理力度,仅支持的 runtime 可设;空 = CLI 默认
-    usage_linkage_enabled: bool = False  # 该角色是否跟随账户限额自动启停
-    manual_only: bool = False            # 仅人工点名:Agent 看不到、不能派发给它
-    name: str = ""
-    description: str = ""
-    capabilities: list[str] = []   # 固定能力选项(ROLE_ABILITIES)
-    preference: str = ""           # 偏好:自由文本(风格/领域,如前端/后端)
-    color: str = ""
-    sort_order: Optional[int] = None   # None = 保留现值;新角色排到项目末尾
-
-
-class RoleInput(RoleTemplateInput):
-    project_id: str
 
 
 class RoleReorder(BaseModel):

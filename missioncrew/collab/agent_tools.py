@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import HTTPException
+from pydantic import ValidationError
 
 from . import board_sources
 from . import channels as channel_ops
@@ -34,7 +34,8 @@ from .recycle_bin import (RecycleConflictError, list_recycle_items,
                           recycle_dashboard, recycle_document,
                           recycle_guideline, recycle_skill, recycle_task,
                           restore_recycle_item)
-from .role_config import save_role_config
+from .role_config import (RoleConfigError, RoleInput, RoleTemplateInput,
+                          save_role_config)
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
                             skill_resource_url, task_resource_url)
@@ -48,7 +49,6 @@ from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            Channel, Project, ProjectSkill,
                            Task)
 from ..core.store import Store
-from ..runtime import runtime_manager
 from ..runtime.role_usage_linkage import RoleUsageLinkage
 
 
@@ -674,7 +674,7 @@ class AgentActionService:
         self._stop_channel_sessions = stop_channel_sessions or (lambda _channel_id: 0)
         # 自动化调度器在服务装配时绑定(它自身依赖本服务签发脚本令牌)
         self._trigger_automation: Optional[Callable[..., int]] = None
-        self._role_catalog = runtime_manager.list_model_catalog
+        self._role_catalog = self._unbound_role_catalog
         self._role_updated = RoleUsageLinkage(store, lambda **_: {}).role_updated
 
     def bind_automation_trigger(self, trigger: Callable[..., int]) -> None:
@@ -684,6 +684,10 @@ class AgentActionService:
                          role_updated: Callable) -> None:
         self._role_catalog = discovered_catalog
         self._role_updated = role_updated
+
+    @staticmethod
+    def _unbound_role_catalog(_backend):
+        raise RuntimeError("Role configuration catalog was not bound to Agent Tool")
 
     @staticmethod
     def _hash_token(token: str) -> str:
@@ -1128,8 +1132,6 @@ class AgentActionService:
 
     def _save_role(self, project: Project, identity: AgentIdentity,
                    arguments: dict, context: AgentRunContext) -> dict:
-        from ..api.schemas import RoleInput, RoleTemplateInput
-
         scope = arguments.get("scope")
         if scope not in ("project", "template"):
             raise AgentToolError("invalid_arguments", "scope 必须是 project 或 template")
@@ -1138,17 +1140,22 @@ class AgentActionService:
             raise AgentToolError("permission_denied", "只能修改当前项目角色", 403)
         data = {key: value for key, value in arguments.items()
                 if key not in ("scope", "project_id")}
-        body = (RoleInput(**data, project_id=project.id) if scope == "project"
-                else RoleTemplateInput(**data))
         try:
+            body = (RoleInput(**data, project_id=project.id) if scope == "project"
+                    else RoleTemplateInput(**data))
             role = save_role_config(
                 self.store, body, scope, self._role_catalog, identity.actor,
                 role_updated=self._role_updated,
                 audit_suffix=f" run={context.run_id}",
             )
-        except HTTPException as exc:
-            code = "conflict" if exc.status_code == 409 else "invalid_arguments"
-            raise AgentToolError(code, str(exc.detail), exc.status_code) from exc
+        except ValidationError as exc:
+            issue = exc.errors()[0]
+            field = ".".join(map(str, issue["loc"]))
+            raise AgentToolError(
+                "invalid_arguments", f"role.save 参数不合法: {field} {issue['msg']}") from exc
+        except RoleConfigError as exc:
+            code = "conflict" if exc.status == 409 else "invalid_arguments"
+            raise AgentToolError(code, exc.message, exc.status) from exc
         return {"role": role, "summary": f"已保存角色 @{role['id']}"}
 
     @staticmethod

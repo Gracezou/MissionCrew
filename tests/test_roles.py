@@ -11,6 +11,8 @@ from missioncrew.core import seed as seed_mod
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.core.models import Backend, Project, Role
 from missioncrew.api import create_app
+from missioncrew.api.schemas import RoleTemplateInput
+from missioncrew.collab.role_config import validate_role_config
 from missioncrew.runtime import runtime_manager
 
 
@@ -70,6 +72,21 @@ def test_fixed_runtime_disabled_reports_unavailable(seeded):
 
 
 # ---- 管理 API ----
+
+
+def test_role_config_discovers_model_catalog_once(seeded):
+    backend = seeded.get_backend("std-1")
+    backend.models = ["pro"]
+    seeded.put_backend(backend)
+    calls = []
+
+    def catalog(_backend):
+        calls.append(_backend.id)
+        return ["another"], {"another": ["high"]}
+
+    validate_role_config(seeded, RoleTemplateInput(
+        id="new-role", runtime_id="std-1", model="another", effort="high"), catalog)
+    assert calls == ["std-1"]
 
 @pytest.fixture()
 def client(seeded):

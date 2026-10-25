@@ -47,6 +47,7 @@ docs/                 详细文档,中文版在 docs/、英文版在 docs/en/(�
 
 分层规则(有测试钉住):
 
+- `collab/` 和 `core/` 不得导入 `fastapi` 或 `api/`；领域错误到 HTTP 异常的转换只留在 API 层。
 - 业务层(api/collab/core)不得直接 import `runtime.adapters` 或原生执行器,只经 `runtime_manager`;见 `test_application_layers_do_not_import_raw_runtime_executors`。
 - 工具相关知识进 `runtime/clis/<tool>.py`:静态事实写 `CliSpec` 字段,工具特有行为写可选钩子(`session_args`、`apply_permissions`、`prepare_env`、`parse_model_efforts`、`parse_prompt_usage`、`locate_binary`、`update_plan`、`latest_version`、`account_usage_probe` 等);`adapters.py` 只做汇总与分发,新增工具 = 加声明模块 + 追加进 `clis.SPECS`,不动执行器。
 - claude/codex/pi/antigravity 走各自原生 provider 类,执行与 effort 档位声明都在 provider 里;`clis/` 里对应文件只负责检测、模型发现、回退模板与升级渠道。

@@ -118,6 +118,22 @@ def test_role_save_preserves_restrictions_and_validates_like_http(seeded):
     assert bad_runtime.value.code == "invalid_arguments"
 
 
+def test_role_save_validation_error_omits_pydantic_input(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    with pytest.raises(AgentToolError) as invalid:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "template", "id": "bad", "runtime_id": "std-1",
+            "capabilities": "private-secret-value",
+        }, run_id, "bad-fields")
+    assert invalid.value.code == "invalid_arguments"
+    assert "capabilities" in invalid.value.message
+    assert "private-secret-value" not in invalid.value.message
+    assert "pydantic.dev" not in invalid.value.message
+    assert "\n" not in invalid.value.message
+
+
 def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     chat = ChatEngine(seeded)
     lead, lead_run, lead_token = _run_config(seeded, chat, "lead")

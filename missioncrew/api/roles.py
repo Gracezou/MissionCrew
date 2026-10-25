@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from ..collab.recycle_bin import recycle_role
-from ..collab.role_config import (reject_manual_only_orchestrator,
+from ..collab.role_config import (RoleConfigError, reject_manual_only_orchestrator,
                                   save_role_config, validate_role_config)
 from ..core.models import Role
 from .context import ApiContext
@@ -14,6 +14,12 @@ from .schemas import (RoleEnabledInput, RoleImport, RoleInput, RoleReorder,
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
     store = ctx.store
+
+    def as_http(operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except RoleConfigError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
 
     def validate_import_roles(
             roles: list[RoleTemplateInput], existing_ids: set[str],
@@ -31,7 +37,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             names = ", ".join(f"@{role_id}" for role_id in sorted(unconfirmed))
             raise HTTPException(409, f"以下角色会覆盖现有配置，请确认后重试: {names}")
         for role in roles:
-            validate_role_config(store, role, ctx.discovered_catalog)
+            as_http(validate_role_config, store, role, ctx.discovered_catalog)
         return conflicts
 
     @app.get("/api/roles")
@@ -40,8 +46,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/roles")
     def save_role(body: RoleInput):
-        return save_role_config(store, body, "project", ctx.discovered_catalog,
-                                "human", role_updated=ctx.role_usage_linkage.role_updated)
+        return as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
+                       "human", role_updated=ctx.role_usage_linkage.role_updated)
 
     @app.post("/api/roles/{role_id}/enabled")
     def set_role_enabled(role_id: str, body: RoleEnabledInput):
@@ -94,7 +100,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 enabled=previous.enabled if previous else True,
                 sort_order=previous.sort_order if previous else next_order,
             )
-            reject_manual_only_orchestrator(project, role)
+            as_http(reject_manual_only_orchestrator, project, role)
             prepared.append((role, previous))
             if previous is None:
                 next_order += 10
@@ -131,7 +137,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/role-templates")
     def save_role_template(body: RoleTemplateInput):
-        return save_role_config(store, body, "template", ctx.discovered_catalog, "human")
+        return as_http(save_role_config, store, body, "template", ctx.discovered_catalog,
+                       "human")
 
     @app.post("/api/role-templates/reorder")
     def reorder_role_templates(body: RoleTemplateReorder):

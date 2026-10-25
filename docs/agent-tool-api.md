@@ -61,6 +61,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 | 动作 | 普通角色 | 项目主控 |
 | --- | --- | --- |
 | `task.create` / `task.update` / `task.brief` | 允许 | 允许 |
+| `role.list` / `role.save` | 只允许 `role.list` | 均允许 |
 | `task.delete` / `task.archive` / `task.restore` | 禁止 | 允许 |
 | `document.publish` | 允许 | 允许 |
 | `document.rename` | 允许 | 允许 |
@@ -90,7 +91,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 
 ### 自动化脚本身份（`kind=automation`）
 
-除逐 Run 绑定的角色令牌外，还有一类**自动化脚本令牌**：`automation.save` 定义的项目脚本经 cron、webhook 投递或手动触发时，平台为该次运行签发一次性令牌（`kind=automation`，不绑定 Run），写入脚本工作目录的 `.agent-tool-token` 并在运行结束后立即撤销。脚本身份的可用动作以脚本自身的 `actions` 白名单为事实源（默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`），与主控权限位无关；白名单只能包含除 `channel.runs.list`、`channel.run.stop`、`channel.history`、`automation.run`（避免脚本互相触发）之外的动作，`automation.save` 传入这些动作会返回 `invalid_arguments`。审计 actor 记为 `automation:<项目id>:<脚本短id>`，可与角色触发区分。
+除逐 Run 绑定的角色令牌外，还有一类**自动化脚本令牌**：`automation.save` 定义的项目脚本经 cron、webhook 投递或手动触发时，平台为该次运行签发一次性令牌（`kind=automation`，不绑定 Run），写入脚本工作目录的 `.agent-tool-token` 并在运行结束后立即撤销。脚本身份的可用动作以脚本自身的 `actions` 白名单为事实源（默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`），与主控权限位无关；白名单不包含 `channel.runs.list`、`channel.run.stop`、`channel.history`、`automation.run`（避免脚本互相触发）、`role.list` 和 `role.save`（只接受角色身份），`automation.save` 传入这些动作会返回 `invalid_arguments`。审计 actor 记为 `automation:<项目id>:<脚本短id>`，可与角色触发区分。
 
 脚本身份的 `message.publish` 以 `author_type=automation` 发布：不传 `mentions` 时只发消息、不触发任何角色；显式提及单个角色时直接派发该角色（结果不自动交回主控），提及多个角色时与人类消息一致收敛为只启动主控。任何身份调用 `task.create` 时，若项目配置的 Task 自动处理规则命中 label，都会按规则的处理要求和处理角色立即派发（状态已是 `已完成` 的任务除外），结果附带 `auto_dispatch`（`rule_query`、`sent`）；脚本同步外部 Task 是最常见的场景。规则只能由人在任务看板列头的 ⚡ 配置，没有对应的 Agent Tool 动作，详见 [automation.md](automation.md)。
 
@@ -116,6 +117,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 - `recycle.list` 返回当前项目全部类型的回收项；`recycle.restore` 和 `recycle.purge` 使用回收项 `id`，均要求项目主控身份。
 - `channel.runs.list` 与 `channel.history` 默认查询 token 绑定的当前 Channel，传 `channel` 可查项目内其他频道；`channel.run.stop` 只接受当前 Channel 查询返回的正整数 `run_id`，不能停止其他频道的运行或当前主控自身的 Run。
 - `task.create`、`task.update`、`task.brief` 成功时结果都带 `task`，即写入后的完整任务（含新的 `updated_at`）。`updated_at` 是 MissionCrew 的系统更新时间：每次写入由平台自动刷新，不能设置，同时充当下文的版本号；同时立即刷新调用角色工作区里的 `tasks/` 快照，不必等下一轮。
+- `role.list` 不需要参数，返回当前项目的 `roles` 和全局 `templates`，字段与 Web 角色 API 的公开返回一致。`role.save` 需传 `scope: "project" | "template"`、`id`、`runtime_id`，其余字段同 `RoleInput` / `RoleTemplateInput`（`model`、`effort`、`usage_linkage_enabled`、`manual_only`、`enabled`、`name`、`description`、`capabilities`、`preference`、`color`、`sort_order`；项目 `project_id` 可省略，只能指定当前项目）。按 id 新建或更新，返回 `role`；沿用 Web 侧 runtime、模型、effort 与主控限制校验。省略 `manual_only` 时保留已有值；模板省略 `enabled` 时保留已有默认启停状态；项目角色的 `enabled` 由独立启停入口管理，`role.save` 不改变实时状态。脚本身份不可调用这两个动作。
 - `task.update` 必须带 `snapshot_updated_at`，取值是任务当前的版本：`tasks/` 快照里的 `snapshot_updated_at` 字段，或上一次 `task.*` 结果里 `task` 的 `updated_at`。任务已经被其他执行更新时返回 `version_conflict`，防止旧快照覆盖新状态；此时平台已刷新快照，错误的 `details.task` 就是当前任务，核对变化后用它的 `updated_at` 重试即可。`task.brief` 不需要版本号，只记录进展或只改状态时用它更省事。
 - `task.create` 和 `task.update` 使用 `title`、`summary`、`body`、`status`、`labels`、`channel_ids`、`url`、`meta`、`external_id`、`external_updated_at`；`status` 是状态文本（落库为 `status: 文本` 标签），标签支持 `属性: 值` 高级形式。Channel 绑定可选：`task.create` 不传 `channel_ids` 时绑定当前频道，`task.update` 传 `[]` 解除全部绑定；派发任务时才要求至少一个频道，没有绑定时用项目的 `general` 频道。`task.update` 的 `labels` 整体替换标签列表；只想改某个属性时用 `properties`（如 `{"owner": "张三", "priority": null}`），值可以是字符串或数组，`null` 清空该属性，其余标签不动；同时给了 `status` 时以 `status` 为准。
 - `task.create` 的 `source` 指定任务所属的数据源：缺省为内置源 `built-in`，也可以是本项目自定义数据源的短 id（不存在时返回 `invalid_arguments`）。任务随后出现在绑定该源的 taskboard 面板上；没给状态时落到该源的第一个状态取值（内置源为 `待处理`）。内置源与自定义源的任务操作完全对等：`task.update`、`task.brief`、`task.archive`、`task.restore`、`task.delete` 都按任务 id 单个操作，不需要带上数据源里的其他任务。

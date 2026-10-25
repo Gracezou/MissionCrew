@@ -57,12 +57,27 @@ def test_role_actions_save_list_permissions_and_audit(seeded):
                  if r["action"] == "role_template_saved" and "designer" in r["detail"])
     assert audit["actor"] == "role:lead" and f"run={run_id}" in audit["detail"]
 
+    hidden = seeded.get_role("webshop", "expert")
+    hidden.manual_only = True
+    hidden.description = "仅人工可见的说明"
+    seeded.put_role(hidden)
+    chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "private-template", "runtime_id": "std-1",
+        "manual_only": True, "description": "隐藏模板说明",
+    }, run_id, "save-hidden-template")
+    lead_list = chat.agent_tools.execute(identity, "role.list", {}, run_id, "lead-list")
+    assert "expert" in {r["id"] for r in lead_list["roles"]}
+    assert "private-template" in {r["id"] for r in lead_list["templates"]}
+
     _config, dev_run, dev_token = _run_config(seeded, chat, "dev")
     dev = chat.agent_tools.authenticate(dev_token)
     assert "role.list" in chat.agent_tools.capabilities(dev)["actions"]
     assert "role.save" not in chat.agent_tools.capabilities(dev)["actions"]
-    assert chat.agent_tools.execute(dev, "role.list", {}, dev_run, "dev-list")[
-        "templates"] == listed["templates"]
+    dev_list = chat.agent_tools.execute(dev, "role.list", {}, dev_run, "dev-list")
+    assert "expert" not in {r["id"] for r in dev_list["roles"]}
+    assert "private-template" not in {r["id"] for r in dev_list["templates"]}
+    assert "仅人工可见的说明" not in str(dev_list)
+    assert "隐藏模板说明" not in str(dev_list)
     with pytest.raises(AgentToolError) as denied:
         chat.agent_tools.execute(dev, "role.save", {
             "scope": "template", "id": "forbidden", "runtime_id": "std-1",

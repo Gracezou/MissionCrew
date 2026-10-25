@@ -325,7 +325,8 @@ An orchestrator's turn:
 ## 10a. Roles (role.*)
 
 - `role.list` shows the current project's roles and global role templates, including disabled
-  entries. Any role may call it; the result contains public configuration fields only.
+  entries. Any role may call it; only roles with platform management permission see entries
+  marked `manual_only`. Other roles cannot see those entries or their descriptions.
 - `role.save` is orchestrator-only. Pass `scope: "project"` to create or update a role in the
   current project, or `scope: "template"` for a global template, plus `id` and `runtime_id`.
   The other fields match the Web role editor. Omitting `manual_only` preserves an existing value;

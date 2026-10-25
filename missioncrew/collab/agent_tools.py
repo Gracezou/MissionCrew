@@ -1111,11 +1111,19 @@ class AgentActionService:
         }
         return handlers[action](project, identity, arguments, context)
 
-    def _list_roles(self, project: Project, _identity: AgentIdentity,
+    def _list_roles(self, project: Project, identity: AgentIdentity,
                     _arguments: dict, _context: AgentRunContext) -> dict:
+        from .chat import ChatEngine
+
+        roles = self.store.list_roles(project.id)
+        templates = self.store.list_role_templates()
+        if not project.controls_platform(identity.role_id):
+            roles = [role for role in roles
+                     if not ChatEngine._manual_only_role(project, role)]
+            templates = [role for role in templates if not role.manual_only]
         return {
-            "roles": [role.to_dict() for role in self.store.list_roles(project.id)],
-            "templates": [role.to_dict() for role in self.store.list_role_templates()],
+            "roles": [role.to_dict() for role in roles],
+            "templates": [role.to_dict() for role in templates],
         }
 
     def _save_role(self, project: Project, identity: AgentIdentity,

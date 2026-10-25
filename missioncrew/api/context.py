@@ -129,6 +129,8 @@ class ApiContext:
                  if backend_ids is None or backend.id in backend_ids],
                 refresh=refresh),
         )
+        ctx.chat.agent_tools.bind_role_config(
+            ctx.discovered_catalog, ctx.role_usage_linkage.role_updated)
         return ctx
 
     def discovered_catalog(self, backend, refresh: bool = False

@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from fastapi import HTTPException
+
 from . import board_sources
 from . import channels as channel_ops
 from .content_channels import content_channel, rebind_content_channel
@@ -32,6 +34,7 @@ from .recycle_bin import (RecycleConflictError, list_recycle_items,
                           recycle_dashboard, recycle_document,
                           recycle_guideline, recycle_skill, recycle_task,
                           restore_recycle_item)
+from .role_config import save_role_config
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
                             skill_resource_url, task_resource_url)
@@ -45,6 +48,8 @@ from ..core.models import (BOARD_KINDS, BOARD_WIDGET_TYPES, Board,
                            Channel, Project, ProjectSkill,
                            Task)
 from ..core.store import Store
+from ..runtime import runtime_manager
+from ..runtime.role_usage_linkage import RoleUsageLinkage
 
 
 CONTROL_ID_RE = re.compile(r"[\w-]+")
@@ -121,6 +126,32 @@ class AgentRunContext:
 # 动作说明只给 Agent 看(actions 命令与 /api/agent/v1/actions),与 Prompt 一样用英文;
 # 状态示例里的 待处理/处理中 等是项目真实的标签取值,保持原样
 ACTION_DEFINITIONS = {
+    "role.list": {
+        "description": "List this project's roles and global role templates with public fields",
+        "orchestrator_only": False,
+        "automation_allowed": False,
+        "arguments": {},
+    },
+    "role.save": {
+        "description": "Create or update a project role or global role template by id",
+        "orchestrator_only": True,
+        "automation_allowed": False,
+        "arguments": {
+            "scope": "required: project or template",
+            "id": "required role id",
+            "runtime_id": "required enabled runtime id",
+            "project_id": "optional; for project scope must be the current project",
+            "enabled": "template default state; ignored for project roles",
+            "model": "model id; empty uses CLI default",
+            "effort": "supported reasoning effort; empty uses CLI default",
+            "usage_linkage_enabled": "follow account usage limits; default false",
+            "manual_only": "human mention only; omitted preserves an existing value",
+            "name": "display name", "description": "role description",
+            "capabilities": "array of supported role abilities",
+            "preference": "free-form role preference", "color": "display color",
+            "sort_order": "optional order; omitted preserves an existing value",
+        },
+    },
     "task.create": {
         "description": "Create an issue-style Task that can be bound to several channels",
         "orchestrator_only": False,
@@ -549,6 +580,12 @@ PEER_MESSAGE_PUBLISH = {
 }
 
 ACTION_ARGUMENTS = {
+    "role.list": set(),
+    "role.save": {
+        "scope", "id", "runtime_id", "project_id", "enabled", "model", "effort",
+        "usage_linkage_enabled", "manual_only", "name", "description",
+        "capabilities", "preference", "color", "sort_order",
+    },
     "task.create": {
         "title", "summary", "body", "labels", "channel_ids", "status", "source",
         "url", "meta", "external_id", "external_updated_at",
@@ -615,7 +652,7 @@ CONVERSATION_RECEIPT_ACTIONS = (
         "message.publish", "channel.runs.list", "channel.run.stop",
         "channel.history", "channel.list", "recycle.list", "dashboard.list",
         "board_source.list", "guideline.list", "skill.list", "automation.list",
-        "document.history", "guideline.history", "skill.history",
+        "document.history", "guideline.history", "skill.history", "role.list",
     }
 )
 
@@ -637,9 +674,16 @@ class AgentActionService:
         self._stop_channel_sessions = stop_channel_sessions or (lambda _channel_id: 0)
         # 自动化调度器在服务装配时绑定(它自身依赖本服务签发脚本令牌)
         self._trigger_automation: Optional[Callable[..., int]] = None
+        self._role_catalog = runtime_manager.list_model_catalog
+        self._role_updated = RoleUsageLinkage(store, lambda **_: {}).role_updated
 
     def bind_automation_trigger(self, trigger: Callable[..., int]) -> None:
         self._trigger_automation = trigger
+
+    def bind_role_config(self, discovered_catalog: Callable,
+                         role_updated: Callable) -> None:
+        self._role_catalog = discovered_catalog
+        self._role_updated = role_updated
 
     @staticmethod
     def _hash_token(token: str) -> str:
@@ -1022,6 +1066,8 @@ class AgentActionService:
                 "permission_denied", f"{subject} 无权执行 {action}", 403,
             )
         handlers = {
+            "role.list": self._list_roles,
+            "role.save": self._save_role,
             "task.create": self._create_task,
             "task.update": self._update_task,
             "task.brief": self._add_task_brief,
@@ -1064,6 +1110,38 @@ class AgentActionService:
             "recycle.purge": self._purge_recycle_item,
         }
         return handlers[action](project, identity, arguments, context)
+
+    def _list_roles(self, project: Project, _identity: AgentIdentity,
+                    _arguments: dict, _context: AgentRunContext) -> dict:
+        return {
+            "roles": [role.to_dict() for role in self.store.list_roles(project.id)],
+            "templates": [role.to_dict() for role in self.store.list_role_templates()],
+        }
+
+    def _save_role(self, project: Project, identity: AgentIdentity,
+                   arguments: dict, context: AgentRunContext) -> dict:
+        from ..api.schemas import RoleInput, RoleTemplateInput
+
+        scope = arguments.get("scope")
+        if scope not in ("project", "template"):
+            raise AgentToolError("invalid_arguments", "scope 必须是 project 或 template")
+        project_id = arguments.get("project_id")
+        if project_id is not None and project_id != project.id:
+            raise AgentToolError("permission_denied", "只能修改当前项目角色", 403)
+        data = {key: value for key, value in arguments.items()
+                if key not in ("scope", "project_id")}
+        body = (RoleInput(**data, project_id=project.id) if scope == "project"
+                else RoleTemplateInput(**data))
+        try:
+            role = save_role_config(
+                self.store, body, scope, self._role_catalog, identity.actor,
+                role_updated=self._role_updated,
+                audit_suffix=f" run={context.run_id}",
+            )
+        except HTTPException as exc:
+            code = "conflict" if exc.status_code == 409 else "invalid_arguments"
+            raise AgentToolError(code, str(exc.detail), exc.status_code) from exc
+        return {"role": role, "summary": f"已保存角色 @{role['id']}"}
 
     @staticmethod
     def _require_chat_identity(identity: AgentIdentity) -> None:

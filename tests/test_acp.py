@@ -2,6 +2,7 @@
 import json
 import queue
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -123,6 +124,13 @@ def test_acp_list_models_from_config_options():
     from missioncrew.runtime import acp
     models = acp.list_models([sys.executable, FAKE], timeout=15)
     assert models == ["fake/base", "fake/pro"]
+
+
+def test_acp_model_catalog_cleans_temporary_workdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert acp.list_models([sys.executable, FAKE], timeout=15)
+    assert acp.list_models(["/nonexistent/acp-tool"], timeout=15) == []
+    assert not list(tmp_path.glob("mc-acp-models-*"))
 
 
 def test_acp_list_models_from_models_block():

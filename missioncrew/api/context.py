@@ -23,7 +23,7 @@ from ..collab.workspace import (migrate_legacy_workspace_layout,
                                 purge_channel_workspaces)
 from ..core import seed as seed_mod
 from ..core.config import db_path
-from ..core.models import Channel, Project
+from ..core.models import MENTION_ID_RE, Channel, Project
 from ..core.store import Store
 from ..runtime import runtime_manager
 from ..runtime.role_usage_linkage import RoleUsageLinkage
@@ -31,7 +31,6 @@ from ..runtime.role_usage_linkage import RoleUsageLinkage
 if TYPE_CHECKING:   # 只为类型标注;webhooks 模块反过来依赖本模块
     from .webhooks import WebhookListener
 
-MENTION_ID_RE = re.compile(r"[\w-]+")
 _AUDIT_CREDENTIAL = re.compile(
     r"(?i)\b((?:api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"token|secret|password|passwd|authorization|cookie|credential|"
@@ -129,6 +128,8 @@ class ApiContext:
                  if backend_ids is None or backend.id in backend_ids],
                 refresh=refresh),
         )
+        ctx.chat.agent_tools.bind_role_config(
+            ctx.discovered_catalog, ctx.role_usage_linkage.role_updated)
         return ctx
 
     def discovered_catalog(self, backend, refresh: bool = False

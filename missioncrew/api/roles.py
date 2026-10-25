@@ -4,9 +4,10 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from ..collab.recycle_bin import recycle_role
-from ..core.models import ROLE_ABILITIES, Role
-from ..runtime import runtime_manager
-from .context import MENTION_ID_RE, ApiContext
+from ..collab.role_config import (RoleConfigError, reject_manual_only_orchestrator,
+                                  save_role_config, validate_role_config)
+from ..core.models import Role
+from .context import ApiContext
 from .schemas import (RoleEnabledInput, RoleImport, RoleInput, RoleReorder,
                       RoleTemplateImport, RoleTemplateInput, RoleTemplateReorder)
 
@@ -14,44 +15,11 @@ from .schemas import (RoleEnabledInput, RoleImport, RoleInput, RoleReorder,
 def register(app: FastAPI, ctx: ApiContext) -> None:
     store = ctx.store
 
-    def validate_config(body: RoleInput | RoleTemplateInput) -> None:
-        """项目角色与全局模板共用同一套固定执行组合校验。"""
-        if not body.id.strip() or not MENTION_ID_RE.fullmatch(body.id):
-            raise HTTPException(400, "角色 id 只能包含字母、数字、下划线、连字符")
-        bad = [c for c in body.capabilities if c not in ROLE_ABILITIES]
-        if bad:
-            raise HTTPException(
-                400, f"未知能力选项: {bad}(可用: {', '.join(sorted(ROLE_ABILITIES))})")
-        if not body.runtime_id.strip():
-            raise HTTPException(400, "角色必须选择 runtime(定义角色时固定执行组合)")
-        backend = store.get_backend(body.runtime_id)
-        if backend is None:
-            raise HTTPException(400, f"runtime 不存在: {body.runtime_id}")
-        if not backend.enabled:
-            raise HTTPException(400, f"runtime {body.runtime_id} 已停用,请先在 Runtime 设置页启用")
-        known_models = set(backend.models)
-        # 空模型 = 显式使用 CLI 默认,总是合法;非空才校验归属。
-        if body.model and known_models and body.model not in known_models:
-            if body.model not in set(ctx.discovered_models(backend)):
-                raise HTTPException(
-                    400, f"模型 {body.model or '(CLI 默认)'} 不属于 runtime {body.runtime_id}")
-        if body.effort:
-            # 工具自报按模型档位时以它为准:grok 这类 CLI 对越界档位不报错而是
-            # 静默回落,放过去用户看不到任何提示,只能在保存时拦住。
-            allowed = runtime_manager.effort_options(
-                backend, body.model, ctx.discovered_model_efforts(backend))
-            if not allowed:
-                raise HTTPException(400, f"runtime {body.runtime_id} 不支持 effort(推理力度)配置")
-            if body.effort not in allowed:
-                raise HTTPException(
-                    400, f"模型 {body.model or '(CLI 默认)'} 的 effort "
-                         f"必须是 {'/'.join(allowed)} 之一")
-
-    def reject_manual_only_orchestrator(project, role: Role) -> None:
-        """按合并后的生效值判断，主控不能为仅人工点名。"""
-        if role.manual_only and project.orchestrator_role_id == role.id:
-            raise HTTPException(
-                409, f"主控角色 @{role.id} 不能设为仅人工点名；请先为项目选择其他主控")
+    def as_http(operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except RoleConfigError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
 
     def validate_import_roles(
             roles: list[RoleTemplateInput], existing_ids: set[str],
@@ -69,7 +37,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             names = ", ".join(f"@{role_id}" for role_id in sorted(unconfirmed))
             raise HTTPException(409, f"以下角色会覆盖现有配置，请确认后重试: {names}")
         for role in roles:
-            validate_config(role)
+            as_http(validate_role_config, store, role, ctx.discovered_catalog)
         return conflicts
 
     @app.get("/api/roles")
@@ -78,27 +46,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/roles")
     def save_role(body: RoleInput):
-        validate_config(body)
-        project = store.get_project(body.project_id)
-        if project is None:
-            raise HTTPException(400, f"项目不存在: {body.project_id}")
-        data = body.model_dump()
-        existing = store.get_role(body.project_id, body.id)
-        # fork-divergence: 旧请求未携带时保留仅人工权限边界，新建默认 False。
-        if "manual_only" not in body.model_fields_set and existing:
-            data["manual_only"] = existing.manual_only
-        # 临时启停只允许走独立端点；编辑名称、模型等字段时保留实时状态，
-        # 避免旧表单保存时覆盖另一个页面刚完成的开关操作。
-        data["enabled"] = existing.enabled if existing else True
-        if data["sort_order"] is None:   # 编辑保留现有顺序;新角色排到项目末尾
-            data["sort_order"] = existing.sort_order if existing else 10 + max(
-                (r.sort_order for r in store.list_roles(body.project_id)), default=0)
-        role = Role(**data)
-        reject_manual_only_orchestrator(project, role)
-        store.put_role(role)
-        ctx.role_usage_linkage.role_updated(role, previous=existing)
-        store.audit("human", "role_saved", detail=f"project={role.project_id} role={role.id}")
-        return store.get_role(role.project_id, role.id).to_dict()
+        return as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
+                       "human", role_updated=ctx.role_usage_linkage.role_updated)
 
     @app.post("/api/roles/{role_id}/enabled")
     def set_role_enabled(role_id: str, body: RoleEnabledInput):
@@ -151,7 +100,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 enabled=previous.enabled if previous else True,
                 sort_order=previous.sort_order if previous else next_order,
             )
-            reject_manual_only_orchestrator(project, role)
+            as_http(reject_manual_only_orchestrator, project, role)
             prepared.append((role, previous))
             if previous is None:
                 next_order += 10
@@ -188,23 +137,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/role-templates")
     def save_role_template(body: RoleTemplateInput):
-        validate_config(body)
-        data = body.model_dump()
-        data["project_id"] = ""
-        existing = store.get_role_template(body.id)
-        # fork-divergence: 与 enabled 一样，缺省保留已有模板的权限设置。
-        if "manual_only" not in body.model_fields_set and existing:
-            data["manual_only"] = existing.manual_only
-        # 旧客户端不带 enabled 时保留模板现有的新项目默认启停状态。
-        if "enabled" not in body.model_fields_set and existing:
-            data["enabled"] = existing.enabled
-        if data["sort_order"] is None:
-            data["sort_order"] = existing.sort_order if existing else 10 + max(
-                (role.sort_order for role in store.list_role_templates()), default=0)
-        role = Role(**data)
-        store.put_role_template(role)
-        store.audit("human", "role_template_saved", detail=f"role={role.id}")
-        return role.to_dict()
+        return as_http(save_role_config, store, body, "template", ctx.discovered_catalog,
+                       "human")
 
     @app.post("/api/role-templates/reorder")
     def reorder_role_templates(body: RoleTemplateReorder):

@@ -322,6 +322,18 @@ An orchestrator's turn:
   `.claude/skills` and so on are still discovered under their native rules).
 - Delete with `guideline.delete` / `skill.delete` (orchestrator only); they go to the recycle bin.
 
+## 10a. Roles (role.*)
+
+- `role.list` shows the current project's roles and global role templates, including disabled
+  entries. Any role may call it; only roles with platform management permission see entries
+  marked `manual_only`. Other roles cannot see those entries or their descriptions.
+- `role.save` is orchestrator-only. Pass `scope: "project"` to create or update a role in the
+  current project, or `scope: "template"` for a global template, plus `id` and `runtime_id`.
+  The other fields match the Web role editor. Omitting `manual_only` preserves an existing value;
+  omitting template `enabled` preserves its default state. Project role `enabled` is live state
+  and cannot be changed by this action. The current orchestrator cannot become manual-only.
+  Details: `platform-docs/agent-tool-api.md`.
+
 ## 11. Automation (automation.*)
 
 - `automation.save` creates or updates a project automation script: script is the full script

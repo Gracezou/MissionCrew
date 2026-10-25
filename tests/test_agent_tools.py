@@ -33,6 +33,107 @@ def _run_config(store, chat: ChatEngine, role_id: str):
     return config, run_id, token_file.read_text(encoding="utf-8").strip()
 
 
+def test_role_actions_save_list_permissions_and_audit(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    assert "role.list" in actions and "role.save" in actions
+    assert "scope" in actions["role.save"]["arguments"]
+    saved = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "designer", "runtime_id": "std-1",
+        "model": "pro", "name": "设计", "enabled": False,
+    }, run_id, "save-template")
+    assert saved["role"]["enabled"] is False
+    updated = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "designer", "runtime_id": "std-1",
+        "model": "pro", "name": "设计更新",
+    }, run_id, "update-template")
+    assert updated["role"]["enabled"] is False
+    listed = chat.agent_tools.execute(identity, "role.list", {}, run_id, "list-roles")
+    assert next(r for r in listed["templates"] if r["id"] == "designer")["enabled"] is False
+    assert {r["id"] for r in listed["roles"]} == {r.id for r in seeded.list_roles("webshop")}
+    audit = next(r for r in seeded.list_audit(limit=30)
+                 if r["action"] == "role_template_saved" and "designer" in r["detail"])
+    assert audit["actor"] == "role:lead" and f"run={run_id}" in audit["detail"]
+
+    hidden = seeded.get_role("webshop", "expert")
+    hidden.manual_only = True
+    hidden.description = "仅人工可见的说明"
+    seeded.put_role(hidden)
+    chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "private-template", "runtime_id": "std-1",
+        "manual_only": True, "description": "隐藏模板说明",
+    }, run_id, "save-hidden-template")
+    lead_list = chat.agent_tools.execute(identity, "role.list", {}, run_id, "lead-list")
+    assert "expert" in {r["id"] for r in lead_list["roles"]}
+    assert "private-template" in {r["id"] for r in lead_list["templates"]}
+
+    _config, dev_run, dev_token = _run_config(seeded, chat, "dev")
+    dev = chat.agent_tools.authenticate(dev_token)
+    assert "role.list" in chat.agent_tools.capabilities(dev)["actions"]
+    assert "role.save" not in chat.agent_tools.capabilities(dev)["actions"]
+    dev_list = chat.agent_tools.execute(dev, "role.list", {}, dev_run, "dev-list")
+    assert "expert" not in {r["id"] for r in dev_list["roles"]}
+    assert "private-template" not in {r["id"] for r in dev_list["templates"]}
+    assert "仅人工可见的说明" not in str(dev_list)
+    assert "隐藏模板说明" not in str(dev_list)
+    with pytest.raises(AgentToolError) as denied:
+        chat.agent_tools.execute(dev, "role.save", {
+            "scope": "template", "id": "forbidden", "runtime_id": "std-1",
+        }, dev_run, "dev-save")
+    assert denied.value.code == "permission_denied"
+
+
+def test_role_save_preserves_restrictions_and_validates_like_http(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    dev = seeded.get_role("webshop", "dev")
+    dev.manual_only = True
+    dev.enabled = False
+    seeded.put_role(dev)
+    result = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "project", "id": "dev", "runtime_id": "std-1",
+        "model": "pro", "name": "新版开发", "enabled": True,
+    }, run_id, "save-dev")
+    assert result["role"]["manual_only"] is True
+    assert result["role"]["enabled"] is False
+    with pytest.raises(AgentToolError) as rejected:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "project", "id": "lead", "runtime_id": "std-1",
+            "model": "pro", "manual_only": True,
+        }, run_id, "save-lead")
+    assert rejected.value.status_code == 409
+    assert seeded.get_role("webshop", "lead").manual_only is False
+    lead = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "project", "id": "lead", "runtime_id": "std-1",
+        "model": "pro", "enabled": False,
+    }, run_id, "keep-lead-enabled")
+    assert lead["role"]["enabled"] is True
+    with pytest.raises(AgentToolError) as bad_runtime:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "template", "id": "bad", "runtime_id": "missing",
+        }, run_id, "bad-runtime")
+    assert bad_runtime.value.code == "invalid_arguments"
+
+
+def test_role_save_validation_error_omits_pydantic_input(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    with pytest.raises(AgentToolError) as invalid:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "template", "id": "bad", "runtime_id": "std-1",
+            "capabilities": "private-secret-value",
+        }, run_id, "bad-fields")
+    assert invalid.value.code == "invalid_arguments"
+    assert "capabilities" in invalid.value.message
+    assert "private-secret-value" not in invalid.value.message
+    assert "pydantic.dev" not in invalid.value.message
+    assert "\n" not in invalid.value.message
+
+
 def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     chat = ChatEngine(seeded)
     lead, lead_run, lead_token = _run_config(seeded, chat, "lead")
@@ -139,7 +240,7 @@ def test_agent_tool_api_returns_structured_results_and_permission_errors(seeded)
     assert capabilities.status_code == 200
     assert set(capabilities.json()["result"]["actions"]) == {
         "document.publish", "document.rename", "document.history",
-        "task.brief", "task.create", "task.update"}
+        "task.brief", "task.create", "task.update", "role.list"}
 
     published = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "document.publish",

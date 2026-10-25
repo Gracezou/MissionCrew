@@ -20,6 +20,7 @@ from .label_query import normalize_label, split_label
 # 成本档位从低到高,路由优先低档,失败后逐级升级
 TIER_ORDER = ["economy", "standard", "expert"]
 DEFAULT_MAX_CHAIN_RUNS = 100
+MENTION_ID_RE = _re.compile(r"[\w-]+")
 
 # 状态即标签:任务状态是 `status: 待处理` 这样的高级标签,值就是显示文本,
 # 不做合法性校验。内置数据源声明的状态取值兼作看板默认列(带颜色与顺序)。

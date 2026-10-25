@@ -349,6 +349,18 @@ def test_application_layers_do_not_import_raw_runtime_executors():
     assert violations == []
 
 
+def test_collab_and_core_do_not_import_api_or_fastapi():
+    root = Path(__file__).parents[1] / "missioncrew"
+    violations = []
+    for layer in ("collab", "core"):
+        for path in (root / layer).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if ("from fastapi" in text or "import fastapi" in text
+                    or "from ..api" in text or "import missioncrew.api" in text):
+                violations.append(str(path.relative_to(root)))
+    assert violations == []
+
+
 def test_builtin_cli_stop_terminates_tracked_process(tmp_path):
     backend = Backend(id="cli-stop", name="CLI", adapter="custom")
     config = ExecutionConfig(

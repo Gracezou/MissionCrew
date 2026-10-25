@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from missioncrew.api import create_app
-from missioncrew.collab.agent_tools import AgentToolError
+from missioncrew.collab.agent_tools import AgentIdentity, AgentRunContext, AgentToolError
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.manual import render_manual
 from missioncrew.collab.tasks import create_task, dispatch_task
@@ -176,6 +176,22 @@ def test_every_role_gets_orchestrator_actions_and_full_history(chat, peer):
     record = json.loads(Path(path).read_text(encoding="utf-8"))["messages"][-1]
     assert record["author"]["id"] == "reviewer"
     assert "@dev" in record["content"]
+
+
+def test_peer_role_can_save_and_list_hidden_role_configuration(chat, peer):
+    project = peer.get_project("webshop")
+    assert project.controls_platform("dev")
+    identity = AgentIdentity(
+        token_id="test", project_id=project.id, channel_id="general",
+        role_id="dev", issued_scopes=tuple(chat.agent_tools.allowed_actions(project, "dev")))
+    context = AgentRunContext(run_id=7, channel_id="general", root_id=0, depth=0)
+    saved = chat.agent_tools._execute_action(identity, "role.save", {
+        "scope": "template", "id": "peer-secret", "runtime_id": "std-1",
+        "manual_only": True,
+    }, context)
+    assert saved["role"]["manual_only"] is True
+    listed = chat.agent_tools._execute_action(identity, "role.list", {}, context)
+    assert "peer-secret" in {r["id"] for r in listed["templates"]}
 
 
 def test_message_tool_rejects_mentions_for_peer_roles(peer):

@@ -314,10 +314,10 @@ def test_cli_adapter_reaps_pipe_holding_grandchildren(tmp_path):
     backend = Backend(id="p", name="p", adapter="pi")
     cfg = _cfg(tmp_path, backend, emit)
     cfg.timeout = 30
-    t0 = time.time()
+    t0 = time.monotonic()
     result = adapters.CliAdapter(
         "pi", [sys.executable, FAKE_STREAM, "grandchild"]).run(cfg)
-    assert time.time() - t0 < 15          # join 超时后组清理,不等满 timeout
+    assert time.monotonic() - t0 < 15     # join 超时后组清理,不等满 timeout
     assert result.success and "REAL-ANSWER" in result.output
     n_before = len(events)
     time.sleep(1.5)                       # run 返回后事件不再增长(读线程已结束)

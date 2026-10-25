@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1435,9 +1436,14 @@ def test_role_effort_saved_only_for_supporting_runtime(client, seeded):
     assert bad.status_code == 400 and "effort" in bad.json()["detail"]
     # 不支持 effort 的适配器:非空拒绝,空值(CLI 默认)放行
     seeded.put_backend(Backend(id="plain", name="plain", adapter="opencode"))
-    deny = client.post("/api/roles", json={
-        "id": "on-plain", "project_id": "webshop", "runtime_id": "plain",
-        "effort": "high"})
+    with patch("missioncrew.runtime.clis.opencode.subprocess.run") as run:
+        run.return_value.stdout = ""
+        deny = client.post("/api/roles", json={
+            "id": "on-plain", "project_id": "webshop", "runtime_id": "plain",
+            "effort": "high"})
+        run.assert_called_once_with(
+            ["opencode", "models"], capture_output=True, text=True,
+            timeout=25, stdin=subprocess.DEVNULL)
     assert deny.status_code == 400 and "不支持 effort" in deny.json()["detail"]
     empty = client.post("/api/roles", json={
         "id": "on-plain", "project_id": "webshop", "runtime_id": "plain"})

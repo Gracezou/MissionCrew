@@ -1220,10 +1220,12 @@ def list_model_catalog(
     会话,避免为了档位再启一个 CLI 进程。
     """
     import tempfile
-    workdir = tempfile.mkdtemp(prefix="mc-acp-models-")
+    workdir_ctx = tempfile.TemporaryDirectory(prefix="mc-acp-models-")
+    workdir = workdir_ctx.name
     try:
         client = _AcpClient(cmd, workdir, env or host_isolated_environ(), timeout)
     except OSError:
+        workdir_ctx.cleanup()
         return [], {}
     if runtime_id:
         with _ONE_SHOT_CLIENTS_GUARD:
@@ -1263,7 +1265,10 @@ def list_model_catalog(
     finally:
         with _ONE_SHOT_CLIENTS_GUARD:
             _ONE_SHOT_CLIENTS.pop(id(client), None)
-        client.close()
+        try:
+            client.close()
+        finally:
+            workdir_ctx.cleanup()
 
 
 def _probe_thought_levels(client: _AcpClient, session_id: str,

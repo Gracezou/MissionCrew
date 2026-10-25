@@ -14,6 +14,8 @@ uv run mc serve          # 本地起服务,访问 http://127.0.0.1:8321
 
 要求 Python 3.10+ 和 [uv](https://docs.astral.sh/uv/)。CI 会在 3.10–3.14 上跑测试并构建 wheel，提 PR 前请至少在本机跑通完整测试。
 
+本机跑全量测试前请接上电源并保持屏幕打开；macOS 合盖且使用电池时，`caffeinate -i -s` 也不能阻止睡眠。排查超时的看门狗应同时记录墙钟和单调钟；超时时用 `pmset -g log | grep -E " (Sleep|DarkWake) "` 查看最近的睡眠记录，区分机器睡眠与测试真正卡住。
+
 ## 代码约定
 
 - 代码结构与分层规则见 [AGENTS.md](AGENTS.md)，其中的分层规则有测试钉住（`tests/test_runtime_abstraction.py`），违反会直接失败。

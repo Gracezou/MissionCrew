@@ -192,7 +192,8 @@ def test_probe_timeout_reaps_process_and_missing_binary_is_unavailable(tmp_path)
 ])
 def test_transient_failure_is_retried_with_a_fresh_process(tmp_path, payload, first):
     runtime = fake_cli(tmp_path, json.dumps(payload), first=first)
-    assert probe_antigravity_usage(runtime, timeout=1).status == "ok"
+    # fork-divergence: macOS 首次启动假 CLI 可能超过 1 秒，给重试进程留足启动时间。
+    assert probe_antigravity_usage(runtime, timeout=2).status == "ok"
     assert len(launches(tmp_path)) == 2
 
 

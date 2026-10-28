@@ -152,6 +152,27 @@ class ApiContext:
     def discovered_models(self, backend, refresh: bool = False) -> list[str]:
         return self.discovered_catalog(backend, refresh=refresh)[0]
 
+    def role_model_warnings(self, roles) -> dict[tuple[str, str], dict]:
+        """用现有目录缓存标记失效模型;探测失败返回空目录时不误报。"""
+        backends = {backend.id: backend for backend in self.store.list_backends()}
+        catalogs = {}
+        warnings = {}
+        for role in roles:
+            backend = backends.get(role.runtime_id)
+            if backend is None or not role.model:
+                continue
+            if backend.id not in catalogs:
+                discovered, _ = self.discovered_catalog(backend)
+                catalogs[backend.id] = (discovered, list(dict.fromkeys(
+                    model for model in [*backend.models, *discovered] if model)))
+            discovered, models = catalogs[backend.id]
+            if discovered and role.model not in models:
+                warnings[(role.project_id, role.id)] = {
+                    "message": f"模型 {role.model} 不在 {backend.id} 当前清单中",
+                    "models": models,
+                }
+        return warnings
+
     def discovered_model_efforts(self, backend, refresh: bool = False
                                  ) -> dict[str, list[str]]:
         return self.discovered_catalog(backend, refresh=refresh)[1]

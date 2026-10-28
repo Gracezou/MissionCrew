@@ -4,6 +4,14 @@ function abilityPills(role) {
     `<span class="pill">${esc(traitMeta.abilities[c] || c)}</span>`).join("");
 }
 
+function modelCatalogWarningHtml(role) {
+  const warning = role.model_catalog_warning;
+  if (!warning) return "";
+  return `<br><span class="pill model-catalog-warning" title="${esc(
+    `${warning.message}；当前可选模型：${warning.models.join("、")}`)}">` +
+    `⚠ ${esc(warning.message)}</span>`;
+}
+
 /* ---- 角色配置文件导入/导出(全局模板与项目角色共用格式) ---- */
 const ROLE_FILE_FORMAT = "missioncrew.roles";
 const ROLE_FILE_VERSION = 1;
@@ -230,7 +238,8 @@ function renderRoleTable() {
     const disabledReason = roleDisabledReason(r);
     const exec = r.runtime_id
       ? `${esc(r.runtime_id)} / ${esc(r.model || "(CLI 默认)")}` +
-        (r.effort ? ` / effort ${esc(r.effort)}` : "")
+        (r.effort ? ` / effort ${esc(r.effort)}` : "") +
+        modelCatalogWarningHtml(r)
       : `<span class="muted">未绑定(请编辑角色选择 runtime)</span>`;
     return `<tr data-id="${esc(r.id)}">
       <td class="drag-handle" draggable="true" title="拖动排序"

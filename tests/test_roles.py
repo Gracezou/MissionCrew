@@ -330,7 +330,10 @@ def test_current_orchestrator_cannot_be_disabled_or_selected_while_disabled(
 def test_global_role_templates_seed_new_projects_and_first_enabled_is_default(client, seeded):
     templates = client.get("/api/role-templates").json()
     assert [role["id"] for role in templates][:3] == ["lead", "dev", "reviewer"]
-    assert client.get("/api/overview").json()["role_templates"] == templates
+    overview_templates = client.get("/api/overview").json()["role_templates"]
+    for role in overview_templates:
+        role.pop("model_catalog_warning")
+    assert overview_templates == templates
 
     coordinator = {
         "id": "coordinator", "name": "协调者", "runtime_id": "exp-1",
@@ -1301,6 +1304,53 @@ def test_backend_models_cache_refresh_and_update_invalidation(client, seeded, mo
     assert client.post("/api/backends/kimi/update").json()["version"] == "0.43.2"
     assert client.get("/api/backends/kimi/models").json()["discovered"] == ["k4", "k3", "k2"]
     assert probes == ["kimi"] * 3
+
+
+@pytest.mark.parametrize(("catalog", "expected_warning"), [
+    (["available"], True),
+    ([], False),
+    (["retired"], False),
+])
+def test_role_model_catalog_warning_uses_discovered_catalog(
+        client, seeded, monkeypatch, catalog, expected_warning):
+    backend = Backend(id="catalog-warning", name="catalog-warning",
+                      adapter="mock", models=["manual-model"])
+    seeded.put_backend(backend)
+    role = Role(id="catalog-role", project_id="webshop", name="目录测试",
+                runtime_id=backend.id, model="retired")
+    seeded.put_role(role)
+    template = Role(id="catalog-template", runtime_id=backend.id, model="retired")
+    seeded.put_role_template(template)
+    monkeypatch.setattr(runtime_manager, "list_model_catalog",
+                        lambda _backend, timeout=25: (catalog, {}))
+
+    project_roles = client.get("/api/projects/webshop/overview").json()["roles"]
+    project_role = next(item for item in project_roles if item["id"] == role.id)
+    templates = client.get("/api/overview").json()["role_templates"]
+    global_template = next(item for item in templates if item["id"] == template.id)
+    runtime = next(item for item in client.get("/api/runtime/status").json()["backends"]
+                   if item["id"] == backend.id)
+
+    assert bool(project_role["model_catalog_warning"]) is expected_warning
+    assert bool(global_template["model_catalog_warning"]) is expected_warning
+    assert runtime["invalid_model_roles"] == 2 * int(expected_warning)
+    if expected_warning:
+        warning = project_role["model_catalog_warning"]
+        assert warning["message"] == "模型 retired 不在 catalog-warning 当前清单中"
+        assert warning["models"] == ["manual-model", "available"]
+
+
+def test_role_model_catalog_warning_frontend_grep(client):
+    roles = client.get("/assets/js/roles.js").text
+    templates = client.get("/assets/js/settings-runtime.js").text
+    runtime = client.get("/assets/js/runtime-status.js").text
+    css = client.get("/assets/css/app.css").text
+    assert "function modelCatalogWarningHtml(role)" in roles
+    assert "当前可选模型：${warning.models.join(\"、\")}" in roles
+    assert "modelCatalogWarningHtml(r)" in roles
+    assert "modelCatalogWarningHtml(role)" in templates
+    assert "backend.invalid_model_roles || 0" in runtime
+    assert ".model-catalog-warning { color: var(--bad); }" in css
 
 
 def test_role_editors_offer_model_catalog_refresh(client):

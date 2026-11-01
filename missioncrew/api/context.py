@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -82,6 +83,7 @@ class ApiContext:
     # 一条缓存同时存模型目录与按模型的推理力度档位——两者来自同一次探测。
     model_catalog_cache: dict[
         str, tuple[float, list[str], dict[str, list[str]]]] = field(default_factory=dict)
+    model_catalog_refreshing: set[str] = field(default_factory=set)
     model_catalog_guard: threading.Lock = field(default_factory=threading.Lock)
 
     @classmethod
@@ -151,6 +153,50 @@ class ApiContext:
 
     def discovered_models(self, backend, refresh: bool = False) -> list[str]:
         return self.discovered_catalog(backend, refresh=refresh)[0]
+
+    def role_model_warnings(self, roles) -> dict[tuple[str, str], dict]:
+        """只读现有目录缓存;冷缓存时后台刷新,本次请求不等待探测。"""
+        backends = {backend.id: backend for backend in self.store.list_backends()}
+        catalogs = {}
+        warnings = {}
+        for role in roles:
+            backend = backends.get(role.runtime_id)
+            if backend is None or not backend.enabled or not role.model:
+                continue
+            if backend.id not in catalogs:
+                with self.model_catalog_guard:
+                    cached = self.model_catalog_cache.get(backend.id)
+                    if not cached or time.time() - cached[0] >= 600:
+                        if backend.id not in self.model_catalog_refreshing:
+                            self.model_catalog_refreshing.add(backend.id)
+                            threading.Thread(
+                                target=self._refresh_role_model_catalog,
+                                args=(backend,), daemon=True).start()
+                        cached = None
+                if cached is None:
+                    continue
+                discovered = cached[1]
+                catalogs[backend.id] = (discovered, list(dict.fromkeys(
+                    model for model in [*backend.models, *discovered] if model)))
+            discovered, models = catalogs[backend.id]
+            if discovered and role.model not in models:
+                warnings[(role.project_id, role.id)] = {
+                    "message": f"模型 {role.model} 不在 {backend.id} 当前清单中",
+                    "models": models,
+                }
+        return warnings
+
+    def _refresh_role_model_catalog(self, backend) -> None:
+        try:
+            models, efforts = runtime_manager.list_model_catalog(backend)
+            with self.model_catalog_guard:
+                self.model_catalog_cache[backend.id] = (time.time(), models, efforts)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Runtime model catalog refresh failed for %s", backend.id)
+        finally:
+            with self.model_catalog_guard:
+                self.model_catalog_refreshing.discard(backend.id)
 
     def discovered_model_efforts(self, backend, refresh: bool = False
                                  ) -> dict[str, list[str]]:

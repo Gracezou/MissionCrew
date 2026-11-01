@@ -51,11 +51,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             ]
             return data
 
+        templates = store.list_role_templates()
+        warnings = ctx.role_model_warnings(templates)
         return etag_json_response(request, {
             "version": __version__,
             "projects": [project_data(p) for p in store.list_projects()],
             "backends": [b.to_dict() for b in store.list_backends()],
-            "role_templates": [r.to_dict() for r in store.list_role_templates()],
+            "role_templates": [
+                {**r.to_dict(), "model_catalog_warning": warnings.get((r.project_id, r.id))}
+                for r in templates],
         })
 
     @app.get("/api/projects/{project_id}/overview")
@@ -78,8 +82,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             data["usage_window_keys"] = block["window_keys"] if block else []
             return data
 
+        roles = store.list_roles(project_id)
+        warnings = ctx.role_model_warnings(roles)
         return etag_json_response(request, {
-            "roles": [role_data(r) for r in store.list_roles(project_id)],
+            "roles": [{**role_data(r),
+                       "model_catalog_warning": warnings.get((r.project_id, r.id))}
+                      for r in roles],
             "boards": [{**b.to_dict(),
                         "resource_url": dashboard_resource_url(project_id, b.id)}
                        for b in store.list_boards(project_id)],
@@ -104,7 +112,16 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     @app.get("/api/runtime/status")
     def runtime_status():
         """系统级 Runtime 实例快照；前端轮询实现实时状态页。"""
-        return runtime_manager.status(store.list_backends())
+        data = runtime_manager.status(store.list_backends())
+        roles = [*store.list_roles(), *store.list_role_templates()]
+        warnings = ctx.role_model_warnings(roles)
+        counts = {}
+        for role in roles:
+            if (role.project_id, role.id) in warnings:
+                counts[role.runtime_id] = counts.get(role.runtime_id, 0) + 1
+        for backend in data["backends"]:
+            backend["invalid_model_roles"] = counts.get(backend["id"], 0)
+        return data
 
     @app.get("/api/audit")
     def audit(project_id: str = "", q: str = "",

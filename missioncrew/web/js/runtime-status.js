@@ -152,7 +152,9 @@ function renderRuntimeStatusPayload(data) {
     `<tr><th>Runtime</th><th>状态</th><th>项目</th><th>角色</th><th>实例</th>` +
     `<th>持久</th><th>单次</th><th>正在执行</th></tr>` +
     backends.map(backend => `<tr>
-      <td><b>${esc(backend.id)}</b><br><span class="muted">${esc(backend.adapter)}</span></td>
+      <td><b>${esc(backend.id)}</b><br><span class="muted">${esc(backend.adapter)}</span>` +
+        `${backend.invalid_model_roles ? `<br><span class="model-catalog-warning">` +
+          `${backend.invalid_model_roles} 个角色绑定模型已失效</span>` : ""}</td>
       <td>${runtimeStateBadge(backend.state)}</td>
       <td>${esc((backend.projects || []).join(", ") || "—")}</td>
       <td>${esc((backend.roles || []).map(role => "@" + role).join(", ") || "—")}</td>

@@ -105,7 +105,8 @@ function refreshRuntimeIndicators(data = runtimeStatusSnapshot) {
     }
   });
   document.querySelectorAll(".channel-background-marker").forEach(marker => {
-    const count = channelBackground.get(marker.dataset.channelId) || 0;
+    const count = markerChannelIds(marker).reduce(
+      (sum, id) => sum + (channelBackground.get(id) || 0), 0);
     marker.hidden = count === 0;
     if (count) {
       marker.title = backgroundTitle(count);
@@ -151,7 +152,9 @@ function renderRuntimeStatusPayload(data) {
     `<tr><th>Runtime</th><th>状态</th><th>项目</th><th>角色</th><th>实例</th>` +
     `<th>持久</th><th>单次</th><th>正在执行</th></tr>` +
     backends.map(backend => `<tr>
-      <td><b>${esc(backend.id)}</b><br><span class="muted">${esc(backend.adapter)}</span></td>
+      <td><b>${esc(backend.id)}</b><br><span class="muted">${esc(backend.adapter)}</span>` +
+        `${backend.invalid_model_roles ? `<br><span class="model-catalog-warning">` +
+          `${backend.invalid_model_roles} 个角色绑定模型已失效</span>` : ""}</td>
       <td>${runtimeStateBadge(backend.state)}</td>
       <td>${esc((backend.projects || []).join(", ") || "—")}</td>
       <td>${esc((backend.roles || []).map(role => "@" + role).join(", ") || "—")}</td>
@@ -500,4 +503,57 @@ async function renderRuntimeStatus(force = false, refreshUsage = false) {
 
 function pollRuntimeStatus() {
   renderRuntimeStatus();
+}
+
+/* 运行状态页的只读审计标签，按需读取，不参与 Runtime 的自动轮询。 */
+let auditRows = [];
+let auditLoading = false;
+
+function showRuntimePanel(panel) {
+  document.getElementById("runtime-status-panel").style.display = panel === "audit" ? "none" : "block";
+  document.getElementById("runtime-audit-panel").style.display = panel === "audit" ? "block" : "none";
+  document.getElementById("runtime-tab-status").classList.toggle("active", panel !== "audit");
+  document.getElementById("runtime-tab-audit").classList.toggle("active", panel === "audit");
+  if (panel !== "audit") return;
+  const select = document.getElementById("audit-project");
+  const selected = select.value;
+  select.innerHTML = `<option value="">全部项目（含平台记录）</option>` +
+    (overview.projects || []).map(project =>
+      `<option value="${esc(project.id)}">${esc(project.name || project.id)}</option>`).join("");
+  select.value = selected;
+  if (!auditRows.length) loadAuditRecords();
+}
+
+function renderAuditRecords() {
+  const table = document.getElementById("audit-records");
+  table.innerHTML = `<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>关联 Task</th><th>详情</th></tr></thead><tbody>` +
+    (auditRows.length ? auditRows.map(row => `<tr>
+      <td>${new Date(row.ts * 1000).toLocaleString()}</td>
+      <td>${esc(row.actor)}</td><td><code>${esc(row.action)}</code></td>
+      <td>${row.task_id ? `<code>${esc(row.task_id)}</code>` : "—"}</td>
+      <td><details><summary>查看完整详情</summary><pre class="audit-detail">${esc(row.detail || "")}</pre></details></td>
+    </tr>`).join("") : `<tr><td colspan="5" class="runtime-empty">暂无审计记录</td></tr>`) +
+    `</tbody>`;
+}
+
+async function loadAuditRecords(older = false) {
+  if (auditLoading) return;
+  auditLoading = true;
+  const more = document.getElementById("audit-more");
+  more.disabled = true;
+  try {
+    const params = new URLSearchParams({limit: "100"});
+    const project = document.getElementById("audit-project").value;
+    const query = document.getElementById("audit-search").value.trim();
+    if (project) params.set("project_id", project);
+    if (query) params.set("q", query);
+    if (older && auditRows.length) params.set("before_id", auditRows[auditRows.length - 1].id);
+    const data = await api("GET", `/api/audit?${params}`);
+    auditRows = older ? auditRows.concat(data.entries) : data.entries;
+    renderAuditRecords();
+    more.style.display = data.has_more ? "inline-block" : "none";
+  } finally {
+    more.disabled = false;
+    auditLoading = false;
+  }
 }

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
   schedule:
     # 每周一 03:00 UTC 用未锁定的最新依赖跑一遍,提前发现上游破坏性变更

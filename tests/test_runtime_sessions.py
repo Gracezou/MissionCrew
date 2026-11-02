@@ -47,13 +47,13 @@ def test_session_input_modes_cover_update_reinject_and_lean():
     changed.context_changed = True
     full, mode = adapters._session_input(changed, recovery=False)
     assert mode == "update"
-    assert full.startswith("公共\n") and "# MissionCrew 公共上下文更新" in full
+    assert full.startswith("公共\n") and "# MissionCrew Shared Context Update" in full
 
     due = _cfg(session_id="s1")
     due.reinject_due = True
     full, mode = adapters._session_input(due, recovery=False)
     assert mode == "reinject"
-    assert full.startswith("公共\n") and "# MissionCrew 公共上下文重注入" in full
+    assert full.startswith("公共\n") and "# MissionCrew Shared Context Reinjection" in full
 
     fresh = _cfg()
     full, mode = adapters._session_input(fresh, recovery=True)

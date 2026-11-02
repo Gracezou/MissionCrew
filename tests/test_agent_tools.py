@@ -33,6 +33,107 @@ def _run_config(store, chat: ChatEngine, role_id: str):
     return config, run_id, token_file.read_text(encoding="utf-8").strip()
 
 
+def test_role_actions_save_list_permissions_and_audit(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    assert "role.list" in actions and "role.save" in actions
+    assert "scope" in actions["role.save"]["arguments"]
+    saved = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "designer", "runtime_id": "std-1",
+        "model": "pro", "name": "设计", "enabled": False,
+    }, run_id, "save-template")
+    assert saved["role"]["enabled"] is False
+    updated = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "designer", "runtime_id": "std-1",
+        "model": "pro", "name": "设计更新",
+    }, run_id, "update-template")
+    assert updated["role"]["enabled"] is False
+    listed = chat.agent_tools.execute(identity, "role.list", {}, run_id, "list-roles")
+    assert next(r for r in listed["templates"] if r["id"] == "designer")["enabled"] is False
+    assert {r["id"] for r in listed["roles"]} == {r.id for r in seeded.list_roles("webshop")}
+    audit = next(r for r in seeded.list_audit(limit=30)
+                 if r["action"] == "role_template_saved" and "designer" in r["detail"])
+    assert audit["actor"] == "role:lead" and f"run={run_id}" in audit["detail"]
+
+    hidden = seeded.get_role("webshop", "expert")
+    hidden.manual_only = True
+    hidden.description = "仅人工可见的说明"
+    seeded.put_role(hidden)
+    chat.agent_tools.execute(identity, "role.save", {
+        "scope": "template", "id": "private-template", "runtime_id": "std-1",
+        "manual_only": True, "description": "隐藏模板说明",
+    }, run_id, "save-hidden-template")
+    lead_list = chat.agent_tools.execute(identity, "role.list", {}, run_id, "lead-list")
+    assert "expert" in {r["id"] for r in lead_list["roles"]}
+    assert "private-template" in {r["id"] for r in lead_list["templates"]}
+
+    _config, dev_run, dev_token = _run_config(seeded, chat, "dev")
+    dev = chat.agent_tools.authenticate(dev_token)
+    assert "role.list" in chat.agent_tools.capabilities(dev)["actions"]
+    assert "role.save" not in chat.agent_tools.capabilities(dev)["actions"]
+    dev_list = chat.agent_tools.execute(dev, "role.list", {}, dev_run, "dev-list")
+    assert "expert" not in {r["id"] for r in dev_list["roles"]}
+    assert "private-template" not in {r["id"] for r in dev_list["templates"]}
+    assert "仅人工可见的说明" not in str(dev_list)
+    assert "隐藏模板说明" not in str(dev_list)
+    with pytest.raises(AgentToolError) as denied:
+        chat.agent_tools.execute(dev, "role.save", {
+            "scope": "template", "id": "forbidden", "runtime_id": "std-1",
+        }, dev_run, "dev-save")
+    assert denied.value.code == "permission_denied"
+
+
+def test_role_save_preserves_restrictions_and_validates_like_http(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    dev = seeded.get_role("webshop", "dev")
+    dev.manual_only = True
+    dev.enabled = False
+    seeded.put_role(dev)
+    result = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "project", "id": "dev", "runtime_id": "std-1",
+        "model": "pro", "name": "新版开发", "enabled": True,
+    }, run_id, "save-dev")
+    assert result["role"]["manual_only"] is True
+    assert result["role"]["enabled"] is False
+    with pytest.raises(AgentToolError) as rejected:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "project", "id": "lead", "runtime_id": "std-1",
+            "model": "pro", "manual_only": True,
+        }, run_id, "save-lead")
+    assert rejected.value.status_code == 409
+    assert seeded.get_role("webshop", "lead").manual_only is False
+    lead = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "project", "id": "lead", "runtime_id": "std-1",
+        "model": "pro", "enabled": False,
+    }, run_id, "keep-lead-enabled")
+    assert lead["role"]["enabled"] is True
+    with pytest.raises(AgentToolError) as bad_runtime:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "template", "id": "bad", "runtime_id": "missing",
+        }, run_id, "bad-runtime")
+    assert bad_runtime.value.code == "invalid_arguments"
+
+
+def test_role_save_validation_error_omits_pydantic_input(seeded):
+    chat = ChatEngine(seeded)
+    _config, run_id, token = _run_config(seeded, chat, "lead")
+    identity = chat.agent_tools.authenticate(token)
+    with pytest.raises(AgentToolError) as invalid:
+        chat.agent_tools.execute(identity, "role.save", {
+            "scope": "template", "id": "bad", "runtime_id": "std-1",
+            "capabilities": "private-secret-value",
+        }, run_id, "bad-fields")
+    assert invalid.value.code == "invalid_arguments"
+    assert "capabilities" in invalid.value.message
+    assert "private-secret-value" not in invalid.value.message
+    assert "pydantic.dev" not in invalid.value.message
+    assert "\n" not in invalid.value.message
+
+
 def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     chat = ChatEngine(seeded)
     lead, lead_run, lead_token = _run_config(seeded, chat, "lead")
@@ -44,27 +145,33 @@ def test_runtime_context_injects_scoped_tool_without_exposing_token(seeded):
     assert lead_run_again != lead_run and next_lead_token != lead_token
     assert "# MissionCrew Agent Tool" in lead.common_prompt
     assert "message.publish" in lead.common_prompt
-    assert "最终回复会由平台自动发布" in lead.common_prompt
-    assert "不要再调用空 `mentions` 的 `message.publish`" in lead.common_prompt
-    assert "派工仍必须使用 `message.publish`" in lead.common_prompt
-    assert "返回非空 `dispatched` 时" in lead.common_prompt
-    assert "不要使用 `sleep`" in lead.common_prompt
-    assert "不要向仍在执行的角色再次 `message.publish` 追问" in lead.common_prompt
-    assert "不能提供实时进度" in lead.common_prompt
+    assert "automatically published in full as this turn's result" in lead.common_prompt
+    assert "do not call `message.publish` with empty `mentions`" in lead.common_prompt
+    assert "Dispatching always goes through `message.publish`" in lead.common_prompt
+    assert "returns a non-empty `dispatched`" in lead.common_prompt
+    assert "do not use `sleep`" in lead.common_prompt
+    assert "do not send `message.publish` to a role that is still running" in lead.common_prompt
+    assert "cannot give live progress" in lead.common_prompt
     assert "channel.runs.list" in lead.common_prompt
     assert "channel.run.stop" in lead.common_prompt
-    assert "活动 Run 状态不会自动写入你的上下文" in lead.common_prompt
-    assert "不要为这条说明再调用一次 `message.publish`" in lead.common_prompt
+    assert "Active run status is not written into your context automatically" in lead.common_prompt
+    assert "do not call `message.publish` again for that note" in lead.common_prompt
     assert "document.publish" in dev.common_prompt
     assert "document.rename" in dev.common_prompt
-    assert "message.publish" not in dev.common_prompt
+    # 执行角色能发消息、建频道,但 mentions 只能是主控
+    assert "message.publish" in dev.common_prompt
+    assert "channel.create" in dev.common_prompt
+    assert "Its `mentions` accepts only the orchestrator `lead`" in dev.common_prompt
     assert "channel.runs.list" not in dev.common_prompt
     assert "channel.run.stop" not in dev.common_prompt
-    assert "返回非空 `dispatched` 时" not in dev.common_prompt
+    assert "returns a non-empty `dispatched`" not in dev.common_prompt
     assert "is_current_run" not in lead.common_prompt
     assert "missioncrew-action>" not in lead.common_prompt
-    assert "不要传 `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
+    assert "do not pass `--run-id`" in lead.common_prompt     # 稳定规则进持久块,本轮输入不再重复
     assert "本轮上下文" not in lead.turn_prompt
+    # 能 publish 的角色每轮都带回复方式提醒,防止长会话里先 publish 再回复的重复输出
+    assert "# How Your Reply Is Delivered" in lead.turn_prompt
+    assert "# How Your Reply Is Delivered" not in dev.turn_prompt
     assert "MISSIONCREW_AGENT_RUN_ID" not in lead.env
     assert lead_token not in lead.prompt and dev_token not in dev.prompt
     assert Path(lead.env["MISSIONCREW_AGENT_TOKEN_FILE"]).stat().st_mode & 0o777 == 0o600
@@ -134,9 +241,15 @@ def test_agent_tool_api_returns_structured_results_and_permission_errors(seeded)
 
     capabilities = client.get("/api/agent/v1/actions", headers=headers)
     assert capabilities.status_code == 200
-    assert set(capabilities.json()["result"]["actions"]) == {
-        "document.publish", "document.rename",
-        "task.brief", "task.create", "task.update"}
+    listed = capabilities.json()["result"]["actions"]
+    assert set(listed) == {
+        "document.publish", "document.rename", "document.history",
+        "task.brief", "task.create", "task.update", "role.list",
+        "message.publish", "channel.create"}
+    # 执行角色看到的说明写明 mentions 只能是主控;建频道不再提 channel.list
+    assert "@lead" in listed["message.publish"]["description"]
+    assert '"lead"' in listed["message.publish"]["arguments"]["mentions"]
+    assert "channel.list" not in listed["channel.create"]["description"]
 
     published = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "document.publish",
@@ -227,10 +340,11 @@ def test_agent_tool_api_returns_structured_results_and_permission_errors(seeded)
     forbidden = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "message.publish", "run_id": dev_run,
         "request_id": "message-1",
-        "arguments": {"channel": "general", "content": "越权消息", "mentions": []},
+        "arguments": {"channel": "general", "content": "越权派发", "mentions": ["reviewer"]},
     })
     assert forbidden.status_code == 403
     assert forbidden.json()["error"]["code"] == "permission_denied"
+    assert "@lead" in forbidden.json()["error"]["message"]
 
     unauthenticated = client.get("/api/agent/v1/actions")
     assert unauthenticated.status_code == 401
@@ -439,8 +553,8 @@ def test_orchestrator_message_tool_uses_explicit_mentions_and_chain_context(seed
     assert "dev" in roles and "reviewer" not in roles
     assert result["dispatched"] == ["dev"]
     assert result["handoff"] == "end_turn"
-    assert "不要向仍在执行的角色追问中间状态" in result["resume"]
-    assert "自动启动你的新 turn" in result["resume"]
+    assert "Do not ask still-running roles for interim status" in result["resume"]
+    assert "starts a new turn for you" in result["resume"]
     assert "not_dispatched" not in result
 
 
@@ -822,6 +936,19 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     task_file = Path(_config.env["MISSIONCREW_TASKS_DIR"]) / f"{task['id']}.md"
     assert "title: 补齐接口与权限测试" in task_file.read_text(encoding="utf-8")
 
+    # 外部更新时间可由 Agent 设置并出现在快照里;系统 updated_at 仍是版本号
+    stamped = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-external-time",
+        "arguments": {
+            "id": task["id"],
+            "snapshot_updated_at": updated.json()["result"]["task"]["updated_at"],
+            "external_updated_at": "1970-01-01T00:16:40Z",
+        },
+    })
+    assert stamped.status_code == 200, stamped.text
+    assert stamped.json()["result"]["task"]["external_updated_at"] == 1000.0
+    assert "external_updated_at: 1000.0" in task_file.read_text(encoding="utf-8")
+
     briefed = client.post("/api/agent/v1/actions", headers=headers, json={
         "action": "task.brief", "run_id": run_id, "request_id": "task-brief",
         "arguments": {
@@ -841,6 +968,31 @@ def test_agent_tool_task_update_uses_optimistic_version_and_run_scope(seeded):
     })
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "version_conflict"
+
+    # 别人(这里是人类)改过任务后冲突:快照当场刷新,错误带回当前任务,按它的版本即可重试
+    from missioncrew.collab.tasks import update_task
+    current = seeded.get_task(task["id"])
+    update_task(seeded, current, snapshot_updated_at=current.updated_at,
+                changes={"summary": "人类补充了范围"})
+    briefed_at = briefed.json()["result"]["task"]["updated_at"]
+    conflict = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-conflict",
+        "arguments": {"id": task["id"], "snapshot_updated_at": briefed_at,
+                      "properties": {"owner": "dev"}},
+    })
+    assert conflict.status_code == 409
+    error = conflict.json()["error"]
+    assert error["code"] == "version_conflict" and "details.task" in error["message"]
+    latest = error["details"]["task"]
+    assert latest["summary"] == "人类补充了范围" and latest["updated_at"] > briefed_at
+    assert "人类补充了范围" in task_file.read_text(encoding="utf-8")
+    retried = client.post("/api/agent/v1/actions", headers=headers, json={
+        "action": "task.update", "run_id": run_id, "request_id": "task-retry",
+        "arguments": {"id": task["id"], "snapshot_updated_at": latest["updated_at"],
+                      "properties": {"owner": "dev"}},
+    })
+    assert retried.status_code == 200
+    assert "owner: dev" in retried.json()["result"]["task"]["labels"]
 
     other_channel = Channel(
         id="webshop:other", name="其他", project_id="webshop")
@@ -880,6 +1032,36 @@ def test_agent_tool_cli_unknown_command_hints_documents_dir(capsys):
     assert "未知子命令: read-document" in err
     assert "$MISSIONCREW_DOCUMENTS_DIR" in err
     assert "publish-file" in err          # 同时列出可用子命令
+
+
+def test_agent_tool_cli_reads_large_arguments_from_file_or_stdin(
+        tmp_path, monkeypatch, capsys):
+    """整批同步卡片可能超出单个命令行参数的长度上限,call 支持从文件或 stdin 读参数。"""
+    import io
+
+    calls = []
+
+    def fake_request(method, payload=None):
+        calls.append(payload)
+        return 200, {"ok": True, "result": {}}
+
+    monkeypatch.setattr(agent_tool, "_request_json", fake_request)
+    arguments = {"id": "gh", "cards": [{"id": f"#{n}", "title": "x" * 200}
+                                       for n in range(1000)]}
+    source = tmp_path / "args.json"
+    source.write_text(json.dumps(arguments), encoding="utf-8")
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(source)]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(arguments)))
+    assert agent_tool.main(["call", "board_source.save", "--arguments-file", "-"]) == 0
+    assert [call["arguments"] for call in calls] == [arguments, arguments]
+
+    assert agent_tool.main(["call", "board_source.save",
+                            "--arguments-file", str(tmp_path / "missing.json")]) == 1
+    assert "无法读取参数文件" in capsys.readouterr().out
+    with pytest.raises(SystemExit):   # 两种来源互斥
+        agent_tool.main(["call", "task.create", "--arguments", "{}",
+                         "--arguments-file", str(source)])
 
 
 def test_agent_tool_cli_encodes_file_and_preserves_structured_error(

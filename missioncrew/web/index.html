@@ -14,7 +14,9 @@
       <button class="theme-btn sidebar-toggle" id="sidebar-toggle" onclick="toggleMobileSidebar()"
         title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏" aria-expanded="false">☰</button>
       <div class="logo">M</div>
-      <h1>MissionCrew</h1>
+      <div class="top-bar-brand" id="top-bar-brand" title="MissionCrew">
+        <h1>MissionCrew</h1><span id="app-version" hidden></span>
+      </div>
       <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="切换明暗主题">🌙</button>
     </header>
     <div id="proj-row">
@@ -127,6 +129,8 @@
   <div id="views">
     <div id="chat-view">
       <div id="channel-head" class="channel-head" hidden></div>
+      <div id="channel-tasks-pop" class="channel-tasks-pop" role="dialog"
+        aria-label="频道关联 Task" hidden></div>
       <div id="channel-archive-banner" hidden>
         <span>此频道已归档，只能查看历史消息。</span>
         <span class="channel-banner-actions">
@@ -150,6 +154,7 @@
               onclick="clearChatContext()">清除上下文</button>
           </div>
         </div>
+        <div id="composer-error" class="composer-error" role="alert" hidden></div>
         <div id="input-row">
           <div id="input-wrap">
             <div id="composer-attachments" class="composer-attachments" hidden></div>
@@ -186,6 +191,18 @@
         <div class="form" id="custom-board-form" style="display:none"></div>
         <div class="custom-grid" id="custom-board-preview"></div>
       </div>
+    </div>
+
+    <!-- 自动处理规则:项目级规则列表,挂在内置任务看板下;只新建/编辑,不筛选分组 -->
+    <div id="task-rules-view" class="page">
+      <div class="section task-rules-head">
+        <div>
+          <h2>自动处理规则 <span class="muted" id="task-rules-count"></span></h2>
+          <p class="muted">新建任务（页面创建、Agent 的 task.create、数据源同步）时，按下面的顺序取第一条命中的启用规则自动派发；状态已是「已完成」的新任务不派发，已有任务改标签不会触发。规则对本项目所有数据源生效。</p>
+        </div>
+        <button class="action" onclick="openTaskRuleEditor()">＋ 新建规则</button>
+      </div>
+      <div class="section" id="task-rules-list"></div>
     </div>
 
     <div id="proj-view" class="page">
@@ -308,6 +325,11 @@
     </div>
 
     <div id="runtime-status-view" class="page">
+      <div class="runtime-view-tabs">
+        <button id="runtime-tab-status" class="ghost active" onclick="showRuntimePanel('status')">运行状态</button>
+        <button id="runtime-tab-audit" class="ghost" onclick="showRuntimePanel('audit')">审计记录</button>
+      </div>
+      <div id="runtime-status-panel">
       <div class="section runtime-status-head">
         <div>
           <h2>Runtime 运行状态 <span class="runtime-live-label"><i></i>10 秒刷新</span></h2>
@@ -344,6 +366,20 @@
         <h2>使用历史 <span class="count" id="runtime-history-count"></span></h2>
         <p class="muted">每次 Runtime 调用都会持久记录；服务重启前未结束的调用会标记为“已中断”。当前显示最近 100 条。</p>
         <div class="runtime-table-wrap"><table class="mgr" id="runtime-status-history"></table></div>
+      </div>
+      </div>
+      <div id="runtime-audit-panel" style="display:none">
+        <div class="section">
+          <h2>审计记录</h2>
+          <p class="muted">查看平台和项目操作记录。复制资源失败的完整原因也记录在这里。</p>
+          <div class="audit-filters">
+            <select id="audit-project" aria-label="按项目过滤" onchange="loadAuditRecords()"></select>
+            <input id="audit-search" type="search" placeholder="搜索动作或详情" aria-label="搜索审计记录" onkeydown="if(event.key==='Enter')loadAuditRecords()">
+            <button class="ghost" onclick="loadAuditRecords()">搜索</button>
+          </div>
+          <div class="runtime-table-wrap"><table class="mgr audit-table" id="audit-records"></table></div>
+          <button id="audit-more" class="ghost" style="display:none" onclick="loadAuditRecords(true)">加载更早</button>
+        </div>
       </div>
     </div>
 
@@ -446,12 +482,7 @@
     <label>正文</label><textarea id="nt-body" rows="8" style="height:auto"
       placeholder="背景、要求、验收标准……支持 Markdown"></textarea>
     <div class="row">
-      <div><label>状态</label><select id="nt-status">
-        <option value="待处理">待处理</option>
-        <option value="处理中">处理中</option>
-        <option value="已阻塞">已阻塞</option>
-        <option value="已完成">已完成</option>
-      </select></div>
+      <div><label>状态</label><select id="nt-status"></select></div>
       <div><label>标签(逗号分隔,支持「属性: 值」)</label>
         <input type="text" id="nt-labels" placeholder="ui, owner: 张三"></div>
     </div>
@@ -499,7 +530,10 @@
 <script src="/assets/js/run-events.js"></script>
 <script src="/assets/js/sidebar.js"></script>
 <script src="/assets/js/tasks.js"></script>
+<script src="/assets/js/taskboard-view.js"></script>
+<script src="/assets/js/rule-condition.js"></script>
 <script src="/assets/js/boards.js"></script>
+<script src="/assets/js/task-rules.js"></script>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/projects.js"></script>
 <script src="/assets/js/settings-project.js"></script>

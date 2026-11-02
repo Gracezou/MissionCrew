@@ -23,7 +23,8 @@ function renderGlobalRoleTable() {
   const rows = globalRoleTemplates().map(role => {
     const execution = role.runtime_id
       ? `${esc(role.runtime_id)} / ${esc(role.model || "(CLI 默认)")}` +
-        (role.effort ? ` / effort ${esc(role.effort)}` : "")
+        (role.effort ? ` / effort ${esc(role.effort)}` : "") +
+        modelCatalogWarningHtml(role)
       : `<span class="muted">未绑定</span>`;
     return `<tr data-id="${esc(role.id)}">
       <td class="drag-handle" draggable="true" title="拖动排序"

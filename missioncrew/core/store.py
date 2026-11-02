@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, data TEXT NOT NULL)
 CREATE TABLE IF NOT EXISTS automation_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   automation_id TEXT NOT NULL, project_id TEXT NOT NULL,
-  trigger TEXT NOT NULL DEFAULT 'manual',
+  trigger TEXT NOT NULL DEFAULT 'manual', trigger_detail TEXT DEFAULT '',
   status TEXT NOT NULL DEFAULT 'running',
   exit_code INTEGER, stdout TEXT DEFAULT '', stderr TEXT DEFAULT '',
   error TEXT DEFAULT '', started_at REAL NOT NULL, finished_at REAL
@@ -134,6 +134,7 @@ class Store:
         self._conn.executescript(_SCHEMA)
         self._migrate_backend_commands()
         self._migrate_chat_runs()
+        self._migrate_automation_runs()
         self._migrate_chat_messages()
         self._migrate_runtime_usage()
         self._migrate_chat_sessions()
@@ -151,6 +152,14 @@ class Store:
             if name not in columns:
                 self._conn.execute(
                     f"ALTER TABLE chat_runs ADD COLUMN {name} TEXT DEFAULT ''")
+
+    def _migrate_automation_runs(self) -> None:
+        """旧数据库补齐 automation_runs.trigger_detail(webhook 事件名与投递 id)。"""
+        columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(automation_runs)").fetchall()}
+        if "trigger_detail" not in columns:
+            self._conn.execute(
+                "ALTER TABLE automation_runs ADD COLUMN trigger_detail TEXT DEFAULT ''")
 
     def _migrate_backend_commands(self) -> int:
         """删除旧 Backend 记录中的命令覆盖，统一回到内置 Runtime 启动方式。"""
@@ -493,21 +502,14 @@ class Store:
         self._delete("backends", id)
 
     def _unlink_channel_from_tasks(self, channel: Channel) -> None:
-        """移除 Task 对频道的引用，并在需要时绑定同项目的可用频道。"""
-        available = [item for item in self.list_channels(channel.project_id)
-                     if item.id != channel.id and not item.archived]
-        fallback = next(
-            (item for item in available if item.is_general),
-            available[0] if available else None,
-        )
+        """移除 Task 对频道的引用。频道绑定可选:解绑后为空就保持为空,不改绑到
+        其他频道(派发时才回退到 general)。"""
         for task in self.list_tasks():
             if task.project_id != channel.project_id \
                     or channel.id not in task.channel_ids:
                 continue
             task.channel_ids = [
                 item for item in task.channel_ids if item != channel.id]
-            if not task.channel_ids and fallback is not None:
-                task.channel_ids = [fallback.id]
             self.put_task(task)
 
     def delete_channel(self, id: str) -> None:
@@ -802,13 +804,33 @@ class Store:
             (time.time(), actor, action, task_id, detail),
         )
 
-    def list_audit(self, task_id: Optional[str] = None, limit: int = 200) -> list[dict]:
+    def list_audit(self, task_id: Optional[str] = None, limit: int = 200,
+                   *, project_id: Optional[str] = None, q: str = "",
+                   before_id: Optional[int] = None) -> list[dict]:
+        where, params = [], []
         if task_id:
-            rows = self._query(
-                "SELECT * FROM audit WHERE task_id=? ORDER BY id DESC LIMIT ?",
-                (task_id, limit))
-        else:
-            rows = self._query("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))
+            where.append("task_id=?")
+            params.append(task_id)
+        if project_id:
+            where.append("(" + " OR ".join(
+                "instr(' ' || audit.detail || ' ', ' " + key + "=' || ? || ' ') > 0"
+                for key in ("project", "source_project", "target_project"))
+                + " OR instr(audit.detail, 'channel=' || ? || ':') > 0"
+                + " OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=audit.task_id "
+                  "AND json_extract(t.data, '$.project_id')=?))")
+            params.extend([project_id] * 5)
+        if q:
+            where.append("(instr(lower(action), lower(?)) > 0 "
+                         "OR instr(lower(detail), lower(?)) > 0)")
+            params.extend([q, q])
+        if before_id is not None:
+            where.append("id < ?")
+            params.append(before_id)
+        sql = "SELECT * FROM audit"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = self._query(sql + " ORDER BY id DESC LIMIT ?",
+                           (*params, limit))
         return [dict(r) for r in rows]
 
     # ---- Agent Tool 身份令牌 ----
@@ -870,12 +892,9 @@ class Store:
         if c.is_general:
             c.archived = False
             c.archived_at = 0.0
+        # 只存频道本身:Task 的频道绑定只由显式操作写入(创建/编辑/派发),
+        # 保存任何频道都不会把未绑定的 Task(如数据源同步来的)挂到它上面
         self._put("channels", c.id, c.to_dict())
-        if not c.archived:
-            for task in self.list_tasks():
-                if task.project_id == c.project_id and not task.channel_ids:
-                    task.channel_ids = [c.id]
-                    self.put_task(task)
 
     def get_channel(self, id: str) -> Optional[Channel]:
         d = self._get("channels", id)
@@ -1131,11 +1150,20 @@ class Store:
                 (json.dumps(data, ensure_ascii=False), id))
 
     def start_automation_run(self, automation_id: str, project_id: str,
-                             trigger: str) -> int:
+                             trigger: str, trigger_detail: str = "") -> int:
         return self._execute(
             "INSERT INTO automation_runs(automation_id,project_id,trigger,"
-            "status,started_at) VALUES(?,?,?,'running',?)",
-            (automation_id, project_id, trigger, time.time()),
+            "trigger_detail,status,started_at) VALUES(?,?,?,?,'running',?)",
+            (automation_id, project_id, trigger, trigger_detail, time.time()),
+        )
+
+    def prune_automation_runs(self, cutoff: float) -> None:
+        """删除 cutoff 之前开始的运行记录;每个脚本最近一条始终保留,
+        低频脚本过了保留期也能看到上一次的结果。"""
+        self._execute(
+            "DELETE FROM automation_runs WHERE started_at<? AND id NOT IN "
+            "(SELECT MAX(id) FROM automation_runs GROUP BY automation_id)",
+            (cutoff,),
         )
 
     def finish_automation_run(self, run_id: int, status: str,
@@ -1153,14 +1181,23 @@ class Store:
             "SELECT * FROM automation_runs WHERE id=?", (run_id,))
         return dict(rows[0]) if rows else None
 
-    def list_automation_runs(self, automation_id: str,
-                             limit: int = 20) -> list[dict]:
+    def list_automation_runs(self, automation_id: str, limit: int = 20,
+                             before_id: int = 0) -> list[dict]:
+        """按 id 倒序取最近 limit 条;before_id>0 时只取更早的记录,用于向前翻页。"""
+        condition = "AND id<? " if before_id > 0 else ""
+        limit = max(1, min(int(limit), 200))
+        params = ((automation_id, before_id, limit) if before_id > 0
+                  else (automation_id, limit))
         rows = self._query(
-            "SELECT * FROM automation_runs WHERE automation_id=? "
-            "ORDER BY id DESC LIMIT ?",
-            (automation_id, max(1, min(int(limit), 200))),
-        )
+            f"SELECT * FROM automation_runs WHERE automation_id=? {condition}"
+            "ORDER BY id DESC LIMIT ?", params)
         return [dict(row) for row in rows]
+
+    def count_automation_runs(self, automation_id: str) -> int:
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id=?",
+            (automation_id,))
+        return int(rows[0]["n"]) if rows else 0
 
     # ---- 聊天:消息 ----
     def add_message(self, channel: str, author: str, author_type: str, content: str,

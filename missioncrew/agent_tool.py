@@ -118,7 +118,11 @@ def _build_parser() -> argparse.ArgumentParser:
     call.add_argument("action")
     call.add_argument("--run-id", type=int, default=None,
                       help=argparse.SUPPRESS)
-    call.add_argument("--arguments", default="{}", help="JSON object")
+    source = call.add_mutually_exclusive_group()
+    source.add_argument("--arguments", default=None, help="JSON object")
+    # 大载荷(如整批同步卡片)超出单个命令行参数的长度上限时改从文件或 stdin 读
+    source.add_argument("--arguments-file", default=None,
+                        help="read the JSON object from a file; - reads stdin")
 
     message = subparsers.add_parser("publish-message", help="Publish a channel message.")
     message.add_argument("--run-id", type=int, default=None,
@@ -137,6 +141,17 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _call_arguments(args: argparse.Namespace) -> str:
+    if args.arguments_file is None:
+        return args.arguments or "{}"
+    if args.arguments_file == "-":
+        return sys.stdin.read()
+    try:
+        return Path(args.arguments_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"无法读取参数文件 {args.arguments_file}: {exc}") from exc
+
+
 def _local_error(message: str) -> dict:
     return {
         "ok": False,
@@ -153,7 +168,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.command == "actions":
             status, result = _request_json("GET")
         elif args.command == "call":
-            arguments = json.loads(args.arguments)
+            arguments = json.loads(_call_arguments(args))
             if not isinstance(arguments, dict):
                 raise ValueError("--arguments 必须是 JSON 对象")
             status, result = _request_json(

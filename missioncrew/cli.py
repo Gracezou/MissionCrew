@@ -12,6 +12,7 @@ import yaml
 
 from .runtime import runtime_manager
 from .core import seed as seed_mod
+from .collab.channels import channel_short_id
 from .collab.chat import ChatEngine
 from .collab.recycle_bin import recycle_task
 from .collab.tasks import add_task_brief, create_task, dispatch_task
@@ -40,6 +41,7 @@ app.add_typer(role_app, name="role")
 # 环境变量 MISSIONCREW_HOST(便于 pm2 等托管方式不改命令行)。
 DEFAULT_SERVE_HOST = "127.0.0.1"
 DEFAULT_SERVE_PORT = 8321
+DEFAULT_WEBHOOK_PORT = 8322
 
 
 def _store() -> Store:
@@ -61,9 +63,11 @@ def _fmt_ts(ts: float) -> str:
 
 def _print_task(t: Task) -> None:
     typer.echo(f"[{t.id}] {t.title}")
-    typer.echo(f"  项目={t.project_id} 状态={t.status}")
+    typer.echo(f"  项目={t.project_id} 数据源={t.source_id} 状态={t.status}")
     typer.echo(f"  频道={', '.join(t.channel_ids)} 标签={', '.join(t.labels) or '-'}")
     typer.echo(f"  简介={t.summary or '-'}")
+    if t.external_id or t.url:
+        typer.echo(f"  外部条目={t.external_id or '-'} 链接={t.url or '-'}")
     if t.body:
         typer.echo(f"\n{t.body}")
 
@@ -92,7 +96,7 @@ def demo(run: bool = typer.Option(True, help="是否顺带演示 Channel 派发"
         labels=["bug"], channel_ids=[],
     )
     sent, _ = dispatch_task(store, chat, task)
-    typer.echo(f"\nTask {task.id} 已发送到 {len(sent)} 个 Channel 的项目主控。")
+    typer.echo(f"\nTask {task.id} 已发送到 Channel {sent[0]['channel_id']} 的项目主控。")
     chat.wait_idle()
     for m in store.list_messages(task.channel_ids[0]):
         who = f"@{m['author']}" if m["author_type"] == "agent" else m["author"]
@@ -105,16 +109,28 @@ def demo(run: bool = typer.Option(True, help="是否顺带演示 Channel 派发"
 
 @app.command()
 def serve(host: Optional[str] = None, port: int = DEFAULT_SERVE_PORT,
-          chat_workers: Optional[int] = None):
-    """启动 Web 服务(REST API + 看板)。
+          chat_workers: Optional[int] = None,
+          webhook_host: Optional[str] = None,
+          webhook_port: Optional[int] = None):
+    """启动 Web 服务(REST API + 看板)与专用 webhook 端口。
 
     平台不提供身份验证,默认只监听本机 127.0.0.1;需要局域网访问时显式传
     --host 0.0.0.0(或设置 MISSIONCREW_HOST),并只在可信网络中使用。
     --chat-workers 设定聊天执行并发上限(默认 16,亦可用环境变量
     MISSIONCREW_CHAT_MAX_WORKERS 配置);同频道同角色仍按会话串行。
+    webhook 端口只接收自动化脚本的 webhook 投递(默认 8322,0 = 关闭;亦可用
+    MISSIONCREW_WEBHOOK_PORT),监听地址默认同 --host(MISSIONCREW_WEBHOOK_HOST
+    可单独指定)。对外暴露时只转发这个端口,不要暴露主服务端口。
     """
     import uvicorn
     host = host or os.environ.get("MISSIONCREW_HOST") or DEFAULT_SERVE_HOST
+    webhook_host = (webhook_host or os.environ.get("MISSIONCREW_WEBHOOK_HOST")
+                    or host)
+    if webhook_port is None:
+        raw_port = os.environ.get("MISSIONCREW_WEBHOOK_PORT", "").strip()
+        webhook_port = int(raw_port) if raw_port else DEFAULT_WEBHOOK_PORT
+    if webhook_port and webhook_port == port:
+        raise typer.BadParameter("webhook 端口不能与主服务端口相同")
     from .api import create_app
     # Runtime 总是经本机回环访问 Agent Tool API；监听地址可继续面向所有网卡。
     os.environ["MISSIONCREW_AGENT_TOOL_URL"] = (
@@ -122,7 +138,11 @@ def serve(host: Optional[str] = None, port: int = DEFAULT_SERVE_PORT,
     if chat_workers is not None:
         os.environ["MISSIONCREW_CHAT_MAX_WORKERS"] = str(chat_workers)
     typer.echo(f"MissionCrew 看板: http://{host}:{port}")
-    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+    if webhook_port:
+        typer.echo(f"Webhook 入口: http://{webhook_host}:{webhook_port}"
+                   "/hooks/<项目>/<脚本>")
+    uvicorn.run(create_app(webhook_host=webhook_host, webhook_port=webhook_port),
+                host=host, port=port, log_level="warning")
 
 
 @app.command()
@@ -287,7 +307,10 @@ def chat_send(content: str = typer.Argument(..., help="消息内容；@[角色] 
     chat = ChatEngine(store)
     msgs = store.list_messages(cid)
     before = msgs[-1]["id"] if msgs else 0
-    chat.post(cid, author, content)
+    try:
+        chat.post(cid, author, content)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
     if wait:
         chat.wait_idle()
     for m in store.list_messages(cid, after_id=before):
@@ -316,7 +339,7 @@ def chat_channels(create: Optional[str] = typer.Option(None, help="创建频道�
     if create:
         if not project or store.get_project(project) is None:
             raise typer.BadParameter("创建频道必须用 --project 指定已存在的项目")
-        cid = f"{project}:{create}"
+        cid = f"{project}:{channel_short_id(create)}"
         store.put_channel(Channel(id=cid, name=create, project_id=project,
                                   workdir=workdir))
         typer.echo(f"频道已创建: {cid}")
@@ -397,30 +420,46 @@ def task_create(project: str = typer.Option(..., "-p", "--project"),
                 label: list[str] = typer.Option([], "-l", "--label"),
                 channel: list[str] = typer.Option([], "-c", "--channel"),
                 status: Optional[str] = typer.Option(
-                    None, help="状态文本,如 待处理/处理中/已阻塞/已完成"),
-                process: bool = typer.Option(False, help="创建后发送给绑定 Channel 的主控")):
+                    None, help="状态文本,如 待处理/处理中/已阻塞/已完成;缺省为数据源第一个状态"),
+                source: Optional[str] = typer.Option(
+                    None, help="数据源短 id;缺省为内置源 built-in"),
+                url: Optional[str] = typer.Option(None, help="外部条目链接"),
+                meta: list[str] = typer.Option([], help="看板卡片附注,可重复"),
+                external_id: Optional[str] = typer.Option(
+                    None, help="外部条目 id,同源唯一;自定义源的整体同步按它匹配"),
+                process: bool = typer.Option(False, help="创建后发送给首个绑定 Channel 的主控")):
     store = _store()
-    task = create_task(
-        store, project, title=title, summary=summary, body=body,
-        labels=list(label), channel_ids=list(channel), status=status,
-    )
+    try:
+        task = create_task(
+            store, project, title=title, summary=summary, body=body,
+            labels=list(label), channel_ids=list(channel), status=status,
+            source=source, url=url, meta=list(meta), external_id=external_id,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
     typer.echo(f"任务已创建: {task.id}")
     if process:
         sent, _ = dispatch_task(store, ChatEngine(store), task)
-        typer.echo(f"已派发到 {len(sent)} 个 Channel")
+        typer.echo(f"已派发到 Channel {sent[0]['channel_id']}")
     _print_task(task)
 
 
 @task_app.command("process")
 def task_process(task_id: str,
-                 message: str = typer.Option("", "-m", "--message")):
-    """在每个绑定 Channel 中通知项目主控处理 Task。"""
+                 message: str = typer.Option("", "-m", "--message"),
+                 channel: str = typer.Option(
+                     "", "-c", "--channel", help="接收频道,缺省为首个绑定频道")):
+    """在一个 Channel 中通知项目主控处理 Task。"""
     store = _store()
     task = store.get_task(task_id)
     if task is None:
         raise typer.BadParameter("任务不存在")
-    sent, _ = dispatch_task(store, ChatEngine(store), task, message=message)
-    typer.echo(f"已派发到 {len(sent)} 个 Channel")
+    try:
+        sent, _ = dispatch_task(store, ChatEngine(store), task,
+                                message=message, channel_id=channel)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
+    typer.echo(f"已派发到 Channel {sent[0]['channel_id']}")
 
 
 @task_app.command("brief")

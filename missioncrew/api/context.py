@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException, Request, Response
 
@@ -23,12 +24,34 @@ from ..collab.workspace import (migrate_legacy_workspace_layout,
                                 purge_channel_workspaces)
 from ..core import seed as seed_mod
 from ..core.config import db_path
-from ..core.models import Channel, Project
+from ..core.models import MENTION_ID_RE, Channel, Project
 from ..core.store import Store
 from ..runtime import runtime_manager
 from ..runtime.role_usage_linkage import RoleUsageLinkage
 
-MENTION_ID_RE = re.compile(r"[\w-]+")
+if TYPE_CHECKING:   # 只为类型标注;webhooks 模块反过来依赖本模块
+    from .webhooks import WebhookListener
+
+_AUDIT_CREDENTIAL = re.compile(
+    r"(?i)\b((?:api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"token|secret|password|passwd|authorization|cookie|credential|"
+    r"client[_-]?secret|webhook[_-]?secret)"
+    r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
+_AUDIT_AUTHORIZATION = re.compile(
+    r"(?i)\bAuthorization\s*[:=]\s*(?:(?:Bearer|Basic|Token)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
+_AUDIT_BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;&]+")
+_AUDIT_URL_CREDENTIAL = re.compile(r"://[^\s/@:]+:[^\s/@]+@")
+
+
+def redact_audit_detail(detail: str) -> str:
+    """仅在 HTTP 出口遮盖凭据；存储与本机 CLI 保留原始排错信息。"""
+    detail = _AUDIT_AUTHORIZATION.sub("Authorization: [已隐藏]", detail)
+    detail = _AUDIT_BEARER.sub("Bearer [已隐藏]", detail)
+    detail = _AUDIT_CREDENTIAL.sub(r"\1[已隐藏]", detail)
+    return _AUDIT_URL_CREDENTIAL.sub("://[已隐藏]@", detail)
 
 
 def etag_json_response(request: Request, payload) -> Response:
@@ -51,6 +74,8 @@ class ApiContext:
     role_usage_linkage: RoleUsageLinkage | None = None
     automations: AutomationService | None = None
     automation_scheduler: AutomationScheduler | None = None
+    # 专用 webhook 端口的监听器(api/webhooks.py);mc serve 启用时才有
+    webhook_listener: Optional["WebhookListener"] = None
     # 更新互斥与"更新中"标记:与 ChatEngine 共享同一集合,更新期间不派发该后端
     updating_backends: set[str] = field(default_factory=set)
     updating_guard: threading.Lock = field(default_factory=threading.Lock)
@@ -58,6 +83,7 @@ class ApiContext:
     # 一条缓存同时存模型目录与按模型的推理力度档位——两者来自同一次探测。
     model_catalog_cache: dict[
         str, tuple[float, list[str], dict[str, list[str]]]] = field(default_factory=dict)
+    model_catalog_refreshing: set[str] = field(default_factory=set)
     model_catalog_guard: threading.Lock = field(default_factory=threading.Lock)
 
     @classmethod
@@ -95,7 +121,11 @@ class ApiContext:
         ctx = cls(store=store, chat=ChatEngine(store))
         ctx.chat.updating_backends = ctx.updating_backends
         ctx.automations = AutomationService(store, ctx.chat.agent_tools)
+        ctx.chat.agent_tools.bind_automation_trigger(ctx.automations.trigger)
         ctx.automation_scheduler = AutomationScheduler(store, ctx.automations)
+        # 长时间没再运行的脚本也要按期清理运行记录
+        ctx.automation_scheduler.register_system_job(
+            "automation-runs-prune", "0 * * * *", ctx.automations.prune_runs)
         ctx.role_usage_linkage = RoleUsageLinkage(
             store,
             lambda refresh=True, backend_ids=None: runtime_manager.account_usage(
@@ -103,6 +133,8 @@ class ApiContext:
                  if backend_ids is None or backend.id in backend_ids],
                 refresh=refresh),
         )
+        ctx.chat.agent_tools.bind_role_config(
+            ctx.discovered_catalog, ctx.role_usage_linkage.role_updated)
         return ctx
 
     def discovered_catalog(self, backend, refresh: bool = False
@@ -124,6 +156,50 @@ class ApiContext:
 
     def discovered_models(self, backend, refresh: bool = False) -> list[str]:
         return self.discovered_catalog(backend, refresh=refresh)[0]
+
+    def role_model_warnings(self, roles) -> dict[tuple[str, str], dict]:
+        """只读现有目录缓存;冷缓存时后台刷新,本次请求不等待探测。"""
+        backends = {backend.id: backend for backend in self.store.list_backends()}
+        catalogs = {}
+        warnings = {}
+        for role in roles:
+            backend = backends.get(role.runtime_id)
+            if backend is None or not backend.enabled or not role.model:
+                continue
+            if backend.id not in catalogs:
+                with self.model_catalog_guard:
+                    cached = self.model_catalog_cache.get(backend.id)
+                    if not cached or time.time() - cached[0] >= 600:
+                        if backend.id not in self.model_catalog_refreshing:
+                            self.model_catalog_refreshing.add(backend.id)
+                            threading.Thread(
+                                target=self._refresh_role_model_catalog,
+                                args=(backend,), daemon=True).start()
+                        cached = None
+                if cached is None:
+                    continue
+                discovered = cached[1]
+                catalogs[backend.id] = (discovered, list(dict.fromkeys(
+                    model for model in [*backend.models, *discovered] if model)))
+            discovered, models = catalogs[backend.id]
+            if discovered and role.model not in models:
+                warnings[(role.project_id, role.id)] = {
+                    "message": f"模型 {role.model} 不在 {backend.id} 当前清单中",
+                    "models": models,
+                }
+        return warnings
+
+    def _refresh_role_model_catalog(self, backend) -> None:
+        try:
+            models, efforts = runtime_manager.list_model_catalog(backend)
+            with self.model_catalog_guard:
+                self.model_catalog_cache[backend.id] = (time.time(), models, efforts)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Runtime model catalog refresh failed for %s", backend.id)
+        finally:
+            with self.model_catalog_guard:
+                self.model_catalog_refreshing.discard(backend.id)
 
     def discovered_model_efforts(self, backend, refresh: bool = False
                                  ) -> dict[str, list[str]]:

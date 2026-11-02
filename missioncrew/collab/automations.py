@@ -2,15 +2,18 @@
 
 脚本由主控(automation.save)或人类(Web/API)维护,内容持久化在平台数据库;
 执行时落盘到平台数据目录并以子进程运行,通过一次性签发的 automation token
-调用 Agent Tool API,动作范围受脚本自身的 actions 白名单约束。
+调用 Agent Tool API,动作范围受脚本自身的 actions 白名单约束。触发来源有
+cron、webhook(见 webhooks.py)与手动三种,经 MISSIONCREW_TRIGGER 告诉脚本。
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import os
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,9 +24,16 @@ from ..core.config import mc_home
 from ..core.cron import next_cron_time, validate_cron
 from ..core.models import Automation
 from ..core.store import Store
+from .webhooks import new_webhook_secret
 
 # 单次运行 stdout/stderr 各自的持久化上限;超出部分保留尾部(更接近失败现场)
 AUTOMATION_OUTPUT_LIMIT = 20000
+# 运行记录按时间保留(每个脚本最近一条除外),不限条数
+AUTOMATION_RUNS_RETENTION_SECONDS = 7 * 24 * 3600
+# 脚本运行期间到达的 webhook 事件在内存里排队的上限;服务重启时丢弃
+WEBHOOK_QUEUE_LIMIT = 20
+# webhook 事件文件名,位于脚本工作目录,运行结束即删除
+WEBHOOK_EVENT_FILE = ".webhook-event.json"
 
 
 def _clip_output(text: str) -> str:
@@ -46,6 +56,7 @@ def save_automation(store: Store, project_id: str, *, id: str,
                     script: Optional[str] = None,
                     cron: Optional[str] = None,
                     enabled: Optional[bool] = None,
+                    webhook: Optional[bool] = None,
                     actions: Optional[list] = None,
                     timeout_seconds: Optional[int] = None,
                     actor: str = "human",
@@ -81,6 +92,13 @@ def save_automation(store: Store, project_id: str, *, id: str,
         if not isinstance(enabled, bool):
             raise ValueError("enabled 必须是布尔值")
         automation.enabled = enabled
+    if webhook is not None:
+        if not isinstance(webhook, bool):
+            raise ValueError("webhook 必须是布尔值")
+        automation.webhook = webhook
+        # 首次开启时生成密钥;关闭后保留,重新开启时外部系统的配置仍然有效
+        if webhook and not automation.webhook_secret:
+            automation.webhook_secret = new_webhook_secret()
     if actions is not None:
         if (not isinstance(actions, list)
                 or not all(isinstance(item, str) for item in actions)):
@@ -99,8 +117,18 @@ def save_automation(store: Store, project_id: str, *, id: str,
     store.audit(actor, "automation_saved",
                 detail=f"project={project_id} automation={automation.id} "
                        f"cron={automation.cron or '(manual)'} "
-                       f"enabled={automation.enabled}")
+                       f"enabled={automation.enabled} webhook={automation.webhook}")
     return automation, created
+
+
+def rotate_webhook_secret(store: Store, automation: Automation,
+                          actor: str = "human") -> Automation:
+    """换一个新密钥;外部系统要同步改成新值,旧密钥签名的投递随即被拒。"""
+    automation.webhook_secret = new_webhook_secret()
+    store.put_automation(automation)
+    store.audit(actor, "automation_webhook_secret_rotated",
+                detail=f"project={automation.project_id} automation={automation.id}")
+    return automation
 
 
 def delete_automation(store: Store, agent_tools: AgentActionService,
@@ -123,7 +151,12 @@ def automation_workdir(automation: Automation) -> Path:
 
 
 class AutomationService:
-    """脚本运行入口:并发去重、运行记录、token 签发与回收。"""
+    """脚本运行入口:并发去重、webhook 排队、运行记录、token 签发与回收。
+
+    同一脚本同时只跑一次。cron 与手动触发撞上正在运行时直接拒绝;webhook
+    投递不能丢,先在内存里排队(每个脚本最多 WEBHOOK_QUEUE_LIMIT 条),本次
+    结束后按到达顺序接着跑,脚本以最新定义为准。
+    """
 
     def __init__(self, store: Store, agent_tools: AgentActionService):
         self.store = store
@@ -131,11 +164,17 @@ class AutomationService:
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="automation")
         self._running: set[str] = set()
+        self._pending: dict[str, deque[dict]] = {}
         self._guard = threading.Lock()
 
     def running_ids(self) -> set[str]:
         with self._guard:
             return set(self._running)
+
+    def prune_runs(self) -> None:
+        """清掉超出保留期的运行记录;每次运行结束和每小时的系统任务都会调用。"""
+        self.store.prune_automation_runs(
+            time.time() - AUTOMATION_RUNS_RETENTION_SECONDS)
 
     def trigger(self, automation: Automation, trigger: str = "manual") -> int:
         """启动一次后台运行并返回运行记录 id;同一脚本不并发。"""
@@ -144,48 +183,114 @@ class AutomationService:
                 raise ValueError("该脚本上一次运行尚未结束")
             self._running.add(automation.id)
         try:
-            run_id = self.store.start_automation_run(
-                automation.id, automation.project_id, trigger)
-            self.store.touch_automation_run_state(automation.id, "running")
-            self.store.audit(
-                "platform", "automation_run_started",
-                detail=(f"project={automation.project_id} "
-                        f"automation={automation.id} trigger={trigger} "
-                        f"run={run_id}"))
-            self._pool.submit(self._execute, automation, run_id)
+            return self._launch(automation, trigger, None)
         except Exception:
             with self._guard:
                 self._running.discard(automation.id)
             raise
+
+    def trigger_webhook(self, automation: Automation, event: dict) -> Optional[int]:
+        """webhook 投递触发:空闲时立即运行并返回运行记录 id,运行中则排队返回 None。"""
+        with self._guard:
+            if automation.id in self._running:
+                queue = self._pending.setdefault(automation.id, deque())
+                if len(queue) >= WEBHOOK_QUEUE_LIMIT:
+                    raise ValueError("该脚本排队的 webhook 事件已满,请稍后重试")
+                queue.append(event)
+                return None
+            self._running.add(automation.id)
+        try:
+            return self._launch(automation, "webhook", event)
+        except Exception:
+            with self._guard:
+                self._running.discard(automation.id)
+            raise
+
+    def _launch(self, automation: Automation, trigger: str,
+                event: Optional[dict]) -> int:
+        """建运行记录并提交执行;调用方已把脚本登记为运行中。"""
+        detail = ""
+        if event is not None:
+            detail = " ".join(part for part in (
+                event.get("provider"), event.get("event"), event.get("delivery")) if part)
+        run_id = self.store.start_automation_run(
+            automation.id, automation.project_id, trigger, detail)
+        self.store.touch_automation_run_state(automation.id, "running")
+        self.store.audit(
+            "platform", "automation_run_started",
+            detail=(f"project={automation.project_id} "
+                    f"automation={automation.id} trigger={trigger} "
+                    f"run={run_id}" + (f" event={detail}" if detail else "")))
+        self._pool.submit(self._execute, automation, run_id, trigger, event)
         return run_id
 
-    def _execute(self, automation: Automation, run_id: int) -> None:
+    def _execute(self, automation: Automation, run_id: int, trigger: str,
+                 event: Optional[dict]) -> None:
         try:
-            status, exit_code, stdout, stderr, error = self._run_script(automation)
+            status, exit_code, stdout, stderr, error = self._run_script(
+                automation, trigger, event)
         except Exception as exc:   # 平台侧异常也要落进运行记录,不能无声丢失
             status, exit_code, stdout, stderr, error = (
                 "failed", None, "", "", f"平台执行脚本失败: {exc}")
+        try:
+            # 先更新脚本的最近状态再结束运行记录:看到运行已结束的读者
+            # (页面、Agent、测试)读到的 last_status 一定已是本次结果
+            self.store.touch_automation_run_state(automation.id, status)
+            self.store.finish_automation_run(
+                run_id, status, exit_code=exit_code,
+                stdout=_clip_output(stdout), stderr=_clip_output(stderr),
+                error=error)
+            self.prune_runs()
+            self.store.audit(
+                "platform", "automation_run_finished",
+                detail=(f"project={automation.project_id} "
+                        f"automation={automation.id} run={run_id} "
+                        f"status={status} exit={exit_code}"))
         finally:
-            with self._guard:
-                self._running.discard(automation.id)
-        self.store.finish_automation_run(
-            run_id, status, exit_code=exit_code,
-            stdout=_clip_output(stdout), stderr=_clip_output(stderr),
-            error=error)
-        self.store.touch_automation_run_state(automation.id, status)
-        self.store.audit(
-            "platform", "automation_run_finished",
-            detail=(f"project={automation.project_id} "
-                    f"automation={automation.id} run={run_id} "
-                    f"status={status} exit={exit_code}"))
+            self._release(automation.id)
 
-    def _run_script(self, automation: Automation
+    def _release(self, automation_id: str) -> None:
+        """本次运行结束:有排队的 webhook 事件就接着跑下一个,否则解除运行中。"""
+        while True:
+            with self._guard:
+                queue = self._pending.get(automation_id)
+                event = queue.popleft() if queue else None
+                if queue is not None and not queue:
+                    self._pending.pop(automation_id, None)
+                if event is None:
+                    self._running.discard(automation_id)
+                    return
+            # 排队期间脚本可能被改、关掉 webhook 或删除:按最新定义决定
+            automation = self.store.get_automation(automation_id)
+            if automation is None:
+                reason = "脚本已删除"
+            elif not automation.webhook:
+                reason = "webhook 已关闭"
+            else:
+                try:
+                    self._launch(automation, "webhook", event)
+                    return
+                except Exception as exc:
+                    reason = f"启动失败: {exc}"
+            self.store.audit(
+                "platform", "automation_webhook_dropped",
+                detail=f"project={automation_id.partition(':')[0]} "
+                       f"automation={automation_id} delivery={event.get('delivery', '')} "
+                       f"reason={reason}")
+
+    def _run_script(self, automation: Automation, trigger: str = "manual",
+                    event: Optional[dict] = None
                     ) -> tuple[str, Optional[int], str, str, str]:
         workdir = automation_workdir(automation)
         workdir.mkdir(parents=True, exist_ok=True)
         script_path = workdir / "script"
         script_path.write_text(automation.script, encoding="utf-8")
         script_path.chmod(0o700)
+        event_file = workdir / WEBHOOK_EVENT_FILE
+        event_file.unlink(missing_ok=True)   # 不让上一次的事件残留给非 webhook 运行
+        if event is not None:
+            event_file.touch(mode=0o600)
+            event_file.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
 
         token = self.agent_tools.issue_automation_token(
             automation, automation.timeout_seconds + 300)
@@ -201,7 +306,18 @@ class AutomationService:
             "MISSIONCREW_AGENT_TOOL_PYTHON": sys.executable,
             "MISSIONCREW_PROJECT_ID": automation.project_id,
             "MISSIONCREW_AUTOMATION_ID": automation.id,
+            "MISSIONCREW_TRIGGER": trigger,
         })
+        for key in ("MISSIONCREW_WEBHOOK_EVENT_FILE", "MISSIONCREW_WEBHOOK_PROVIDER",
+                    "MISSIONCREW_WEBHOOK_EVENT", "MISSIONCREW_WEBHOOK_DELIVERY"):
+            env.pop(key, None)
+        if event is not None:
+            env.update({
+                "MISSIONCREW_WEBHOOK_EVENT_FILE": str(event_file),
+                "MISSIONCREW_WEBHOOK_PROVIDER": str(event.get("provider") or ""),
+                "MISSIONCREW_WEBHOOK_EVENT": str(event.get("event") or ""),
+                "MISSIONCREW_WEBHOOK_DELIVERY": str(event.get("delivery") or ""),
+            })
         # 有 shebang 时按可执行文件运行(支持 python 等),否则统一交给 bash
         command = ([str(script_path)] if automation.script.startswith("#!")
                    else ["bash", str(script_path)])
@@ -216,6 +332,7 @@ class AutomationService:
         finally:
             self.agent_tools.revoke_automation_tokens(automation.id)
             token_file.unlink(missing_ok=True)
+            event_file.unlink(missing_ok=True)
         status = "succeeded" if completed.returncode == 0 else "failed"
         error = ("" if completed.returncode == 0
                  else f"脚本退出码 {completed.returncode}")
@@ -297,6 +414,7 @@ class AutomationScheduler:
 
     def _fire(self, key: str,
               payload: "Automation | Callable[[], None]") -> None:
+        project = f"project={payload.project_id} " if isinstance(payload, Automation) else ""
         try:
             if callable(payload):
                 payload()
@@ -305,10 +423,10 @@ class AutomationScheduler:
         except ValueError as exc:
             # 上一次运行未结束等业务性跳过,记审计不中断调度
             self.store.audit("platform", "automation_run_skipped",
-                             detail=f"job={key} reason={exc}")
+                             detail=f"{project}job={key} reason={exc}")
         except Exception as exc:
             self.store.audit("platform", "automation_schedule_failed",
-                             detail=f"job={key} error={exc}")
+                             detail=f"{project}job={key} error={exc}")
 
     def _run(self) -> None:
         while not self._stop.is_set():

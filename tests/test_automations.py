@@ -13,7 +13,9 @@ from missioncrew.collab.automations import (AutomationScheduler,
                                             AutomationService,
                                             delete_automation, save_automation)
 from missioncrew.collab.chat import ChatEngine
+from missioncrew.collab.tasks import update_task
 from missioncrew.core.cron import next_cron_time, parse_cron, validate_cron
+from missioncrew.core.models import BoardDataSource
 
 
 def _ts(*args) -> float:
@@ -162,6 +164,294 @@ def test_automation_token_scopes_and_message_publish(seeded):
     runs = seeded._query("SELECT role_id FROM chat_runs ORDER BY id")
     assert [row["role_id"] for row in runs] == ["dev"]
     assert result["dispatched"] == ["dev"]
+
+
+def test_board_source_sync_only_updates_what_cards_carry(seeded):
+    """同步按「带了才改、没带保留」合并:本地状态与属性不会被下一次同步冲掉。"""
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def sync(cards, request_id):
+        return tools.execute(identity, "board_source.save",
+                             {"id": "gh", "cards": cards}, None, request_id)["sync"]
+
+    issue = {"id": "7", "title": "退款后库存未回滚", "labels": ["bug", "order"],
+             "url": "https://github.com/acme/webshop/issues/7"}
+    assert sync([issue], "s1") == {"created": 1, "updated": 0, "removed": 0}
+    task = seeded.list_tasks("webshop", source_id="gh")[0]
+    assert task.labels == ["status: 待处理", "bug", "order"]   # 没带状态落第一列
+
+    # 本地推进:改状态、加属性
+    update_task(seeded, task, snapshot_updated_at=task.updated_at,
+                changes={"status": "待验证", "properties": {"owner": "dev"}})
+    stamp = seeded.get_task(task.id).updated_at
+
+    # 外部源没变:不写库(updated_at 不动,避免 task.update 版本冲突),本地改动保留
+    assert sync([issue], "s2") == {"created": 0, "updated": 0, "removed": 0}
+    task = seeded.get_task(task.id)
+    assert task.updated_at == stamp
+    assert task.labels == ["status: 待验证", "bug", "order", "owner: dev"]
+
+    # 外部源改标题、去掉 order、加 priority:普通标签整组替换,属性只动同名的
+    assert sync([{"id": "7", "title": "退款成功后库存没有回滚",
+                  "labels": ["bug", "priority: 高"]}], "s3")["updated"] == 1
+    task = seeded.get_task(task.id)
+    assert task.title == "退款成功后库存没有回滚"
+    assert task.url.endswith("/issues/7")   # 没带 url,保留
+    assert task.labels == ["status: 待验证", "bug", "owner: dev", "priority: 高"]
+
+    # 带了 status 才覆盖;properties 的 null 清空属性;已有任务可以不带 title
+    sync([{"id": "7", "status": "已完成", "properties": {"owner": None}}], "s4")
+    task = seeded.get_task(task.id)
+    assert task.title == "退款成功后库存没有回滚"
+    assert task.labels == ["status: 已完成", "bug", "priority: 高"]
+
+    # 新卡片必须带 title;检查发生在写库之前,已有任务不受影响
+    with pytest.raises(AgentToolError) as missing:
+        sync([{"id": "7", "status": "待处理"}, {"id": "8"}], "s5")
+    assert missing.value.code == "invalid_arguments"
+    assert seeded.get_task(task.id).status == "已完成"
+    assert [t.external_id for t in seeded.list_tasks(
+        "webshop", source_id="gh")] == ["7"]
+
+
+def test_custom_source_tasks_are_operated_like_builtin_ones(seeded, tmp_path):
+    """task.create 带 source 建进自定义源;整体同步只管同步来的任务,不碰手工任务。"""
+    from types import SimpleNamespace
+
+    from missioncrew.collab.board_sources import resolve_board_data
+    from missioncrew.collab.tasks import dispatch_task
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="pr-sync", script="true",
+        actions=["board_source.save", "task.create", "task.delete"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    call("board_source.save", {
+        "id": "pr-dev", "columns": [{"value": "正在开发"}, {"value": "需要审批"},
+                                    {"value": "已关闭"}],
+        "cards": [{"id": "pr-1", "title": "同步来的 PR"}]}, "s1")
+
+    # 没给状态落到该源第一个状态取值;不传 source 仍建在内置源
+    manual = call("task.create", {"title": "手工登记的 PR", "source": "pr-dev"},
+                  "c1")["task"]
+    assert manual["source_id"] == "pr-dev" and manual["external_id"] == ""
+    assert manual["labels"] == ["status: 正在开发"]
+    builtin = call("task.create", {"title": "内置任务"}, "c2")["task"]
+    assert builtin["source_id"] == "built-in"
+    assert builtin["labels"] == ["status: 待处理"]
+    with pytest.raises(AgentToolError) as unknown:
+        call("task.create", {"title": "x", "source": "nope"}, "c3")
+    assert unknown.value.code == "invalid_arguments"
+
+    # 整体同步只增删同步来的任务,手工任务不在 cards 里也保留
+    assert call("board_source.save", {"id": "pr-dev", "cards": []},
+                "s2")["sync"] == {"created": 0, "updated": 0, "removed": 1}
+    assert [t.id for t in seeded.list_tasks("webshop", source_id="pr-dev")] \
+        == [manual["id"]]
+
+    # 快照标明来源;看板卡片与内置任务一样带 id 附注
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{manual['id']}.md")
+    assert attributes["source"] == "pr-dev" and "external_id" not in attributes
+    data = resolve_board_data(seeded, "webshop", "pr-dev")
+    card = data["columns"][0]["cards"][0]
+    assert card["id"] == manual["id"] and card["meta"][0] == manual["id"]
+
+    # 该源没声明「处理中」:派发不改状态,卡片留在原来的状态列
+    sent, _brief = dispatch_task(seeded, SimpleNamespace(post=lambda *a, **k: 1),
+                                 seeded.get_task(manual["id"]))
+    assert sent and seeded.get_task(manual["id"]).status == "正在开发"
+    dispatch_task(seeded, SimpleNamespace(post=lambda *a, **k: 1),
+                  seeded.get_task(builtin["id"]))
+    assert seeded.get_task(builtin["id"]).status == "处理中"
+
+    # 单张删除进回收站,恢复后仍在原数据源
+    from missioncrew.collab.recycle_bin import restore_recycle_item
+
+    project = seeded.get_project("webshop")
+    item = call("task.delete", {"id": manual["id"]}, "d1")["recycle_item"]
+    assert seeded.get_task(manual["id"]) is None
+    restore_recycle_item(seeded, project, item["id"], actor="human")
+    assert seeded.get_task(manual["id"]).source_id == "pr-dev"
+
+
+def test_recycled_source_task_restore_conflicts(seeded):
+    """数据源已删除、或同一外部条目已被同步重建时,回收站恢复要拒绝。"""
+    from missioncrew.collab.recycle_bin import (RecycleConflictError,
+                                                restore_recycle_item)
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save", "board_source.delete", "task.create",
+                 "task.delete"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    project = seeded.get_project("webshop")
+    call("board_source.save", {"id": "gh", "cards": [{"id": "7", "title": "缺陷"}]}, "s1")
+    synced = seeded.list_tasks("webshop", source_id="gh")[0]
+    item = call("task.delete", {"id": synced.id}, "d1")["recycle_item"]
+    # 外部条目还在:下一次同步重建,旧任务再恢复就会出现两张同一条目的卡片
+    assert call("board_source.save", {"id": "gh", "cards": [{"id": "7", "title": "缺陷"}]},
+                "s2")["sync"]["created"] == 1
+    with pytest.raises(RecycleConflictError):
+        restore_recycle_item(seeded, project, item["id"], actor="human")
+
+    manual = call("task.create", {"title": "手工", "source": "gh"}, "c1")["task"]
+    item = call("task.delete", {"id": manual["id"]}, "d2")["recycle_item"]
+    call("board_source.delete", {"id": "gh"}, "x1")
+    with pytest.raises(ValueError, match="数据源已删除"):
+        restore_recycle_item(seeded, project, item["id"], actor="human")
+
+
+def test_api_creates_task_in_custom_source(seeded):
+    seeded.put_board_datasource(BoardDataSource(
+        id="webshop:pr-dev", project_id="webshop",
+        status_values=[{"value": "正在开发", "color": ""}]))
+    with TestClient(create_app()) as client:
+        created = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "PR", "source": "pr-dev"})
+        assert created.status_code == 200, created.text
+        assert created.json()["source_id"] == "pr-dev"
+        assert created.json()["labels"] == ["status: 正在开发"]
+        missing = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "PR", "source": "nope"})
+        assert missing.status_code == 400
+
+
+def test_task_create_records_external_item_matched_by_whole_sync(seeded, tmp_path):
+    """task.create/update 可写 url、meta、external_id(两类源同一口径);
+    带 external_id 登记的外部条目由整体同步按 id 接管,不会再建一张。"""
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="pr-sync", script="true",
+        actions=["board_source.save", "task.create", "task.update"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+
+    def call(action, arguments, request_id):
+        return tools.execute(identity, action, arguments, None, request_id)
+
+    call("board_source.save", {"id": "pr-dev", "columns": [{"value": "正在开发"}],
+                               "cards": [{"id": "1", "title": "已同步的 PR"}]}, "s1")
+    url = "https://github.com/acme/webshop/pull/42"
+    copied = call("task.create", {
+        "title": "先登记的 PR", "source": "pr-dev", "external_id": 42, "url": url,
+        "meta": ["#42", "@alice"], "status": "正在开发"}, "c1")["task"]
+    assert (copied["external_id"], copied["url"], copied["meta"]) == ("42", url, ["#42", "@alice"])
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{copied['id']}.md")
+    assert (attributes["external_id"], attributes["url"]) == ("42", url)
+
+    # 同源重复登记返回已有任务;别的源(含内置源)可以用同一个 id,内置源内同样唯一
+    with pytest.raises(AgentToolError) as taken:
+        call("task.create", {"title": "又一张", "source": "pr-dev", "external_id": "42"}, "c2")
+    assert (taken.value.code, taken.value.status_code) == ("already_exists", 409)
+    assert taken.value.details["task"]["id"] == copied["id"]
+    builtin = call("task.create", {"title": "内置条目", "external_id": "42", "url": url}, "c3")
+    assert builtin["task"]["source_id"] == "built-in"
+    with pytest.raises(AgentToolError):
+        call("task.create", {"title": "内置重复", "external_id": "42"}, "c4")
+
+    # 下一次整体同步按 external_id 接管这张任务:更新卡片带的字段,不再新建
+    sync = call("board_source.save", {"id": "pr-dev", "cards": [
+        {"id": "1", "title": "已同步的 PR"},
+        {"id": "42", "title": "同步来的 PR 42"}]}, "s2")["sync"]
+    assert sync == {"created": 0, "updated": 1, "removed": 0}
+    task = seeded.get_task(copied["id"])
+    assert task.title == "同步来的 PR 42" and task.meta == ["#42", "@alice"]
+    assert task.status == "正在开发"
+
+    # task.update 同样能改这些字段;改成已被占用的 id 冲突,空串去掉同步键
+    def update(changes, request_id):
+        current = seeded.get_task(copied["id"])
+        return call("task.update", {"id": current.id,
+                                    "snapshot_updated_at": current.updated_at,
+                                    **changes}, request_id)["task"]
+
+    assert update({"url": url + "#c", "meta": []}, "u1")["meta"] == []
+    with pytest.raises(AgentToolError) as clash:
+        update({"external_id": "1"}, "u2")
+    assert clash.value.code == "already_exists"
+    assert seeded.get_task(copied["id"]).external_id == "42"
+    assert update({"external_id": ""}, "u3")["external_id"] == ""
+    # 去掉同步键后整体同步不再管它:不在 cards 里也保留
+    call("board_source.save", {"id": "pr-dev", "cards": []}, "s3")
+    assert [t.id for t in seeded.list_tasks("webshop", source_id="pr-dev")] == [copied["id"]]
+
+
+def test_api_task_external_fields_and_conflict(seeded):
+    with TestClient(create_app()) as client:
+        created = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "Issue 7", "external_id": "7",
+            "url": "https://example.com/issues/7", "meta": ["#7"]})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert (body["external_id"], body["meta"]) == ("7", ["#7"])
+        dup = client.post("/api/tasks", json={
+            "project_id": "webshop", "title": "Issue 7 again", "external_id": "7"})
+        assert dup.status_code == 409 and body["id"] in dup.json()["detail"]
+        edited = client.patch(f"/api/tasks/{body['id']}", json={
+            "snapshot_updated_at": body["updated_at"], "url": "", "meta": ["改过"]})
+        assert edited.status_code == 200, edited.text
+        assert (edited.json()["task"]["url"], edited.json()["task"]["meta"]) == ("", ["改过"])
+        # 网页编辑不带这些字段时保持原值
+        current = edited.json()["task"]
+        kept = client.patch(f"/api/tasks/{body['id']}", json={
+            "snapshot_updated_at": current["updated_at"], "title": "Issue 7 改名"})
+        assert kept.json()["task"]["external_id"] == "7"
+
+
+def test_synced_task_shows_original_link_and_rule_trigger_to_agents(seeded, tmp_path):
+    """同步任务的原始链接要进快照和派发消息;规则派发的触发行不能写成自动化脚本。"""
+    from missioncrew.collab.workspace import _parse_task_file, write_task_files
+
+    project = seeded.get_project("webshop")
+    project.task_auto_rules = [{"query": "bug", "role_ids": ["dev"],
+                                "prompt": "请分析并修复", "enabled": True}]
+    seeded.put_project(project)
+    chat = ChatEngine(seeded, max_workers=2)
+    tools = chat.agent_tools
+    automation, _ = save_automation(
+        seeded, "webshop", id="issue-sync", script="true",
+        actions=["board_source.save"])
+    identity = tools.authenticate(tools.issue_automation_token(automation, 600))
+    url = "https://github.com/acme/webshop/issues/7"
+    tools.execute(identity, "board_source.save", {"id": "gh", "cards": [
+        {"id": "#7", "title": "退款后库存未回滚", "labels": ["bug"], "url": url,
+         "meta": ["@alice"]}]}, None, "sync")
+    chat.wait_idle()
+
+    task = seeded.list_tasks("webshop", source_id="gh")[0]
+    write_task_files(seeded, "webshop", tmp_path)
+    attributes, _body = _parse_task_file(tmp_path / f"{task.id}.md")
+    assert attributes["source"] == "gh" and attributes["external_id"] == "#7"
+    assert attributes["url"] == url and attributes["meta"] == ["@alice"]
+
+    dispatch = next(m for m in seeded.list_messages("general")
+                    if m["author_type"] == "automation")
+    assert f"**原始链接**\n{url}" in dispatch["content"]
+    cfg = chat._assemble(seeded.get_channel("general"), seeded.get_role("webshop", "dev"),
+                         seeded.get_backend("std-1"), dispatch["id"])
+    assert ("# This Turn's Trigger: task dispatched by the project's automatic "
+            "task-handling rule") in cfg.turn_prompt
 
 
 def test_automation_refreshes_custom_board_source_and_board_binds_it(seeded):

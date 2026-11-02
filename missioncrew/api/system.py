@@ -1,15 +1,17 @@
 """总览与词表端点。
 
 总览分层:`/api/overview` 只返回全局数据(项目列表/后端/角色模板),
-项目内数据走 `/api/projects/{id}/overview`(角色/面板/自动化),
+项目内数据走 `/api/projects/{id}/overview`(角色/面板/数据源/自动化),
 频道与任务由各自模块提供带 scope 的按项目列表,按页面状态按需拉取。
 """
 from __future__ import annotations
 
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 
+from .. import __version__
+from ..collab import board_sources
 from ..collab.skills import sync_all_project_skill_libraries
 from ..collab.resource_urls import (automation_resource_url,
                                     dashboard_resource_url,
@@ -18,7 +20,7 @@ from ..collab.resource_urls import (automation_resource_url,
 from ..core.models import (BOARD_WIDGET_TYPES, ROLE_ABILITIES, TIER_ORDER,
                            text_fingerprint)
 from ..runtime import runtime_manager
-from .context import ApiContext, etag_json_response
+from .context import ApiContext, etag_json_response, redact_audit_detail
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -49,15 +51,20 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             ]
             return data
 
+        templates = store.list_role_templates()
+        warnings = ctx.role_model_warnings(templates)
         return etag_json_response(request, {
+            "version": __version__,
             "projects": [project_data(p) for p in store.list_projects()],
             "backends": [b.to_dict() for b in store.list_backends()],
-            "role_templates": [r.to_dict() for r in store.list_role_templates()],
+            "role_templates": [
+                {**r.to_dict(), "model_catalog_warning": warnings.get((r.project_id, r.id))}
+                for r in templates],
         })
 
     @app.get("/api/projects/{project_id}/overview")
     def project_overview(project_id: str, request: Request):
-        """项目内总览:角色(含限额停用状态)、面板、自动化。"""
+        """项目内总览:角色(含限额停用状态)、面板、数据源(状态取值与颜色)、自动化。"""
         ctx.must_project(project_id)
 
         usage_blocks = {
@@ -75,13 +82,19 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             data["usage_window_keys"] = block["window_keys"] if block else []
             return data
 
+        roles = store.list_roles(project_id)
+        warnings = ctx.role_model_warnings(roles)
         return etag_json_response(request, {
-            "roles": [role_data(r) for r in store.list_roles(project_id)],
+            "roles": [{**role_data(r),
+                       "model_catalog_warning": warnings.get((r.project_id, r.id))}
+                      for r in roles],
             "boards": [{**b.to_dict(),
                         "resource_url": dashboard_resource_url(project_id, b.id)}
                        for b in store.list_boards(project_id)],
+            "board_sources": board_sources.describe_sources(
+                store, project_id, stats=False),
             "automations": [
-                {**a.to_dict(),
+                {**a.public_dict(),
                  "resource_url": automation_resource_url(project_id, a.id)}
                 for a in store.list_automations(project_id)],
         })
@@ -99,7 +112,34 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     @app.get("/api/runtime/status")
     def runtime_status():
         """系统级 Runtime 实例快照；前端轮询实现实时状态页。"""
-        return runtime_manager.status(store.list_backends())
+        data = runtime_manager.status(store.list_backends())
+        roles = [*store.list_roles(), *store.list_role_templates()]
+        warnings = ctx.role_model_warnings(roles)
+        counts = {}
+        for role in roles:
+            if (role.project_id, role.id) in warnings:
+                counts[role.runtime_id] = counts.get(role.runtime_id, 0) + 1
+        for backend in data["backends"]:
+            backend["invalid_model_roles"] = counts.get(backend["id"], 0)
+        return data
+
+    @app.get("/api/audit")
+    def audit(project_id: str = "", q: str = "",
+              limit: int = Query(100, ge=1, le=500),
+              before_id: int | None = Query(None, ge=1)):
+        """按写入顺序读取审计；只返回展示字段，detail 在出口处脱敏。"""
+        rows = store.list_audit(
+            limit=limit + 1, project_id=project_id or None,
+            q=q.strip(), before_id=before_id)
+        return {
+            "entries": [
+                {"id": row["id"], "ts": row["ts"], "actor": row["actor"],
+                 "action": row["action"], "task_id": row["task_id"],
+                 "detail": redact_audit_detail(row["detail"])}
+                for row in rows[:limit]
+            ],
+            "has_more": len(rows) > limit,
+        }
 
     @app.get("/api/runtime/history")
     def runtime_history(limit: int = 100, backend_id: str = ""):

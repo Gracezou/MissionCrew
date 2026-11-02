@@ -54,7 +54,9 @@ function uiPrompt(message, { value = "", placeholder = "", title = "请输入" }
     setTimeout(() => document.getElementById("udlg-input")?.focus(), 60);
   });
 }
-function openFormDialog(title, bodyHtml, actionsHtml) {
+// size: "wide" 给规则编辑器这类左右分栏的表单加宽,其余表单保持默认宽度
+function openFormDialog(title, bodyHtml, actionsHtml, { size = "" } = {}) {
+  fdlg.classList.toggle("dlg-wide", size === "wide");
   document.getElementById("fdlg-title").textContent = title;
   document.getElementById("fdlg-body").innerHTML = bodyHtml;
   document.getElementById("fdlg-actions").innerHTML = actionsHtml;
@@ -240,7 +242,7 @@ function isNearScrollBottom(element, threshold = 40) {
 
 let overview = {
   projects: [], tasks: [], roles: [], role_templates: [],
-  channels: [], backends: [], boards: [], automations: [],
+  channels: [], backends: [], boards: [], board_sources: [], automations: [],
 };
 let currentProject = localStorage.getItem("mc.project") || null;
 let currentTab = "chat";
@@ -286,6 +288,9 @@ const projTasks = () => overview.tasks
   .sort((left, right) => taskActivity(right) - taskActivity(left)
     || String(left.id).localeCompare(String(right.id)));
 const projBoards = () => (overview.boards || []).filter(b => b.project_id === currentProject);
+// 数据源清单(内置 + 本项目自定义,含状态取值与颜色)随项目总览轮询下发
+const projBoardSources = () => overview.board_sources?.length ? overview.board_sources
+  : [{ id: "built-in", name: "项目任务", description: "" }];
 // 任务看板是平台内置面板：参与面板导航，但不进入自定义 Board 的 CRUD。
 const BUILTIN_TASK_PANEL = Object.freeze({
   id: "__missioncrew_tasks__", name: "任务看板", kind: "tasks", builtin: true,

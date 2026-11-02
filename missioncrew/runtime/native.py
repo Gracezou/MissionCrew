@@ -84,7 +84,9 @@ def emit_json(emit: Optional[Callable[[str, str], None]],
 # 留在各 provider:它们用自己的 {统一字段: 上报字段} 表调用 usage_section(),再经
 # build_usage() 组装成下面这份结构 emit;前端只认这一种,raw 原样保留上报内容。
 USAGE_SCHEMA = "usage/v1"
-# 区段字段(turn=本轮/最近一次请求,total=会话累计),缺失的字段不出现
+# 区段字段(turn=本轮/最近一次请求,total=会话累计),缺失的字段不出现。
+# 区段外另有 context_window(模型上下文窗口)与 context_used(当前上下文占用;
+# 本轮合计跨多次模型请求时会远大于实际占用,上报方能给出时优先用它)
 USAGE_SECTION_FIELDS = ("input", "cache_read", "cache_write", "output", "reasoning", "total")
 
 
@@ -115,16 +117,18 @@ def usage_section(source: object, fields: dict[str, str]) -> dict:
 
 
 def build_usage(raw: object, *, turn: Optional[dict] = None, total: Optional[dict] = None,
-                context_window: object = None, cost_usd: object = None,
-                tool_uses: object = None, duration_ms: object = None) -> dict:
+                context_window: object = None, context_used: object = None,
+                cost_usd: object = None, tool_uses: object = None,
+                duration_ms: object = None) -> dict:
     """组装 ``usage/v1`` payload;一个可识别的数值都没有时返回空 dict(调用方不 emit)。"""
     payload: dict = {"schema": USAGE_SCHEMA}
     if turn:
         payload["turn"] = turn
     if total:
         payload["total"] = total
-    for key, value in (("context_window", context_window), ("cost_usd", cost_usd),
-                       ("tool_uses", tool_uses), ("duration_ms", duration_ms)):
+    for key, value in (("context_window", context_window), ("context_used", context_used),
+                       ("cost_usd", cost_usd), ("tool_uses", tool_uses),
+                       ("duration_ms", duration_ms)):
         number = _usage_number(value)
         if number is not None:
             payload[key] = number

@@ -150,7 +150,7 @@ function liveStateLabel(asks) {
 /* ---- 用量事件 ----
    Runtime 层已在源头把各工具的字段名归一成 usage/v1:turn(本轮)/total(累计)两个
    区段用固定字段 input/cache_read/cache_write/output/reasoning/total,另有
-   context_window、cost_usd、tool_uses、duration_ms,raw 原样保留上报内容。这里只做
+   context_window、context_used、cost_usd、tool_uses、duration_ms,raw 原样保留上报内容。这里只做
    排版;没有 schema 标记的旧事件或未知结构由调用方原样展示 JSON。 */
 const USAGE_SCHEMA = "usage/v1";
 const USAGE_FIELD_LABELS = { input: "输入", cache_read: "缓存命中", cache_write: "缓存写入",
@@ -229,10 +229,11 @@ function renderUsagePayload(payload) {
     .map(([scope, label]) => ({ scope, label, entries: usageSectionEntries(payload[scope]) }))
     .filter(row => row.entries.length);
   const meta = usageMetaEntries(payload);
-  // 上下文占用:本轮合计(缺省用输入+输出)对比模型上下文窗口
+  // 上下文占用对比模型上下文窗口:优先用 Runtime 报的当前占用 context_used;
+  // 没有时退回本轮合计(缺省用输入+输出),一轮多次模型请求时会偏高
   const turn = payload.turn || {};
   const contextWindow = usageNumber(payload.context_window);
-  const used = usageNumber(turn.total)
+  const used = usageNumber(payload.context_used) || usageNumber(turn.total)
     || (usageNumber(turn.input) || 0) + (usageNumber(turn.output) || 0);
   let contextHtml = "", contextPreview = "";
   if (contextWindow > 0 && used > 0) {
@@ -410,6 +411,7 @@ function syncRunLiveOutput(run, card, pane, events, liveOutput) {
   const textEl = bubble.querySelector(".live-text");
   textEl.hidden = !text.trim();
   textEl.innerHTML = text.trim() ? fmtBody(text, true) : "";
+  syncMessageCopyButton(bubble, text);
   // 提问表单只在待处理请求集合变化时重建:轮询刷新不能清掉用户已选/已填的回答
   const askEl = bubble.querySelector(".live-ask");
   const askKey = asks.map(a => a.payload.request_id).join(",");

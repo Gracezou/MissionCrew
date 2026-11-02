@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,7 +165,40 @@ def test_code_blocks_and_inline_code_carry_copy_buttons():
     assert 'document.execCommand("copy")' in ui
     assert ".markdown-body code > .markdown-copy { visibility: hidden" in css
     assert ".markdown-body code:hover > .markdown-copy" in css
+    # 折行的行内代码作包含块时左右缘可能颠倒,按钮必须停在文本末尾的静态位置,不能设偏移量
+    inline_rule = re.search(r"\.markdown-body code > \.markdown-copy \{([^}]*)\}", css).group(1)
+    assert "display: inline-flex" in inline_rule
+    assert not re.search(r"(^|[\s;])(top|right|bottom|left|inset):", inline_rule)
     assert ".markdown-code { position: relative" in css
+
+
+def test_fence_info_string_with_code_citation_keeps_blocks_in_place():
+    """Agent 常写 ```14:29:src/a.ts 这类「起行:止行:路径」信息串。开栏行不能退化成正文,
+    否则之后每个闭栏都被当成开栏,围栏内外整体颠倒;路径与行号显示成代码块标题条。"""
+    html = render_markdown(
+        "原文:\n\n```14:14:test/spec.ts\nconst a = 1;\n```\n\n中间的说明\n\n"
+        "```3:5:src/x.py\ndef f():\n    pass\n```\n\n```python title=\"x.py\"\nprint(1)\n```\n",
+    )
+
+    assert ('<div class="markdown-code"><div class="markdown-code-title">test/spec.ts:14</div>'
+            f'{BLOCK_COPY}<pre><code>const a = 1;</code></pre></div>') in html
+    assert '<div class="markdown-code-title">src/x.py:3-5</div>' in html
+    assert "<p>中间的说明</p>" in html
+    assert '<pre><code class="language-python">print(1)</code></pre>' in html
+    assert "```" not in html
+
+
+def test_longer_fence_keeps_nested_fences_as_source():
+    """````markdown 包住一份含 ``` 代码块的文档时,内层围栏是源码的一部分,只有同样长的闭栏
+    才结束外层;一行里首尾都是 ``` 的是行内写法,不是开栏。"""
+    html = render_markdown(
+        "````markdown\n# 标题\n\n```sh\nls\n```\n````\n\n之后 ```inline``` 照常\n",
+    )
+
+    assert ('<pre><code class="language-markdown"># 标题\n\n```sh\nls\n```</code></pre>') in html
+    assert "<h1" not in html
+    assert html.count('<div class="markdown-code">') == 1
+    assert "<p>之后 " in html
 
 
 def test_backslash_escapes_render_literal_punctuation_without_breaking_links():

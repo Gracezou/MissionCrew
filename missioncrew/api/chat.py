@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import json
-import time
 
 from fastapi import FastAPI, HTTPException, Request
 
+from ..collab import channels as channel_ops
 from ..collab.content_channels import (CONTENT_KIND_LABELS,
                                        content_channel as find_content_channel,
                                        ensure_content_channel)
@@ -16,7 +16,7 @@ from ..collab.workspace import write_page_context_snapshot
 from ..core.config import projects_dir
 from ..core.models import Channel
 from .context import ApiContext, etag_json_response
-from .schemas import (ChannelCreate, ContentChannelInput, MessageInput, PageContextInput,
+from .schemas import (ChannelCreate, ChannelUpdate, ContentChannelInput, MessageInput, PageContextInput,
                       RuntimeInteractionInput)
 
 LIST_SCOPES = {"active", "archived", "all"}
@@ -64,8 +64,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(400, "频道必须归属一个已存在的项目")
         project = ctx.must_project(body.project_id)
         actor = ctx.validate_orchestrator_actor(project, body.actor_role_id)
-        # 频道 id 以项目为命名空间,避免多项目下同名冲突
-        cid = ctx.namespaced_id(body.project_id, body.id, "频道")
+        # 频道 id 以项目为命名空间,避免多项目下同名冲突;不给 id 时由名称推导
+        cid = ctx.namespaced_id(
+            body.project_id, body.id or channel_ops.channel_short_id(body.name), "频道")
         if store.get_channel(cid):
             raise HTTPException(400, "频道已存在")
         c = Channel(id=cid, name=body.name or body.id,
@@ -105,40 +106,46 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(404, "该内容尚未发起对话")
         return {**channel_data(channel), "created": False}
 
-    def mutable_channel(channel_id: str) -> Channel:
+    def must_channel(channel_id: str) -> Channel:
         channel = store.get_channel(channel_id)
         if channel is None:
             raise HTTPException(404, "频道不存在")
-        if channel.is_general:
-            raise HTTPException(409, "general 是项目默认频道，不能归档或删除")
-        if store.active_chat_runs(channel_id):
-            raise HTTPException(409, "频道仍有 Agent 正在运行，请先停止或等待本轮结束")
         return channel
+
+    def mutable_channel(channel_id: str) -> Channel:
+        channel = must_channel(channel_id)
+        try:
+            channel_ops.ensure_channel_archivable(store, channel)
+        except channel_ops.ChannelChangeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return channel
+
+    @app.patch("/api/chat/channels/{channel_id}")
+    def patch_channel(channel_id: str, body: ChannelUpdate):
+        """修改名称、用途或工作目录;工作目录从下一轮执行起生效。"""
+        channel = must_channel(channel_id)
+        fields = body.model_dump(exclude_unset=True)
+        try:
+            channel_ops.update_channel(store, channel, actor="human", **fields)
+        except channel_ops.ChannelChangeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return channel_data(channel)
 
     @app.post("/api/chat/channels/{channel_id}/archive")
     def archive_channel(channel_id: str):
-        channel = mutable_channel(channel_id)
-        if not channel.archived:
-            stopped = chat.stop_channel_sessions(channel_id)
-            channel.archived = True
-            channel.archived_at = time.time()
-            store.put_channel(channel)
-            store.audit("human", "channel_archived",
-                        detail=f"channel={channel_id} stopped_runtimes={stopped}")
-        else:
-            stopped = 0
+        channel = must_channel(channel_id)
+        try:
+            stopped = channel_ops.archive_channel(
+                store, channel, actor="human",
+                stop_sessions=chat.stop_channel_sessions)
+        except channel_ops.ChannelChangeError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {**channel_data(channel), "stopped_runtimes": stopped}
 
     @app.post("/api/chat/channels/{channel_id}/restore")
     def restore_channel(channel_id: str):
-        channel = store.get_channel(channel_id)
-        if channel is None:
-            raise HTTPException(404, "频道不存在")
-        if channel.archived:
-            channel.archived = False
-            channel.archived_at = 0.0
-            store.put_channel(channel)
-            store.audit("human", "channel_restored", detail=f"channel={channel_id}")
+        channel = must_channel(channel_id)
+        channel_ops.restore_channel(store, channel, actor="human")
         return channel_data(channel)
 
     @app.get("/api/chat/{channel_id}/messages")

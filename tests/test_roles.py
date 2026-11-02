@@ -2,7 +2,10 @@
 import json
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +14,8 @@ from missioncrew.core import seed as seed_mod
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.core.models import Backend, Project, Role
 from missioncrew.api import create_app
+from missioncrew.api.schemas import RoleTemplateInput
+from missioncrew.collab.role_config import validate_role_config
 from missioncrew.runtime import runtime_manager
 
 
@@ -70,6 +75,21 @@ def test_fixed_runtime_disabled_reports_unavailable(seeded):
 
 
 # ---- 管理 API ----
+
+
+def test_role_config_discovers_model_catalog_once(seeded):
+    backend = seeded.get_backend("std-1")
+    backend.models = ["pro"]
+    seeded.put_backend(backend)
+    calls = []
+
+    def catalog(_backend):
+        calls.append(_backend.id)
+        return ["another"], {"another": ["high"]}
+
+    validate_role_config(seeded, RoleTemplateInput(
+        id="new-role", runtime_id="std-1", model="another", effort="high"), catalog)
+    assert calls == ["std-1"]
 
 @pytest.fixture()
 def client(seeded):
@@ -312,7 +332,10 @@ def test_current_orchestrator_cannot_be_disabled_or_selected_while_disabled(
 def test_global_role_templates_seed_new_projects_and_first_enabled_is_default(client, seeded):
     templates = client.get("/api/role-templates").json()
     assert [role["id"] for role in templates][:3] == ["lead", "dev", "reviewer"]
-    assert client.get("/api/overview").json()["role_templates"] == templates
+    overview_templates = client.get("/api/overview").json()["role_templates"]
+    for role in overview_templates:
+        role.pop("model_catalog_warning")
+    assert overview_templates == templates
 
     coordinator = {
         "id": "coordinator", "name": "协调者", "runtime_id": "exp-1",
@@ -801,6 +824,18 @@ def test_channel_id_namespaced_by_project(client, seeded):
                        json={"id": "x", "project_id": "ghost"}).status_code == 400
 
 
+def test_channel_id_derived_from_grouped_name(client, seeded):
+    # 名称里的 `/` 只用于侧栏分组;不给 id 时由名称推导,`/` 换成连字符
+    r = client.post("/api/chat/channels",
+                    json={"name": "backend / api", "project_id": "webshop"})
+    assert r.status_code == 200
+    assert (r.json()["id"], r.json()["name"]) == ("webshop:backend-api", "backend / api")
+    assert client.post("/api/chat/channels", json={
+        "name": "backend/api", "project_id": "webshop"}).status_code == 400
+    assert client.post("/api/chat/channels", json={
+        "name": "/", "project_id": "webshop"}).status_code == 400
+
+
 def test_channel_archive_restore_and_delete_api(client, seeded):
     created = client.post("/api/chat/channels", json={
         "id": "release", "project_id": "webshop", "purpose": "发布讨论",
@@ -891,11 +926,11 @@ def test_channel_sidebar_exposes_filter_archive_restore_and_delete(client):
     assert "输入 @ 后从列表选择角色；单个角色直接执行，多个角色交给主控协调" in html
     assert "CHANNEL_FILTERS" in ui and "channelIsGeneral" in ui
     assert "channelActivity" in ui and "visibleProjChannels" in ui
-    assert "visibleProjChannels()" in router and "channelSidebarItem" in router
+    assert "visibleProjChannels()" in router and "channelSidebarHtml(chans)" in router
     for function in ("archiveChannel", "restoreChannel", "deleteChannel",
                      "renderChannelFilter", "renderChannelState"):
         assert f"function {function}" in channels
-    assert "const managed = general;" in channels
+    # general 菜单只能编辑、不能归档/删除:见 test_sidebar_channel_menu_offers_edit_where_allowed
     assert "永久清空对话" in channels and "内容专属频道" in channels
     assert all(label in channels for label in ("用途", "工作目录", "创建者"))
     assert ".channel-filter-menu" in css and ".channel-actions-menu" in css
@@ -922,7 +957,8 @@ def test_automation_ui_uses_sidebar_and_full_detail_view(client):
     assert "registerViewerDirtyChecker(automationFormDirty)" in automations
     assert 'openFormDialog(automation ? `编辑脚本' not in automations
     assert '<textarea id="af-desc" class="automation-description-input"' in automations
-    assert "crontab(五段;留空 = 仅手动触发)" in automations
+    assert "crontab(五段;留空 = 不定时)" in automations
+    assert 'id="af-webhook"' in automations   # 定时与 webhook 两种触发可同时开启
     assert 'class="automation-trigger-editor"' in automations
     assert automations.index('class="automation-trigger-editor"') > automations.index("<h3>配置</h3>")
     assert all(label in automations for label in
@@ -977,6 +1013,72 @@ def test_global_settings_exposes_new_project_role_templates(client):
     assert "role.enabled !== false && !role.manual_only" in ui
     assert "defaultOrchestratorTemplate()" in js and "defaultOrchestratorTemplate()" in projects_js
     assert 'document.getElementById("np-create").disabled = !defaultOrchestrator' in projects_js
+
+
+def test_fork_role_ui_survives_upstream_merge_with_dom_stubs():
+    """执行真实 UI/模板/项目 JS，验证 fork 开关与上游渲染能同时工作。"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the role UI integration check")
+    script = r"""
+const fs = require('fs'), vm = require('vm'), assert = require('assert/strict');
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {
+    id, value: '', innerHTML: '', textContent: '', hidden: false, disabled: false,
+    dataset: {}, classList: {toggle() {}, contains() {return false;}},
+    addEventListener() {}, showModal() {this.open = true;}, querySelector: () => null,
+  });
+  return elements.get(id);
+}
+const context = vm.createContext({
+  assert, element, window: {}, setTimeout() {}, matchMedia: () => ({matches: false}),
+  localStorage: {getItem: () => null, setItem() {}},
+  document: {getElementById: element, addEventListener() {},
+    documentElement: {dataset: {}}, querySelectorAll: () => []},
+  traitMeta: {abilities: {}},
+});
+for (const name of ['ui.js', 'roles.js', 'settings-runtime.js', 'projects.js'])
+  vm.runInContext(fs.readFileSync(process.argv[1] + '/' + name, 'utf8'), context);
+vm.runInContext(`
+  refreshModelOptions = () => {};
+  refreshEffortOptions = () => {};
+  modelCatalogLabel = () => '<label>Model</label>';
+  overview.backends = [{id: 'mock', name: 'Mock', enabled: true}];
+  overview.role_templates = [
+    {id: 'disabled', enabled: false, manual_only: true, usage_linkage_enabled: true},
+    {id: 'manual', enabled: true, manual_only: true},
+    {id: 'eligible', enabled: true, manual_only: false},
+  ];
+  renderGlobalRoleTable();
+  const table = element('global-role-table').innerHTML;
+  for (const label of ['新项目默认主控', '默认停用', '用量联动', '仅人工'])
+    assert(table.includes('>' + label + '</span>'), label);
+  assert(table.match(/data-id="disabled"[\\s\\S]*?默认停用[\\s\\S]*?用量联动[\\s\\S]*?仅人工/));
+  editGlobalRoleTemplate('disabled');
+  let form = element('fdlg-body').innerHTML;
+  assert(form.includes('id="rf-enabled" role="switch"\\n      aria-checked="false"'));
+  assert(form.includes('id="rf-manual-only" role="switch"\\n      aria-checked="true"'));
+  assert.equal((form.match(/class="role-toggle-field"/g) || []).length, 3);
+  editGlobalRoleTemplate(null);
+  form = element('fdlg-body').innerHTML;
+  assert(form.includes('id="rf-enabled" role="switch"\\n      aria-checked="true"'));
+  assert(form.includes('id="rf-manual-only" role="switch"\\n      aria-checked="false"'));
+  openNewProject();
+  assert(element('np-role-summary').textContent.includes('默认主控为 @eligible'));
+  assert.equal(element('np-create').disabled, false);
+  const preview = roleTransferRows([roleFileItem(overview.role_templates[0], true)]);
+  assert(preview.includes('>仅人工</span>') && preview.includes('>默认停用</span>'));
+  overview.role_templates = overview.role_templates.slice(0, 2);
+  renderGlobalRoleTable();
+  openNewProject();
+  assert.equal(element('global-role-warning').hidden, false);
+  assert.equal(element('np-create').disabled, true);
+  assert(element('np-role-summary').textContent.includes('没有可作主控的模板'));
+`, context);
+"""
+    subprocess.run([node, "-e", script, str(WEB / "js")],
+                   text=True, capture_output=True, check=True, timeout=10)
 
 
 def test_system_runtime_status_page_and_api_cover_all_instance_modes(
@@ -1206,6 +1308,129 @@ def test_backend_models_cache_refresh_and_update_invalidation(client, seeded, mo
     assert probes == ["kimi"] * 3
 
 
+@pytest.mark.parametrize(("catalog", "expected_warning"), [
+    (["available"], True),
+    ([], False),
+    (["retired"], False),
+])
+def test_role_model_catalog_warning_uses_discovered_catalog(
+        client, seeded, monkeypatch, catalog, expected_warning):
+    for existing in seeded.list_backends():
+        existing.enabled = False
+        seeded.put_backend(existing)
+    backend = Backend(id="catalog-warning", name="catalog-warning",
+                      adapter="mock", models=["manual-model"])
+    seeded.put_backend(backend)
+    role = Role(id="catalog-role", project_id="webshop", name="目录测试",
+                runtime_id=backend.id, model="retired")
+    seeded.put_role(role)
+    template = Role(id="catalog-template", runtime_id=backend.id, model="retired")
+    seeded.put_role_template(template)
+    monkeypatch.setattr(runtime_manager, "list_model_catalog",
+                        lambda _backend, timeout=25: (catalog, {}))
+    client.get("/api/backends/catalog-warning/models")   # 目录探测只在显式目录端点同步发生
+
+    project_roles = client.get("/api/projects/webshop/overview").json()["roles"]
+    project_role = next(item for item in project_roles if item["id"] == role.id)
+    templates = client.get("/api/overview").json()["role_templates"]
+    global_template = next(item for item in templates if item["id"] == template.id)
+    runtime = next(item for item in client.get("/api/runtime/status").json()["backends"]
+                   if item["id"] == backend.id)
+
+    assert bool(project_role["model_catalog_warning"]) is expected_warning
+    assert bool(global_template["model_catalog_warning"]) is expected_warning
+    assert runtime["invalid_model_roles"] == 2 * int(expected_warning)
+    if expected_warning:
+        warning = project_role["model_catalog_warning"]
+        assert warning["message"] == "模型 retired 不在 catalog-warning 当前清单中"
+        assert warning["models"] == ["manual-model", "available"]
+
+
+def test_role_model_catalog_warning_refreshes_cold_cache_in_background_once(
+        client, seeded, monkeypatch):
+    for existing in seeded.list_backends():
+        existing.enabled = False
+        seeded.put_backend(existing)
+    backend = Backend(id="catalog-warning", name="catalog-warning",
+                      adapter="mock", models=["manual-model"])
+    seeded.put_backend(backend)
+    seeded.put_role(Role(id="catalog-role", project_id="webshop",
+                         runtime_id=backend.id, model="retired"))
+    seeded.put_role_template(Role(id="catalog-template", runtime_id=backend.id,
+                                  model="retired"))
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    request_finished = threading.Event()
+    probe_threads = []
+    response = []
+
+    def probe(_backend, timeout=25):
+        probe_threads.append(threading.get_ident())
+        probe_started.set()
+        release_probe.wait(3)
+        return ["available"], {}
+
+    monkeypatch.setattr(runtime_manager, "list_model_catalog", probe)
+    request = threading.Thread(
+        target=lambda: (response.append(client.get("/api/overview")),
+                        request_finished.set()))
+    request.start()
+    try:
+        assert probe_started.wait(1)
+        assert request_finished.wait(1)  # 请求在线程探测等待时已返回
+        template = next(item for item in response[0].json()["role_templates"]
+                        if item["id"] == "catalog-template")
+        assert template["model_catalog_warning"] is None
+        assert client.get("/api/projects/webshop/overview").status_code == 200
+        assert client.get("/api/runtime/status").status_code == 200
+        assert len(probe_threads) == 1
+        assert probe_threads[0] != request.ident
+    finally:
+        release_probe.set()
+        request.join(1)
+
+    for _ in range(100):
+        roles = client.get("/api/projects/webshop/overview").json()["roles"]
+        role = next(item for item in roles if item["id"] == "catalog-role")
+        if role["model_catalog_warning"]:
+            break
+        time.sleep(0.01)
+    assert role["model_catalog_warning"]["models"] == ["manual-model", "available"]
+    assert len(probe_threads) == 1
+
+
+def test_role_model_catalog_warning_skips_disabled_runtime(client, seeded, monkeypatch):
+    for existing in seeded.list_backends():
+        existing.enabled = False
+        seeded.put_backend(existing)
+    backend = Backend(id="disabled-catalog", name="disabled-catalog",
+                      adapter="mock", enabled=False)
+    seeded.put_backend(backend)
+    seeded.put_role(Role(id="disabled-catalog-role", project_id="webshop",
+                         runtime_id=backend.id, model="retired"))
+    probes = []
+    monkeypatch.setattr(runtime_manager, "list_model_catalog",
+                        lambda backend, timeout=25: probes.append(backend.id) or (["new"], {}))
+
+    roles = client.get("/api/projects/webshop/overview").json()["roles"]
+    role = next(item for item in roles if item["id"] == "disabled-catalog-role")
+    assert role["model_catalog_warning"] is None
+    assert probes == []
+
+
+def test_role_model_catalog_warning_frontend_grep(client):
+    roles = client.get("/assets/js/roles.js").text
+    templates = client.get("/assets/js/settings-runtime.js").text
+    runtime = client.get("/assets/js/runtime-status.js").text
+    css = client.get("/assets/css/app.css").text
+    assert "function modelCatalogWarningHtml(role)" in roles
+    assert "当前可选模型：${warning.models.join(\"、\")}" in roles
+    assert "modelCatalogWarningHtml(r)" in roles
+    assert "modelCatalogWarningHtml(role)" in templates
+    assert "backend.invalid_model_roles ?" in runtime
+    assert ".model-catalog-warning { color: var(--bad); }" in css
+
+
 def test_role_editors_offer_model_catalog_refresh(client):
     """模型清单在页面内只复用 10 分钟,项目角色与全局模板两个编辑器都有强制重探入口。"""
     roles = client.get("/assets/js/roles.js").text
@@ -1339,9 +1564,14 @@ def test_role_effort_saved_only_for_supporting_runtime(client, seeded):
     assert bad.status_code == 400 and "effort" in bad.json()["detail"]
     # 不支持 effort 的适配器:非空拒绝,空值(CLI 默认)放行
     seeded.put_backend(Backend(id="plain", name="plain", adapter="opencode"))
-    deny = client.post("/api/roles", json={
-        "id": "on-plain", "project_id": "webshop", "runtime_id": "plain",
-        "effort": "high"})
+    with patch("missioncrew.runtime.clis.opencode.subprocess.run") as run:
+        run.return_value.stdout = ""
+        deny = client.post("/api/roles", json={
+            "id": "on-plain", "project_id": "webshop", "runtime_id": "plain",
+            "effort": "high"})
+        run.assert_called_once_with(
+            ["opencode", "models"], capture_output=True, text=True,
+            timeout=25, stdin=subprocess.DEVNULL)
     assert deny.status_code == 400 and "不支持 effort" in deny.json()["detail"]
     empty = client.post("/api/roles", json={
         "id": "on-plain", "project_id": "webshop", "runtime_id": "plain"})

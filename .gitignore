@@ -6,3 +6,7 @@ __pycache__/
 dist/
 CLAUDE.local.md
 .tmp/
+# 本机起步包,含个人模型接入,不进仓库
+examples/starter-kit/
+# Git worktree 放在仓库内的 .worktrees/ 下(频道 workdir 须是仓库子目录)
+.worktrees/

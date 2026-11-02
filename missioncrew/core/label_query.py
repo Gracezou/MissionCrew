@@ -4,8 +4,10 @@
 写入侧统一归一化为「冒号后单空格」;冒号任一侧为空时按纯标签处理)。
 
 表达式支持与(&)、或(|)、非(!)与括号;`&&`/`||` 与单写等价。项由整串标签
-构成:普通项与标签整串匹配(含高级标签);`property: *` 是存在性匹配,命中
-「带任意该属性标签」的对象。匹配不区分大小写,否定只经 `!` 运算符表达。
+构成:普通项与标签整串匹配(含高级标签);不带冒号的项还命中以它为属性名的
+高级标签,即 `owner` 同时等价于 `owner: *`,`!owner` 筛出没有任何 owner 标签的
+对象;`property: *` 是存在性匹配,命中「带任意该属性标签」的对象。匹配不区分
+大小写,否定只经 `!` 运算符表达。
 AST 用元组表示:("label", 文本) | ("has", 属性) | ("not", 子式)
 | ("and"|"or", 左, 右)。
 """
@@ -125,7 +127,8 @@ def matches(expr_or_ast, labels) -> bool:
     def evaluate(node) -> bool:
         kind = node[0]
         if kind == "label":
-            return node[1] in lowered
+            # 属性名不含冒号,只有不带冒号的项可能命中 props
+            return node[1] in lowered or node[1] in props
         if kind == "has":
             return node[1] in props
         if kind == "not":

@@ -14,6 +14,8 @@ uv run mc serve          # 本地起服务,访问 http://127.0.0.1:8321
 
 要求 Python 3.10+ 和 [uv](https://docs.astral.sh/uv/)。CI 会在 3.10–3.14 上跑测试并构建 wheel，提 PR 前请至少在本机跑通完整测试。
 
+本机跑全量测试前请接上电源并保持屏幕打开；macOS 合盖且使用电池时，`caffeinate -i -s` 也不能阻止睡眠。排查超时的看门狗应同时记录墙钟和单调钟；超时时用 `pmset -g log | grep -E " (Sleep|DarkWake) "` 查看最近的睡眠记录，区分机器睡眠与测试真正卡住。
+
 ## 代码约定
 
 - 代码结构与分层规则见 [AGENTS.md](AGENTS.md)，其中的分层规则有测试钉住（`tests/test_runtime_abstraction.py`），违反会直接失败。
@@ -34,7 +36,7 @@ uv run mc serve          # 本地起服务,访问 http://127.0.0.1:8321
 - 版本号遵循 SemVer(`MAJOR.MINOR.PATCH`,PEP 440 兼容)。1.0 之前:含新功能或不兼容变更 → MINOR+1(不兼容变更必须在 CHANGELOG 的「不兼容」小节写清迁移方式);只有修复 → PATCH+1;预发布版本写 `X.Y.ZrcN`。Agent Tool API、数据目录结构、CLI 稳定后再升级到 1.0。
 - 单一版本来源是 `missioncrew/__init__.py::__version__`,`pyproject.toml`、`missioncrew/runtime/acp.py` 里的 clientInfo 等其他位置一律引用它,不得再硬编码版本号。
 - 每个版本一个分支 `release/vX.Y.Z`(不直接叫 `vX.Y.Z`,避免与同名 tag 冲突)。第一个版本分支从 `main` 创建，之后的版本分支从上一个版本分支创建；日常开发分支从当前进行中的版本分支拉出，完成后以 `--no-ff` 合并回该版本分支。版本分支何时合入 `main` 由人类决定。
-- 发布流程:在版本分支上把 `CHANGELOG.md` 的 `[Unreleased]` 段落改成对应版本段(附日期)→ 修改 `__version__` → 提交 `chore: 发布 vX.Y.Z`。默认不打 tag；需要时由人类决定，格式为 `vX.Y.Z`。
+- 发布流程:在版本分支上把 `CHANGELOG.md` 的 `[Unreleased]` 段落改成对应版本段(附日期)→ 修改 `__version__` → 运行 `uv sync` 刷新 `.venv` 的发行版元数据 → 提交 `chore: 发布 vX.Y.Z`。`tests/test_version.py::test_installed_distribution_uses_package_version` 会比对已安装元数据与包内版本，不刷新会失败。默认不打 tag；需要时由人类决定，格式为 `vX.Y.Z`。
 - 用户可感知的 feat/fix 提交,要同时在 `CHANGELOG.md` 的 `[Unreleased]` 里补一行(按「新增/变更/修复/不兼容」分类),不要留到发布前才补。
 
 ## 安全问题

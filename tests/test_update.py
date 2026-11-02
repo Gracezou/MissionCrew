@@ -68,6 +68,30 @@ def test_update_plan_unknown_adapter_not_updatable():
 
 def test_fetch_latest_only_for_known_npm_sources():
     assert adapters.fetch_latest_version("mock") == ""
+    assert adapters.fetch_latest_version("kiro") == ""
+
+
+def test_fetch_latest_trae_parses_update_check(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs["timeout"]))
+        return subprocess.CompletedProcess(cmd, 0, stdout=(
+            "Current TRAE CLI version: 0.209.1\n"
+            "Latest TRAE CLI version:  0.210.0\n"
+            "Channel:               public\n"
+            "Status:                update available\n"), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert adapters.fetch_latest_version("trae") == "0.210.0"
+    assert calls == [(["traecli", "update", "check"], 8)]
+
+
+def test_fetch_latest_trae_empty_when_check_fails(monkeypatch):
+    def run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", run)
     assert adapters.fetch_latest_version("trae") == ""
 
 

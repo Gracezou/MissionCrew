@@ -314,10 +314,10 @@ def test_cli_adapter_reaps_pipe_holding_grandchildren(tmp_path):
     backend = Backend(id="p", name="p", adapter="pi")
     cfg = _cfg(tmp_path, backend, emit)
     cfg.timeout = 30
-    t0 = time.time()
+    t0 = time.monotonic()
     result = adapters.CliAdapter(
         "pi", [sys.executable, FAKE_STREAM, "grandchild"]).run(cfg)
-    assert time.time() - t0 < 15          # join 超时后组清理,不等满 timeout
+    assert time.monotonic() - t0 < 15     # join 超时后组清理,不等满 timeout
     assert result.success and "REAL-ANSWER" in result.output
     n_before = len(events)
     time.sleep(1.5)                       # run 返回后事件不再增长(读线程已结束)
@@ -412,6 +412,8 @@ def test_chat_ui_renders_usage_events_from_unified_schema(seeded):
     assert 'const USAGE_SCHEMA = "usage/v1"' in js
     assert "renderUsagePayload" in js and "usageInlineSummary(payload.usage)" in js
     assert '{ turn: "本轮", total: "累计" }' in js and "payload.context_window" in js
+    # 上下文条优先用 Runtime 报的当前占用,一轮多次请求的合计只作退路
+    assert "usageNumber(payload.context_used) || usageNumber(turn.total)" in js
     # 前端不再认识各工具的私有字段名,工具知识留在 runtime 层
     for key in ("cachedInputTokens", "cacheRead", "total_tokens", "cache_read_input_tokens"):
         assert key not in js, key

@@ -1,12 +1,13 @@
 /* ---------------- Issue 化 Task 看板 ---------------- */
-/* 状态即标签(status: 文本);内置四态是锁定的前四列,样式按文本映射 */
-const STATUS_META = {
-  "待处理": { color: "var(--muted)", cls: "st-open" },
-  "处理中": { color: "var(--accent)", cls: "st-in_progress" },
-  "已阻塞": { color: "var(--bad)", cls: "st-blocked" },
-  "已完成": { color: "var(--ok)", cls: "st-done" },
-};
-const STATUS_VALUES = Object.keys(STATUS_META);
+/* 状态即标签(status: 文本);取值与颜色由任务所属数据源声明,
+   内置源是下面四态(也是内置看板锁定的前四列) */
+const BUILTIN_STATUS_VALUES = [
+  { value: "待处理", color: "var(--muted)" },
+  { value: "处理中", color: "var(--accent)" },
+  { value: "已阻塞", color: "var(--bad)" },
+  { value: "已完成", color: "var(--ok)" },
+];
+const STATUS_VALUES = BUILTIN_STATUS_VALUES.map(item => item.value);
 
 /* 标签工具:与服务端 label_query 同一套归一化(首个冒号切分高级标签) */
 function splitLabel(text) {
@@ -34,10 +35,23 @@ function taskDisplayLabels(task) {
   return (task.labels || []).filter(label =>
     splitLabel(label)[0].toLowerCase() !== "status");
 }
-function statusPillHtml(status) {
+// 数据源声明的状态取值 [{value,color}](随项目总览下发);清单未到时内置源用本地四态
+function sourceStatusValues(source) {
+  const id = source || "built-in";
+  const hit = projBoardSources().find(item => item.id === id);
+  if (hit?.status_values?.length) return hit.status_values;
+  return id === "built-in" ? BUILTIN_STATUS_VALUES : [];
+}
+
+// 状态药丸按所属数据源声明的颜色着色,内置与自定义状态同一规则;
+// 声明了但没给颜色的与看板列一样用灰色,未声明的自由状态文本不着色
+function statusPillHtml(status, source = "built-in") {
   if (!status) return "";
-  const meta = STATUS_META[status];
-  return `<span class="pill ${meta ? meta.cls : ""}">${esc(status)}</span>`;
+  const hit = sourceStatusValues(source).find(item =>
+    String(item.value).toLowerCase() === status.toLowerCase());
+  return hit
+    ? `<span class="pill status-pill" style="--status-color:${esc(hit.color || "var(--muted)")}">${esc(status)}</span>`
+    : `<span class="pill">${esc(status)}</span>`;
 }
 const TASK_FILTERS = new Set(["all", "active", "archived"]);
 let taskFilter = localStorage.getItem("mc.taskFilter") || "active";
@@ -46,6 +60,7 @@ let currentTaskId = null;
 let currentTaskDetail = null;
 let editingTaskId = null;
 let editingTaskSnapshot = null;
+let editingTaskSource = "built-in";   // 新建 Task 归属的数据源(从哪块看板点的新建)
 
 function closeTaskDialog(updateRoute = true) {
   currentTaskId = null;
@@ -61,17 +76,6 @@ dlg.addEventListener("close", () => {
   syncUrl();
 });
 
-function taskChannelLabel(channelId) {
-  const channel = overview.channels.find(item => item.id === channelId);
-  return channel ? `#${channel.name || channel.id}` : channelId;
-}
-
-// 内置任务看板只显示 built-in 源;外部同步任务在各自的自定义看板里
-function builtinProjTasks() {
-  return projTasks().filter(task =>
-    (task.source_id || "built-in") === "built-in");
-}
-
 // 显示范围(活跃/全部/已归档)是两块任务看板共用的视图状态
 function setTaskFilter(value) {
   if (!TASK_FILTERS.has(value)) return;
@@ -82,15 +86,23 @@ function setTaskFilter(value) {
   void refreshTasks();   // 任务列表(直链打开详情等用)按新范围重拉
 }
 
-// widgets 面板里的 taskboard 组件直接读 overview 里的任务:补成看板卡片形态
-function taskAsBoardCard(task) {
-  return { ...task, task_id: task.id, status: taskStatus(task),
-           meta: [task.id, ...(task.channel_ids || []).map(taskChannelLabel)] };
-}
-
 // 内置任务看板与自定义任务看板共用 boards.js 的渲染器,只差绑定(数据端点与配置保存)
 function renderBoard() {
   renderTaskboard(builtinTaskboardBinding());
+}
+
+// 两种更新时间分开展示:外部系统的时间由同步或 Agent 设置;系统更新时间由 MissionCrew
+// 在每次写入时自动记录,只读,也是编辑时的乐观锁版本。
+function taskTimesHtml(task) {
+  const time = seconds => new Date(seconds * 1000).toLocaleString();
+  const external = Number(task.external_updated_at) > 0;
+  return `<div class="task-detail-times">
+    <span title="外部系统里的更新时间，由数据源同步或 Agent 设置；看板按它排序">更新时间
+      <b>${external ? time(task.external_updated_at) : "未提供"}</b></span>
+    <span title="MissionCrew 自动记录：任务有任何修改或新简报都会刷新，不能手动设置">系统更新时间
+      <b>${time(task.updated_at)}</b></span>
+    <span title="任务在 MissionCrew 中创建的时间">创建时间 <b>${time(task.created_at)}</b></span>
+  </div>`;
 }
 
 async function openTask(id, updateRoute = true) {
@@ -107,7 +119,7 @@ async function openTask(id, updateRoute = true) {
   ).join(" · ");
   const briefs = detail.briefs.map(brief => `<article class="task-brief">
     <div class="task-brief-meta">
-      ${statusPillHtml(brief.status) || '<span class="pill"></span>'}
+      ${statusPillHtml(brief.status, task.source_id) || '<span class="pill"></span>'}
       <span>${new Date(brief.created_at * 1000).toLocaleString()}</span>
       <span>${brief.author_type === "agent" ? "@" : ""}${esc(brief.author)}</span>
     </div>
@@ -115,13 +127,14 @@ async function openTask(id, updateRoute = true) {
   </article>`).join("");
   document.getElementById("dlg-body").innerHTML = `
     <div class="task-detail-meta">
-      ${statusPillHtml(taskStatus(task))}
+      ${statusPillHtml(taskStatus(task), task.source_id)}
       ${task.archived ? '<span class="badge task-archived-badge">已归档</span>' : ""}
       ${task.url ? `<a class="badge" href="${esc(task.url)}" target="_blank"
         rel="noopener">外部链接 ↗</a>` : ""}
       <span>${channels || "未绑定 Channel"}</span>
       ${taskDisplayLabels(task).map(label => `<span class="badge">${esc(label)}</span>`).join("")}
     </div>
+    ${taskTimesHtml(task)}
     <h3>简介</h3><div class="task-summary">${esc(task.summary) || "暂无简介"}</div>
     <h3>正文</h3>
     <article class="task-body markdown-body">${task.body ? markdownPreviewHtml(task.body, { showFrontmatter: false }) : '<span class="empty">暂无正文</span>'}</article>
@@ -138,7 +151,7 @@ async function openTask(id, updateRoute = true) {
   ];
   if (!task.archived && taskStatus(task) !== "已完成")
     actions.push(
-      `<button class="action" onclick="processTask('${task.id}')">交给主控处理</button>`);
+      `<button class="action" onclick="processTask('${task.id}')">交给角色处理</button>`);
   document.getElementById("dlg-actions").innerHTML = actions.join("");
   if (!dlg.open) dlg.showModal();
   if (updateRoute) syncUrl();
@@ -152,16 +165,34 @@ function renderTaskChannelOptions(selected = []) {
   ).join("") || '<span class="empty">当前项目没有可用 Channel</span>';
 }
 
-function openNewTask() {
+// 表单的状态选项随任务所属数据源而定;源已不在时退回内置四态
+function taskStatusOptions(source) {
+  const values = sourceStatusValues(source).map(item => item.value).filter(Boolean);
+  return values.length ? values : STATUS_VALUES;
+}
+
+function renderTaskStatusOptions(values, selected) {
+  // 不在取值里的自由状态文本也列为选项,编辑时不会被悄悄改掉
+  const options = [...new Set([...values, selected].filter(Boolean))];
+  const select = document.getElementById("nt-status");
+  select.innerHTML = options.map(value =>
+    `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+  select.value = selected || values[0];
+}
+
+function openNewTask(source = "built-in") {
   if (!currentProject) { uiAlert("请先创建/选择项目"); return; }
   editingTaskId = null;
   editingTaskSnapshot = null;
-  document.getElementById("tdlg-title").textContent = "新建 Task";
+  editingTaskSource = source || "built-in";
+  const values = taskStatusOptions(editingTaskSource);
+  document.getElementById("tdlg-title").textContent = editingTaskSource === "built-in"
+    ? "新建 Task" : `新建 Task · ${boardSourceName(editingTaskSource)}`;
   document.getElementById("task-save-btn").textContent = "创建 Task";
   document.getElementById("nt-title").value = "";
   document.getElementById("nt-summary").value = "";
   document.getElementById("nt-body").value = "";
-  document.getElementById("nt-status").value = "待处理";
+  renderTaskStatusOptions(values, values[0]);
   document.getElementById("nt-labels").value = "";
   const active = projChannels().filter(channel => !channel.archived);
   const initial = active.some(channel => channel.id === currentChan)
@@ -177,17 +208,13 @@ function openTaskEditor(id) {
   editingTaskId = id;
   editingTaskSnapshot = task.updated_at;
   closeTaskDialog(false);
+  const values = taskStatusOptions(task.source_id);
   document.getElementById("tdlg-title").textContent = `编辑 ${id}`;
   document.getElementById("task-save-btn").textContent = "保存修改";
   document.getElementById("nt-title").value = task.title;
   document.getElementById("nt-summary").value = task.summary;
   document.getElementById("nt-body").value = task.body;
-  const select = document.getElementById("nt-status");
-  const status = taskStatus(task);
-  if (status && !STATUS_VALUES.includes(status))   // 自由状态文本也可编辑
-    select.insertAdjacentHTML("beforeend",
-      `<option value="${esc(status)}">${esc(status)}</option>`);
-  select.value = status || "待处理";
+  renderTaskStatusOptions(values, taskStatus(task) || values[0]);
   document.getElementById("nt-labels").value = taskDisplayLabels(task).join(", ");
   renderTaskChannelOptions(task.channel_ids);
   tdlg.showModal();
@@ -222,6 +249,7 @@ async function saveTask() {
     await api("PATCH", `/api/tasks/${id}`, payload);
   } else {
     payload.project_id = currentProject;
+    payload.source = editingTaskSource;
     await api("POST", "/api/tasks", payload);
   }
   editingTaskId = null;
@@ -237,7 +265,8 @@ function openTaskBriefForm(id) {
   if (!task || task.id !== id) return;
   closeTaskDialog(false);
   const current = taskStatus(task);
-  const options = [...new Set([current, ...STATUS_VALUES])].filter(Boolean);
+  const values = taskStatusOptions(task.source_id);
+  const options = [...new Set([current, ...values])].filter(Boolean);
   openFormDialog("添加状态简报", `
     <label>状态</label><select id="task-brief-status">
       ${options.map(value =>
@@ -266,16 +295,32 @@ async function saveTaskBrief(id) {
   toast("状态简报已添加", "success");
 }
 
+// 派发只发到一个频道:可选项为项目全部活跃频道,默认首个绑定频道,无绑定时回退 general
+function taskDispatchChannelOptions(task) {
+  const active = projChannels().filter(channel => !channel.archived);
+  const bound = task.channel_ids.filter(id => active.some(channel => channel.id === id));
+  const selected = bound[0] || (active.find(channelIsGeneral) || active[0])?.id;
+  // 已绑定的排在前面并标注,选未绑定频道时后端会顺带绑定
+  const ordered = [...active].sort((a, b) =>
+    Number(!bound.includes(a.id)) - Number(!bound.includes(b.id)));
+  return ordered.map(channel => `<option value="${esc(channel.id)}"
+    ${channel.id === selected ? "selected" : ""}>#${esc(channel.name || channel.id)}${
+      bound.includes(channel.id) ? " · 已绑定" : ""}</option>`).join("");
+}
+
 function processTask(id) {
   const task = currentTaskDetail?.task;
   if (!task || task.id !== id) return;
   closeTaskDialog(false);
   const peer = peerModeProject();
-  openFormDialog(`${peer ? "派发给角色" : "交给主控处理"} · ${task.id}`, `
-    <p class="muted" style="margin-top:0">将在所有绑定 Channel 中发送这条 Task。
+  openFormDialog(`交给角色处理 · ${task.id}`, `
+    <p class="muted" style="margin-top:0">只在所选的一个 Channel 中发送这条 Task,选未绑定的 Channel 会同时绑定它。
       ${peer ? "本项目没有主控:输入 @ 从列表选择处理角色(必填),多个角色各自启动。"
              : "可补充处理要求;输入 @ 从列表选择角色可指定处理人:单个角色直接执行" +
                "(不经主控),多个角色由主控协调。不 @ 任何角色则交给项目主控。"}</p>
+    <label>接收 Channel</label>
+    <select id="task-dispatch-channel">${taskDispatchChannelOptions(task)}</select>
+    <label>处理要求</label>
     <div class="composer-wrap task-dispatch-wrap">
       <div id="task-dispatch-input" class="task-dispatch-input" contenteditable="true"
         role="textbox" aria-multiline="true" aria-label="处理要求"
@@ -302,14 +347,17 @@ async function submitProcessTask(id) {
     uiAlert("本项目没有主控，请 @ 指定处理角色。");
     return;
   }
-  await api("POST", `/api/tasks/${id}/process`, { message: content, mentions });
+  const channel_id = document.getElementById("task-dispatch-channel").value;
+  if (!channel_id) { uiAlert("请先选择接收 Channel"); return; }
+  await api("POST", `/api/tasks/${id}/process`, { message: content, mentions, channel_id });
   activateComposer("input", "mention-picker");
   fdlg.close();
   await loadOverview();
   await openTask(id, false);
+  const where = `#${projChannels().find(channel => channel.id === channel_id)?.name || channel_id}`;
   const named = [...new Set(mentions.map(item => `@${item.role_id}`))];
-  toast(named.length ? `Task 已派发给 ${named.join("、")}`
-    : "Task 已发送给绑定 Channel 的主控", "success");
+  toast(named.length ? `Task 已在 ${where} 派发给 ${named.join("、")}`
+    : `Task 已发送给 ${where} 的主控`, "success");
 }
 
 async function archiveTask(id) {
@@ -345,9 +393,9 @@ async function deleteTask(id) {
 
 /* ---------------- 看板配置与自动处理规则 ----------------
    内置看板 = 四个锁定状态列 + 项目自定义筛选列(task_board_filters,每列
-   一个标签表达式)+ 可选分列属性(task_board_group_by),增删列/分组的入口在
-   看板工具条(boards.js 共用渲染器);规则(task_auto_rules)按表达式配置,从
-   列头的 ⚡ 图标进入(自定义面板的 taskboard 组件同入口)。 */
+   一个标签表达式)+ 默认分列属性(task_board_group_by),共享列在看板分列选
+   「自定义表达式列」后从旁边的 ✎ 打开编辑对话框修改;日常筛选和显示偏好由 boards.js 独立管理。规则(task_auto_rules)的
+   列表页与编辑器在 task-rules.js,列头 ⚡ 与面板组件打开同一个编辑器。 */
 
 function projTaskRules() {
   return projObj()?.task_auto_rules || [];
@@ -357,15 +405,9 @@ function projTaskBoardFilters() {
   return projObj()?.task_board_filters || [];
 }
 
-function taskHasLabel(task, label) {
-  return (task.labels || []).some(item =>
-    normalizeLabel(item).toLowerCase() === normalizeLabel(label).toLowerCase());
-}
-
+// 看板列与规则按条件对应:比较规范写法,空格、&& 等书写差异不影响
 function ruleForQuery(query) {
-  return projTaskRules().find(rule =>
-    (rule.query || "").toLowerCase() === String(query || "").toLowerCase())
-    || null;
+  return projTaskRules().find(rule => sameRuleQuery(rule.query, query)) || null;
 }
 
 // 看板/规则配置都持久化在项目对象上,复用项目保存端点(未传字段保留现值)
@@ -382,83 +424,4 @@ async function persistTaskBoardConfig(patch) {
   });
   await loadOverview();
   renderBoard();
-}
-
-function openColumnRule(query) {
-  const rule = ruleForQuery(query);
-  openFormDialog(`自动处理规则 · ${query}`, `
-    <p class="muted" style="margin-top:0">新建 Task(含脚本同步的 Task)的标签
-      命中表达式「${esc(query)}」时,按下面的处理要求自动派发。输入 @ 从列表选择角色:
-      ${peerModeProject() ? "本项目没有主控,必须 @ 至少一个角色,多个角色各自启动。"
-                          : "单个角色直接执行(不经主控),多个角色由主控协调;不 @ 任何角色则交给项目主控。"}</p>
-    <div class="composer-wrap task-dispatch-wrap">
-      <div id="task-rule-input" class="task-dispatch-input" contenteditable="true"
-        role="textbox" aria-multiline="true" aria-label="处理要求"
-        data-placeholder="处理要求,可 @指定角色…(Enter 保存,Shift+Enter 换行)"></div>
-      <div id="task-rule-picker" class="task-dispatch-picker" role="listbox" hidden></div>
-    </div>
-    <label><input type="checkbox" id="tr-enabled"
-      ${rule ? (rule.enabled ? "checked" : "") : "checked"}> 启用本规则</label>`,
-    `<button class="action" data-query="${esc(query)}"
-       onclick="saveColumnRule(this.dataset.query)">保存规则</button>
-     ${rule ? `<button class="danger" data-query="${esc(query)}"
-       onclick="deleteColumnRule(this.dataset.query)">删除规则</button>` : ""}
-     <button class="ghost" onclick="cancelColumnRule()">取消</button>`);
-  bindComposerEvents("task-rule-input", "task-rule-picker",
-    () => saveColumnRule(query));
-  const box = document.getElementById("task-rule-input");
-  if (rule) {
-    // 旧规则只有 role_ids:合成 "@角色 " 前缀提及,保存后自然升级成结构化提及
-    let content = rule.prompt || "";
-    let mentions = rule.mentions || [];
-    if (!mentions.length && rule.role_ids?.length) {
-      let prefix = "";
-      mentions = rule.role_ids.map(id => {
-        const start = Array.from(prefix).length;
-        prefix += `@${id} `;
-        return { role_id: id, start, end: start + id.length + 1 };
-      });
-      content = prefix + content;
-    }
-    restoreComposerPayload(content, mentions, box);
-  } else {
-    setTimeout(() => box?.focus(), 60);
-  }
-}
-
-function cancelColumnRule() {
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-}
-
-async function saveColumnRule(query) {
-  const box = document.getElementById("task-rule-input");
-  const { content, mentions } = composerPayload(box);
-  const rules = projTaskRules().map(rule => ({ ...rule }));
-  const index = rules.findIndex(rule =>
-    (rule.query || "").toLowerCase() === query.toLowerCase());
-  const rule = {
-    query,
-    prompt: content,
-    mentions,
-    role_ids: [...new Set(mentions.map(item => item.role_id))],
-    enabled: document.getElementById("tr-enabled").checked,
-  };
-  if (index >= 0) rules[index] = rule; else rules.push(rule);
-  await persistTaskBoardConfig({ task_auto_rules: rules });
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-  toast(`表达式「${query}」的自动处理规则已保存`, "success");
-}
-
-async function deleteColumnRule(query) {
-  if (!await uiConfirm(`删除表达式「${query}」的自动处理规则?`)) return;
-  await persistTaskBoardConfig({
-    task_auto_rules: projTaskRules()
-      .filter(rule => (rule.query || "").toLowerCase() !== query.toLowerCase())
-      .map(rule => ({ ...rule })),
-  });
-  activateComposer("input", "mention-picker");
-  fdlg.close();
-  toast("自动处理规则已删除", "success");
 }

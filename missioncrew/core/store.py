@@ -1157,13 +1157,13 @@ class Store:
             (automation_id, project_id, trigger, trigger_detail, time.time()),
         )
 
-    def prune_automation_runs(self, automation_id: str, keep: int) -> None:
-        """只保留该脚本最近 keep 条运行记录(webhook 频繁触发时运行表不会无限增长)。"""
+    def prune_automation_runs(self, cutoff: float) -> None:
+        """删除 cutoff 之前开始的运行记录;每个脚本最近一条始终保留,
+        低频脚本过了保留期也能看到上一次的结果。"""
         self._execute(
-            "DELETE FROM automation_runs WHERE automation_id=? AND id NOT IN "
-            "(SELECT id FROM automation_runs WHERE automation_id=? "
-            "ORDER BY id DESC LIMIT ?)",
-            (automation_id, automation_id, keep),
+            "DELETE FROM automation_runs WHERE started_at<? AND id NOT IN "
+            "(SELECT MAX(id) FROM automation_runs GROUP BY automation_id)",
+            (cutoff,),
         )
 
     def finish_automation_run(self, run_id: int, status: str,
@@ -1181,14 +1181,23 @@ class Store:
             "SELECT * FROM automation_runs WHERE id=?", (run_id,))
         return dict(rows[0]) if rows else None
 
-    def list_automation_runs(self, automation_id: str,
-                             limit: int = 20) -> list[dict]:
+    def list_automation_runs(self, automation_id: str, limit: int = 20,
+                             before_id: int = 0) -> list[dict]:
+        """按 id 倒序取最近 limit 条;before_id>0 时只取更早的记录,用于向前翻页。"""
+        condition = "AND id<? " if before_id > 0 else ""
+        limit = max(1, min(int(limit), 200))
+        params = ((automation_id, before_id, limit) if before_id > 0
+                  else (automation_id, limit))
         rows = self._query(
-            "SELECT * FROM automation_runs WHERE automation_id=? "
-            "ORDER BY id DESC LIMIT ?",
-            (automation_id, max(1, min(int(limit), 200))),
-        )
+            f"SELECT * FROM automation_runs WHERE automation_id=? {condition}"
+            "ORDER BY id DESC LIMIT ?", params)
         return [dict(row) for row in rows]
+
+    def count_automation_runs(self, automation_id: str) -> int:
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id=?",
+            (automation_id,))
+        return int(rows[0]["n"]) if rows else 0
 
     # ---- 聊天:消息 ----
     def add_message(self, channel: str, author: str, author_type: str, content: str,

@@ -29,6 +29,17 @@ def _repo(path):
     return path
 
 
+def _empty_template_repo(path):
+    path.mkdir()
+    _git(path, "init", "--template=", "-b", "main")
+    _git(path, "config", "user.name", "MissionCrew Test")
+    _git(path, "config", "user.email", "test@example.invalid")
+    (path / "README.md").write_text("base\n")
+    _git(path, "add", "README.md")
+    _git(path, "commit", "-m", "base")
+    return path
+
+
 def _create(store, repo, **overrides):
     project = store.get_project("webshop")
     project.repos = [ProjectResource(
@@ -77,6 +88,15 @@ def test_create_rejects_missing_dirty_duplicate_and_disabled(seeded, tmp_path):
     with pytest.raises(WorkspaceError) as duplicate:
         _create(seeded, repo, allow_dirty=True)
     assert duplicate.value.code == "already_exists"
+
+
+def test_create_succeeds_with_empty_git_template(seeded, tmp_path):
+    repo = _empty_template_repo(tmp_path / "empty-template-repo")
+    assert not (repo / ".git" / "info").exists()
+    result = _create(seeded, repo)
+    assert result["channel"]["workdir"] == str(repo / ".worktrees" / "task-1")
+    assert (repo / ".git" / "info" / "exclude").read_text().splitlines().count(
+        "/.worktrees/") == 1
 
 
 def test_create_rejects_duplicate_task(seeded, tmp_path):
@@ -172,6 +192,12 @@ def test_finish_candidate_and_remove_requires_merge(seeded, tmp_path):
     (workdir / "change.txt").write_text("change\n")
     _git(workdir, "add", "change.txt")
     _git(workdir, "commit", "-m", "implement feature")
+    # Compatibility with managed channels created by c2a9fe5.
+    metadata = channel.managed_worktree
+    metadata["repo"] = str(repo)
+    metadata.pop("repo_name")
+    metadata.pop("base_sha")
+    seeded.put_channel(channel)
     candidate = finish(seeded, seeded.get_project("webshop"), channel)
     assert "change.txt" in candidate["diff_stat"]
     assert len(candidate["commits"]) == 1
@@ -253,6 +279,16 @@ def test_finish_and_remove_reject_missing_worktree(seeded, tmp_path):
     with pytest.raises(WorkspaceError) as remove_error:
         remove(seeded, seeded.get_project("webshop"), channel, "human")
     assert remove_error.value.code == "worktree_missing"
+
+
+def test_remove_maps_broken_worktree_git_state_to_missing(seeded, tmp_path):
+    repo = _repo(tmp_path / "repo")
+    _create(seeded, repo)
+    channel = seeded.get_channel("webshop:task-1")
+    Path(channel.workdir, ".git").write_text("gitdir: /missing\n")
+    with pytest.raises(WorkspaceError) as error:
+        remove(seeded, seeded.get_project("webshop"), channel, "human")
+    assert error.value.code == "worktree_missing"
 
 
 def test_project_switch_persists_and_channel_api_exposes_workspace(seeded, tmp_path):

@@ -254,8 +254,9 @@ An orchestrator's turn:
   Dirty source trees are rejected unless `allow_dirty: true` is explicit. Creation failures roll
   back newly created resources; check the returned error for any path needing manual recovery.
 - `workspace.finish` returns the diff summary, commits, ahead count and merge suggestion. It never
-  merges. A human must merge first. `workspace.remove` then verifies the branch is merged, removes
-  the worktree and branch, and archives the channel; it refuses active runs and unmerged branches.
+  merges. A human must merge first. `workspace.remove` verifies the channel can be archived,
+  archives the channel and stops its Runtime, then removes the worktree and branch; it refuses
+  active runs, unmerged branches and worktrees with uncommitted changes (`worktree_dirty`).
   Call `workspace.remove` from another channel; calling it in the managed channel's own Run returns
   `channel_in_use` because that Run is still active.
 - Project worktree metadata is visible in channel listings and the channel header. Closing the

@@ -53,10 +53,13 @@ def _repo_path(project, metadata: dict) -> Path | None:
     name = metadata.get("repo_name")
     resource = next((item for item in project.repos
                      if (item.name or item.id) == name and item.path), None)
-    if resource is None:
-        return None
-    path = Path(resource.path).expanduser()
-    return path.resolve() if path.is_dir() else None
+    if resource is not None:
+        path = Path(resource.path).expanduser()
+        if path.is_dir():
+            return path.resolve()
+    # Older channels stored the repository path directly in their metadata.
+    legacy = Path(str(metadata.get("repo") or "")).expanduser()
+    return legacy.resolve() if legacy.is_dir() else None
 
 
 def _base_sha(repo: Path, base: str) -> str:
@@ -77,17 +80,21 @@ def _worktree_state(workdir: Path) -> tuple[str, bool]:
 
 
 def _ensure_worktrees_ignored(repo: Path) -> None:
-    result = _git(repo, "rev-parse", "--git-path", "info/exclude")
-    exclude = Path(result.stdout.strip())
-    if not exclude.is_absolute():
-        exclude = repo / exclude
-    entry = "/.worktrees/"
-    current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    if entry not in current.splitlines():
-        with exclude.open("a", encoding="utf-8") as stream:
-            if current and not current.endswith("\n"):
-                stream.write("\n")
-            stream.write(entry + "\n")
+    try:
+        result = _git(repo, "rev-parse", "--git-path", "info/exclude")
+        exclude = Path(result.stdout.strip())
+        if not exclude.is_absolute():
+            exclude = repo / exclude
+        entry = "/.worktrees/"
+        current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if entry not in current.splitlines():
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a", encoding="utf-8") as stream:
+                if current and not current.endswith("\n"):
+                    stream.write("\n")
+                stream.write(entry + "\n")
+    except OSError:
+        return
 
 
 def create(store: Store, project, actor: str, *, repo_path: str, name: str,
@@ -199,7 +206,7 @@ def finish(store: Store, project, channel: Channel) -> dict:
         raise WorkspaceError("worktree_missing", str(exc), 409) from exc
     stats = _git(repo, "diff", "--stat", f"{base}...{branch}").stdout.strip()
     commits = _git(repo, "log", "--oneline", "--reverse", f"{base}..{branch}").stdout.splitlines()
-    merged = ahead == 0 and head != metadata["base_sha"]
+    merged = ahead == 0 and head != metadata.get("base_sha")
     metadata["merged"] = merged
     store.put_channel(channel)
     summary = ("分支已并入基线" if merged else "已生成合并候选")
@@ -247,7 +254,10 @@ def remove(store: Store, project, channel: Channel, actor: str,
     count = _git(repo, "rev-list", "--count", f"{base}..{branch}", check=False)
     if count.returncode:
         raise WorkspaceError("base_not_found", f"无法读取基线或分支: {base}..{branch}", 409)
-    head, dirty = _worktree_state(Path(channel.workdir))
+    try:
+        head, dirty = _worktree_state(Path(channel.workdir))
+    except WorkspaceError as exc:
+        raise WorkspaceError("worktree_missing", str(exc), 409) from exc
     if int(count.stdout.strip() or 0) != 0 or head == metadata.get("base_sha"):
         raise WorkspaceError("not_merged", f"分支 {branch} 尚未并入 {base}，拒绝删除 worktree 和分支", 409)
     if dirty:

@@ -239,7 +239,7 @@ function renderChannelState() {
       <div class="channel-meta" id="channel-meta">
         <span><b>用途</b>${esc(channel.purpose || "未说明")}</span>
         <span><b>工作目录</b><code>${esc(channel.workdir || "平台内置工作区")}</code></span>
-        ${channel.managed_worktree ? `<span><b>合并状态</b>${channel.managed_worktree.merged ? "已并入基线" : "待人工合并"} · 基线 ${esc(channel.managed_worktree.base)}${channel.managed_worktree.missing ? " · worktree 缺失" : ""}</span>` : ""}
+        ${channel.managed_worktree ? `<span><b>合并状态</b>${channel.managed_worktree.merged ? "已并入基线" : "待人工合并"} · 基线 ${esc(channel.managed_worktree.base)}${channel.managed_worktree.dirty ? " · 有未提交改动" : ""}${channel.managed_worktree.missing ? " · worktree 缺失" : ""}</span>` : ""}
         <span><b>创建者</b>${esc(channel.created_by_role_id ? "@" + channel.created_by_role_id : "human/platform")}</span>
       </div>`;
     applyChannelHeadState();

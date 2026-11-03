@@ -45,4 +45,7 @@ def test_package_version_is_not_duplicated_in_source():
 
 
 def test_installed_distribution_uses_package_version():
-    assert importlib.metadata.version("missioncrew") == __version__
+    installed = importlib.metadata.version("missioncrew")
+    assert installed == __version__, (
+        f"已安装元数据 {installed} ≠ 包内 {__version__}；运行 uv sync --reinstall-package missioncrew 后重试"
+    )

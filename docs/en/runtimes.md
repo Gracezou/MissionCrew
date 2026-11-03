@@ -160,6 +160,7 @@ Each turn: while the process is alive, `prompt` is sent directly (differences in
 ### Chat Interaction and MissionCrew Permission Takeover
 
 Native user-input/permission requests are persisted as separate JSON events, and the chat run status switches to `waiting_user`. The user's answer is passed back by run id and a random request id; the raw answer exists only in the in-memory pending request and is not written to run events, so secret input or credentials never enter the logs. Once answered, the native request receives a response and the run returns to `running`.
+<!-- fork-divergence: interaction events use result_type to distinguish question_waiting, approval_waiting, and policy_decision (automatic approval or denial); only actionable requests enter waiting_user. The first wait in a run posts one channel reminder with a direct run-card link. Keep aligned with the Chinese runtimes.md. -->
 
 Meaning of the unified approval modes:
 

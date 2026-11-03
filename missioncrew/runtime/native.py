@@ -75,6 +75,13 @@ def safe_emit(emit: Optional[Callable[[str, str], None]],
 
 def emit_json(emit: Optional[Callable[[str, str], None]],
               kind: str, payload: dict) -> None:
+    if kind == "permission_request":
+        status = payload.get("status")
+        payload = {
+            **payload,
+            "result_type": "policy_decision" if status in
+            ("auto_approved", "denied") else "approval_required",
+        }
     safe_emit(emit, kind, json.dumps(payload, ensure_ascii=False))
 
 

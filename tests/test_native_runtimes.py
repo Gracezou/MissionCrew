@@ -288,20 +288,28 @@ def test_native_provider_restarts_changed_process_and_resumes_session(
     ("claude_code", ClaudeRuntimeProvider),
     ("codex", CodexRuntimeProvider),
 ])
-def test_missioncrew_auto_permission_approves_without_native_bypass(
-        tmp_path, adapter, provider_cls):
+@pytest.mark.parametrize("policy,expected_status", [
+    ("auto", "auto_approved"), ("deny", "denied"),
+])
+def test_missioncrew_policy_decisions_do_not_wait_for_user(
+        tmp_path, adapter, provider_cls, policy, expected_status):
     provider = provider_cls(_Fallback(), _fake_command(adapter))
     saved: dict = {}
     events: list[tuple[str, str]] = []
     try:
         result = provider.start(_config(
             tmp_path, adapter, "ASK_PERMISSION", saved, events,
-            interact=lambda *_: pytest.fail("YOLO 不应等待用户")))
+            approval=policy,
+            interact=lambda *_: pytest.fail("策略决定不应等待用户")))
         assert result.success
-        assert '"accept"' in result.output or '"behavior": "allow"' in result.output
+        if policy == "auto":
+            assert '"accept"' in result.output or '"behavior": "allow"' in result.output
+        else:
+            assert '"decline"' in result.output or '"behavior": "deny"' in result.output
         audits = [json.loads(text) for kind, text in events
                   if kind == "permission_request"]
-        assert audits and audits[-1]["status"] == "auto_approved"
+        assert audits and audits[-1]["status"] == expected_status
+        assert audits[-1]["result_type"] == "policy_decision"
     finally:
         provider.shutdown()
 

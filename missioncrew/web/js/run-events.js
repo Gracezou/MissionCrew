@@ -288,13 +288,15 @@ function renderRunEvent(run, event, openEventId) {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderPermissionRequest(run, event, payload);
-      preview = payload.status === "pending" ? "等待用户决定" : `已处理 · ${payload.status}`;
+      preview = payload.status === "pending" ? "权限待审"
+        : payload.result_type === "policy_decision"
+          ? `策略决定 · ${payload.status}` : `已处理 · ${payload.status}`;
     }
   } else if (event.kind === "user_input_request") {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderUserInputRequest(run, event, payload);
-      preview = payload.status === "pending" ? "等待用户回答" : `已处理 · ${payload.status}`;
+      preview = payload.status === "pending" ? "提问待答" : `已处理 · ${payload.status}`;
     }
   } else if (event.kind === "usage") {
     const payload = parseStructuredRunEvent(event);
@@ -475,6 +477,7 @@ function syncRuns(runs, surface = null) {
       if (!anchor) continue;
       const el = document.createElement("details");
       el.className = "run-card";
+      el.id = `run-card-${run.id}`;
       el.dataset.trigger = run.trigger_message_id;
       el.dataset.runId = run.id;
       el.innerHTML = `<summary></summary><div class="rc-events"></div>`;
@@ -491,6 +494,8 @@ function syncRuns(runs, surface = null) {
              && Number(anchor.nextElementSibling.dataset.runId) < run.id)
         anchor = anchor.nextElementSibling;
       anchor.after(el);
+      if (location.hash === `#run-card-${run.id}`)
+        el.scrollIntoView({ block: "center" });
       cards.set(run.id, card);
     }
     const live = ["queued", "running", "waiting_user"].includes(run.status);

@@ -15,6 +15,10 @@ function channelSidebarItem(channel, topic = "") {
   // 归档频道只读、内容专属频道由平台维护,不能编辑;general 只能编辑,不能归档或删除
   const editable = !channel.archived && !channelIsContent(channel);
   const status = channel.archived ? `<span class="channel-state">已归档</span>` : "";
+  const workspace = channel.managed_worktree;
+  const workspaceBadge = workspace ? `<span class="channel-state" title="受管 worktree · ${
+    esc(workspace.branch)} · ${workspace.merged ? "已合并" : `领先 ${Number(workspace.commits_ahead || 0)} 个提交`}
+    ${workspace.missing ? " · 目录缺失" : ""}">工作树</span>` : "";
   const runMarker = channelMarkersHtml(
     `data-channel-id="${esc(channel.id)}"`, channelRunningCount(channel));
   const actions = !editable && general ? "" : `<span class="channel-item-actions">
@@ -38,7 +42,7 @@ function channelSidebarItem(channel, topic = "") {
       data-channel-id="${esc(channel.id)}" onclick="selectChannel(this.dataset.channelId)"
       title="${esc(channel.purpose || "")}">
     <span class="channel-icon" aria-hidden="true"></span>
-    <span class="channel-name">${esc(topic || channel.name || channel.id)}</span>${runMarker}${status}${actions}</div>`;
+    <span class="channel-name">${esc(topic || channel.name || channel.id)}</span>${runMarker}${status}${workspaceBadge}${actions}</div>`;
 }
 
 /* ---- 频道分组 ----
@@ -223,6 +227,7 @@ function renderChannelState() {
         <h2># ${esc(displayName)}</h2>
         ${channelIsGeneral(channel) ? `<span class="badge">默认频道</span>` : ""}
         ${channelIsContent(channel) ? `<span class="badge">内容专属频道</span>` : ""}
+        ${channel.managed_worktree ? `<span class="badge">受管工作树 · ${esc(channel.managed_worktree.branch)} · ${channel.managed_worktree.merged ? "已合并" : `领先 ${Number(channel.managed_worktree.commits_ahead || 0)} 个提交`}</span>` : ""}
         <span class="badge">${archived ? "已归档" : "活跃"}</span>
         <span class="channel-background-marker channel-head-marker"
           data-channel-id="${esc(channel.id)}" hidden>⏳ <b></b> 个后台命令</span>
@@ -234,6 +239,7 @@ function renderChannelState() {
       <div class="channel-meta" id="channel-meta">
         <span><b>用途</b>${esc(channel.purpose || "未说明")}</span>
         <span><b>工作目录</b><code>${esc(channel.workdir || "平台内置工作区")}</code></span>
+        ${channel.managed_worktree ? `<span><b>合并状态</b>${channel.managed_worktree.merged ? "已并入基线" : "待人工合并"} · 基线 ${esc(channel.managed_worktree.base)}${channel.managed_worktree.missing ? " · worktree 缺失" : ""}</span>` : ""}
         <span><b>创建者</b>${esc(channel.created_by_role_id ? "@" + channel.created_by_role_id : "human/platform")}</span>
       </div>`;
     applyChannelHeadState();

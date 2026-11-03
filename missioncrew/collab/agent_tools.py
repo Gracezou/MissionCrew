@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from . import board_sources
 from . import channels as channel_ops
+from . import workspaces as workspace_ops
 from .content_channels import content_channel, rebind_content_channel
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls, safe_relative_path)
@@ -332,6 +333,31 @@ ACTION_DEFINITIONS = {
                       "name": "name; 'group/topic' files it under a collapsible sidebar group",
                       "purpose": "purpose",
                       "workdir": "optional project repository directory"},
+    },
+    "workspace.create": {
+        "description": "Create a managed Git worktree, branch, and bound project channel",
+        "orchestrator_only": True,
+        "arguments": {
+            "repo_path": "project repository root path",
+            "name": "worktree directory name under .worktrees",
+            "base": "existing base branch or commit",
+            "branch": "new Git branch name",
+            "channel_id": "short channel id",
+            "channel_name": "channel name; use group/topic for sidebar grouping",
+            "purpose": "channel purpose",
+            "task_id": "optional project Task id to associate",
+            "allow_dirty": "explicitly allow the source repository to have uncommitted changes",
+        },
+    },
+    "workspace.finish": {
+        "description": "Return a managed worktree merge candidate without merging it",
+        "orchestrator_only": True,
+        "arguments": {"channel": "short channel id"},
+    },
+    "workspace.remove": {
+        "description": "After a human confirms merge, remove the merged worktree and branch and archive its channel",
+        "orchestrator_only": True,
+        "arguments": {"channel": "short channel id"},
     },
     "channel.update": {
         "description": ("Change a project channel's name, purpose or workdir; archived and "
@@ -652,6 +678,10 @@ ACTION_ARGUMENTS = {
     "channel.history": {"channel", "limit", "before_id"},
     "channel.list": {"scope"},
     "channel.create": {"id", "name", "purpose", "workdir"},
+    "workspace.create": {"repo_path", "name", "base", "branch", "channel_id",
+                          "channel_name", "purpose", "task_id", "allow_dirty"},
+    "workspace.finish": {"channel"},
+    "workspace.remove": {"channel"},
     "channel.update": {"id", "name", "purpose", "workdir"},
     "channel.archive": {"id"},
     "channel.restore": {"id"},
@@ -1132,6 +1162,9 @@ class AgentActionService:
             "channel.history": self._channel_history,
             "channel.list": self._list_channels,
             "channel.create": self._create_channel,
+            "workspace.create": self._create_workspace,
+            "workspace.finish": self._finish_workspace,
+            "workspace.remove": self._remove_workspace,
             "channel.update": self._update_channel,
             "channel.archive": self._archive_channel,
             "channel.restore": self._restore_channel,
@@ -1778,6 +1811,56 @@ class AgentActionService:
             "summary": f"已创建频道 [#{channel.name}]({url}){where}",
             "channel": channel.to_dict(), "resource_url": url,
         }
+
+    def _create_workspace(self, project: Project, identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        repo_path = str(arguments.get("repo_path") or "").strip()
+        if not any(Path(repo_path).expanduser().resolve() == Path(item).expanduser().resolve()
+                   for item in project.repo_paths()):
+            raise AgentToolError("permission_denied", "repo_path 必须是当前项目登记的仓库根目录", 403)
+        if "allow_dirty" in arguments and not isinstance(arguments["allow_dirty"], bool):
+            raise AgentToolError("invalid_arguments", "allow_dirty 必须是布尔值")
+        try:
+            return workspace_ops.create(
+                self.store, project, identity.actor, repo_path=repo_path,
+                name=str(arguments.get("name") or ""),
+                base=str(arguments.get("base") or ""),
+                branch=str(arguments.get("branch") or ""),
+                channel_id=str(arguments.get("channel_id") or ""),
+                channel_name=str(arguments.get("channel_name") or ""),
+                purpose=str(arguments.get("purpose") or ""),
+                task_id=str(arguments.get("task_id") or ""),
+                allow_dirty=arguments.get("allow_dirty", False),
+            )
+        except workspace_ops.WorkspaceError as exc:
+            raise AgentToolError(exc.code, str(exc), exc.status_code) from exc
+
+    def _workspace_channel(self, project: Project, arguments: dict) -> Channel:
+        short_id = str(arguments.get("channel") or "").strip()
+        if not CONTROL_ID_RE.fullmatch(short_id):
+            raise AgentToolError("invalid_arguments", "channel 必须是项目内短频道 id")
+        channel = self.store.get_channel(f"{project.id}:{short_id}")
+        if channel is None:
+            raise AgentToolError("channel_not_found", f"频道不存在: {short_id}", 404)
+        return channel
+
+    def _finish_workspace(self, project: Project, _identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        try:
+            return workspace_ops.finish(self.store, project,
+                                        self._workspace_channel(project, arguments))
+        except workspace_ops.WorkspaceError as exc:
+            raise AgentToolError(exc.code, str(exc), exc.status_code) from exc
+
+    def _remove_workspace(self, project: Project, identity: AgentIdentity,
+                          arguments: dict, _context: AgentRunContext) -> dict:
+        try:
+            return workspace_ops.remove(
+                self.store, project, self._workspace_channel(project, arguments),
+                identity.actor, stop_sessions=self._stop_channel_sessions,
+            )
+        except workspace_ops.WorkspaceError as exc:
+            raise AgentToolError(exc.code, str(exc), exc.status_code) from exc
 
 
     def _update_channel(self, project: Project, identity: AgentIdentity,

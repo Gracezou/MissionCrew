@@ -12,6 +12,7 @@ from ..collab.content_channels import (CONTENT_KIND_LABELS,
 from ..collab.documents import normalize_document_resource_urls
 from ..collab.recycle_bin import recycle_channel
 from ..collab.resource_urls import channel_resource_url
+from ..collab.workspaces import status as managed_workspace_status
 from ..collab.workspace import write_page_context_snapshot
 from ..core.config import projects_dir
 from ..core.models import Channel
@@ -27,14 +28,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.get("/api/chat/channels")
     def channels():
-        return [{**c.to_dict(), **(
-            {"resource_url": channel_resource_url(c.project_id, c.id)}
-            if c.project_id else {})}
-            for c in store.list_channels()]
+        return [channel_data(c) for c in store.list_channels()]
 
     def channel_data(channel: Channel) -> dict:
-        return {**channel.to_dict(),
+        data = {**channel.to_dict(),
                 "resource_url": channel_resource_url(channel.project_id, channel.id)}
+        managed = managed_workspace_status(channel)
+        if managed is not None:
+            data["managed_worktree"] = managed
+        return data
 
     @app.get("/api/projects/{project_id}/channels")
     def project_channels(project_id: str, request: Request,

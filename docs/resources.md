@@ -62,6 +62,16 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 频道级停止操作会同时结束该频道中 `queued`、`running` 和 `waiting_user` 的聊天运行，释放待处理交互，终止对应 Runtime 进程，并留下可见平台消息和审计记录。平台保留已持久化的原生 session/thread ID，后续运行可重新启动进程并尝试恢复上下文；已完成的文件写入不会回滚。即使数据库已无活动 run，重复调用停止 API 也会根据频道保存的 Runtime session 清理孤儿进程。
 
+### 受管 Git worktree
+
+<!-- fork-divergence: Task/频道级 worktree lifecycle is maintained in this fork. -->
+
+项目主控可用 Agent Tool 的 `workspace.create` 创建一个 Task/频道级工作单元：平台在登记的 Git 仓库 `.worktrees/<name>` 下创建独立 worktree 和分支，再创建绑定该目录的频道，并可把现有 Task 关联到频道。基线必须存在；源仓有未提交更改时默认拒绝，只有显式传 `allow_dirty: true` 才继续。项目设置 `managed_worktrees_enabled` 默认开启；关闭后禁止新建，已有工作树继续可用。
+
+`workspace.finish` 返回相对基线的 `diff --stat`、提交列表、领先提交数、合并状态和建议命令，不执行合并。人类在主工作树确认并完成合并后，才可调用 `workspace.remove`；它会验证分支已并入基线且频道没有活动运行，再删除 worktree 和分支并归档频道。未合并分支、缺失目录或活动运行都会拒绝清理。创建失败会回滚本次新建的目录、分支和频道；若回滚本身失败，错误中会给出需人工检查的路径。
+
+频道列表 API 与聊天频道标题会显示受管标记、分支名、相对基线领先提交数和是否已合并。Git worktree 用于并行防止文件冲突，不是权限边界；项目写路径授权仍按项目配置执行。
+
 主要 API：
 
 - `GET /api/chat/channels`

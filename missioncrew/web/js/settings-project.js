@@ -48,6 +48,8 @@ async function renderProjSettings() {
     <select id="pf-orchestrator">${orchestratorOptions}</select>
     <label>单条协作链最大 Agent 执行次数（仅作失控兜底，不限制调度层级）</label>
     <input type="number" id="pf-max-chain-runs" min="1" step="1" value="${esc(project.max_chain_runs || 100)}">
+    <label><input type="checkbox" id="pf-managed-worktrees" ${project.managed_worktrees_enabled !== false ? "checked" : ""}>
+      允许创建受管 Git worktree（关闭后已有工作树仍可继续使用）</label>
     <label>项目章程（目标、范围、业务边界；完整规范请在“准则文档”全页管理）</label>
     <textarea id="pf-charter" rows="4">${esc(project.charter)}</textarea>
     <div class="form-actions">
@@ -116,6 +118,7 @@ async function saveProject() {
     description: document.getElementById("pf-desc").value.trim(),
     orchestrator_role_id: document.getElementById("pf-orchestrator").value,
     max_chain_runs: Number(document.getElementById("pf-max-chain-runs").value),
+    managed_worktrees_enabled: document.getElementById("pf-managed-worktrees").checked,
     charter: document.getElementById("pf-charter").value,
   };
   await api("POST", "/api/projects", body);

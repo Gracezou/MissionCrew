@@ -461,6 +461,7 @@ class Project:
     task_board_filters: list[dict] = field(default_factory=list)
     # 内置任务看板的默认分列属性(与自定义任务看板 Board.group_by 同语义)
     task_board_group_by: str = ""
+    managed_worktrees_enabled: bool = True  # 关闭后禁止新建,不影响已有工作树
 
     def __post_init__(self):
         # 代码仓条目归一化:旧版字符串路径与 dict 均转成 ProjectResource
@@ -795,6 +796,7 @@ class Channel:
     created_by_role_id: str = ""      # 为空表示人类/平台创建
     content_kind: str = ""            # 绑定的内容页类型：docs / guidelines / skills
     content_key: str = ""             # 内容页在项目内的稳定键（路径、name 或 Skill id）
+    managed_worktree: Optional[dict] = None  # 受管 worktree 元信息
     context_start_message_id: int = 0  # 最近一次清除上下文的可见分隔消息
     archived: bool = False             # 归档后对人类只读，Agent 默认不感知
     archived_at: float = 0.0

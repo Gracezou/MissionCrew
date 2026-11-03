@@ -31,9 +31,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return [channel_data(c) for c in store.list_channels()]
 
     def channel_data(channel: Channel) -> dict:
-        data = {**channel.to_dict(),
-                "resource_url": channel_resource_url(channel.project_id, channel.id)}
-        managed = managed_workspace_status(channel)
+        data = channel.to_dict()
+        if channel.project_id:
+            data["resource_url"] = channel_resource_url(channel.project_id, channel.id)
+        managed = managed_workspace_status(
+            channel, store.get_project(channel.project_id or ""))
         if managed is not None:
             data["managed_worktree"] = managed
         return data

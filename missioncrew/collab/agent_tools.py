@@ -1859,6 +1859,9 @@ class AgentActionService:
                 self.store, project, self._workspace_channel(project, arguments),
                 identity.actor, stop_sessions=self._stop_channel_sessions,
             )
+        except channel_ops.ChannelChangeError as exc:
+            code = "channel_in_use" if exc.code == "in_use" else exc.code
+            raise AgentToolError(code, str(exc), 409) from exc
         except workspace_ops.WorkspaceError as exc:
             raise AgentToolError(exc.code, str(exc), exc.status_code) from exc
 

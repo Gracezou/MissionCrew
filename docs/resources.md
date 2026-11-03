@@ -64,11 +64,13 @@ MissionCrew 资源分为两个互相关联但用途不同的层级：
 
 ### 受管 Git worktree
 
-<!-- fork-divergence: Task/频道级 worktree lifecycle is maintained in this fork. -->
+<!-- fork-divergence: 受管 worktree 生命周期为本 fork 功能。 -->
 
 项目主控可用 Agent Tool 的 `workspace.create` 创建一个 Task/频道级工作单元：平台在登记的 Git 仓库 `.worktrees/<name>` 下创建独立 worktree 和分支，再创建绑定该目录的频道，并可把现有 Task 关联到频道。基线必须存在；源仓有未提交更改时默认拒绝，只有显式传 `allow_dirty: true` 才继续。项目设置 `managed_worktrees_enabled` 默认开启；关闭后禁止新建，已有工作树继续可用。
 
 `workspace.finish` 返回相对基线的 `diff --stat`、提交列表、领先提交数、合并状态和建议命令，不执行合并。人类在主工作树确认并完成合并后，才可调用 `workspace.remove`；它会验证分支已并入基线且频道没有活动运行，再删除 worktree 和分支并归档频道。未合并分支、缺失目录或活动运行都会拒绝清理。创建失败会回滚本次新建的目录、分支和频道；若回滚本身失败，错误中会给出需人工检查的路径。
+
+`workspace.remove` 必须从其他频道调用；若在受管频道自己的 Run 中调用，会因该频道仍有活动 Run 而返回 `channel_in_use`。
 
 频道列表 API 与聊天频道标题会显示受管标记、分支名、相对基线领先提交数和是否已合并。Git worktree 用于并行防止文件冲突，不是权限边界；项目写路径授权仍按项目配置执行。
 

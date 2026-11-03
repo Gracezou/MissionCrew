@@ -256,6 +256,8 @@ An orchestrator's turn:
 - `workspace.finish` returns the diff summary, commits, ahead count and merge suggestion. It never
   merges. A human must merge first. `workspace.remove` then verifies the branch is merged, removes
   the worktree and branch, and archives the channel; it refuses active runs and unmerged branches.
+  Call `workspace.remove` from another channel; calling it in the managed channel's own Run returns
+  `channel_in_use` because that Run is still active.
 - Project worktree metadata is visible in channel listings and the channel header. Closing the
   project setting prevents new worktrees but leaves existing channels usable.
 

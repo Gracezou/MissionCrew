@@ -562,6 +562,18 @@ function appendAgentToolReceipt(message, pane, date) {
   refreshAgentToolGroup(group);
 }
 
+function openRuntimeInteractionRun(event, runId) {
+  event.preventDefault();
+  const pane = document.getElementById("msgs");
+  const card = document.getElementById(`run-card-${runId}`);
+  if (!card || !pane?.contains(card)) {
+    toast("运行卡片不在当前视图", "error");
+    return;
+  }
+  card.open = true;
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
 function mergeAdjacentAgentToolGroups(pane) {
   let previous = null;
   for (const child of [...pane.children]) {
@@ -627,6 +639,7 @@ function appendMessagesToSurface(list, surface) {
     const longReply = isAgent && m.content.length > MESSAGE_FOLD_AT;
     const renderMarkdown = isAgent || isAutomation;
     const attachments = Array.isArray(m.context?.attachments) ? m.context.attachments : [];
+    const interactionRunId = m.context?.runtime_interaction?.run_id;
     const images = attachments.filter(a => a && a.is_image && a.url);
     const div = document.createElement("div");
     div.className = `msg ${m.author_type}`;
@@ -637,6 +650,9 @@ function appendMessagesToSurface(list, surface) {
           ${isAgent ? `<span class="via">${esc(agentExecutionLabel(m))}</span>` : ""}<span class="time">${time}</span></div>
         <div class="body${renderMarkdown ? " markdown-body" : ""}${longReply ? " folded" : ""}"
           style="border-left:3px solid ${esc(color)}">${fmtBody(m.content, renderMarkdown, m.mention_spans)}</div>
+        ${m.author_type === "platform" && interactionRunId
+          ? `<button type="button" class="runtime-interaction-open" data-run-id="${esc(interactionRunId)}"
+              onclick="openRuntimeInteractionRun(event, this.dataset.runId)">打开运行卡片</button>` : ""}
         ${images.length ? `<div class="msg-attachments">${images.map(a =>
           `<img src="${esc(a.url)}" alt="${esc(uploadDisplayName(a.name))}" loading="lazy"
             title="点击预览" onclick="openImagePreview(this.src, this.alt)">`).join("")}</div>` : ""}

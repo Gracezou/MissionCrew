@@ -292,10 +292,7 @@ function renderRunEvent(run, event, openEventId) {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderPermissionRequest(run, event, payload);
-      preview = payload.status === "pending" ? "权限待审"
-        : payload.result_type === "policy_decision"
-          ? `策略决定 · ${permissionStatusLabel(payload.status, payload)}`
-          : `已处理 · ${permissionStatusLabel(payload.status, payload)}`;
+      preview = permissionStatusLabel(payload.status, payload);
     }
   } else if (event.kind === "user_input_request") {
     const payload = parseStructuredRunEvent(event);

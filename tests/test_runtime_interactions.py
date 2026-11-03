@@ -62,6 +62,10 @@ def test_pending_runtime_question_is_resolved_without_persisting_answer(store):
         "runtime": "codex", "request_type": "item/fileChange/requestApproval",
         "details": {"file_path": "/Users/alice/private/token.txt"},
     }, "approval_waiting", "token.txt"),
+    ("codex", "permission_request", {
+        "runtime": "codex", "request_type": "execCommandApproval",
+        "details": {"command": "curl https://host.example/x/y"},
+    }, "approval_waiting", "curl https://host.example/x/y"),
     ("claude", "user_input_request", {
         "runtime": "claude", "request_type": "AskUserQuestion",
         "questions": [{"id": "choice", "question": "Which option?"}],
@@ -110,7 +114,7 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         if backend == "codex" and kind == "permission_request":
             assert "/Users/alice/private" not in notices[0]["content"]
         assert json.loads(notices[0]["context"])["runtime_interaction"] == {
-            "run_id": run_id, "kind": kind, "result_type": result_type,
+            "run_id": run_id,
         }
         assert "#run-card-" not in notices[0]["content"]
         assert "项目主控：@lead" in notices[0]["content"]
@@ -125,7 +129,32 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         assert seeded.get_chat_run(run_id)["status"] == "running"
         if index == 0:
             for extra_index in range(220):
-                seeded.append_run_event(run_id, "status", f"step {extra_index}")
+                event_kind = "status" if extra_index % 2 else "text"
+                seeded.append_run_event(run_id, event_kind, f"step {extra_index}")
+            window = seeded.run_events(run_id)
+            assert len(window) == 200
+            assert all(event["id"] != last_event_id for event in window)
+
+
+@pytest.mark.parametrize("role_id,orchestrator_role_id", [
+    ("dev", ""), ("lead", "lead"),
+])
+def test_runtime_interaction_reminder_omits_irrelevant_orchestrator(
+        seeded, role_id, orchestrator_role_id):
+    project = seeded.get_project("webshop")
+    project.orchestrator_role_id = orchestrator_role_id
+    seeded.put_project(project)
+    trigger = seeded.add_message("general", "human", "human", "question", [])
+    run_id = seeded.add_chat_run("general", role_id, trigger, trigger, 0)
+    chat = ChatEngine(seeded, max_workers=1)
+
+    chat._notify_runtime_interaction(
+        run_id, "permission_request", {"tool": "Bash"})
+
+    notice = next(message for message in seeded.list_messages("general")
+                  if message["author_type"] == "platform"
+                  and "正在等待处理" in message["content"])
+    assert "项目主控" not in notice["content"]
 
 
 def test_interaction_completion_does_not_overwrite_finished_run(store):
@@ -279,11 +308,16 @@ def test_chat_assets_include_runtime_interaction_controls(seeded):
     assert "sendRuntimeInteraction" in js
     assert "waiting_user" in js
     assert "permission_request" in js and "user_input_request" in js
-    assert "提问待答" in js and "权限待审" in js and "策略决定" in js
+    assert "提问待答" in js and "等待决定" in js
+    assert "permissionStatusLabel(payload.status, payload)" in js
     assert 'el.id = `run-card-${run.id}`' in js
     sidebar = client.get("/assets/js/sidebar.js").text
     assert "m.context?.runtime_interaction?.run_id" in sidebar
     assert "打开运行卡片" in sidebar and "openRuntimeInteractionRun" in sidebar
+    open_handler = sidebar.split("function openRuntimeInteractionRun", 1)[1].split("\n}", 1)[0]
+    assert 'document.getElementById("msgs")' not in open_handler
+    css = client.get("/assets/css/app.css").text
+    assert ".runtime-interaction-open" in css
 
 
 def test_live_output_box_shows_pending_questions(seeded):

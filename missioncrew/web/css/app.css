@@ -270,6 +270,9 @@
   .message-fold-toggle { display: block; margin: 5px 4px 0; padding: 2px 0; border: 0;
                          background: transparent; color: var(--accent); font-size: 11.5px;
                          cursor: pointer; }
+  .runtime-interaction-open { display: block; margin: 5px 4px 0; padding: 2px 0; border: 0;
+                              background: transparent; color: var(--accent); font-size: 11.5px;
+                              cursor: pointer; }
   /* 连续 MissionCrew Tool 回执按 Agent 运行合并，避免批量发布文件时淹没对话。 */
   .agent-tool-group .agent-tool-avatar { background: var(--muted); }
   /* 左上圆角与左下一致:3px 角色色条两端对称收弧,避免小圆角处形成尖角 */

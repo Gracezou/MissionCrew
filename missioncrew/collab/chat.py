@@ -1445,8 +1445,10 @@ class ChatEngine:
                 command = details.get("command") or details.get("cmd") or ""
                 if isinstance(command, (list, tuple)):
                     command = " ".join(map(str, command))
-                command = re.sub(r"(?<![\w])/(?:[^\s/]+/)*([^\s/]+)", r"…/\1",
-                                 str(command))
+                command = re.sub(
+                    r"\w+://\S+|(?<![\w])/(?:[^\s/]+/)*([^\s/]+)",
+                    lambda match: (match.group(0) if "://" in match.group(0)
+                                   else f"…/{match.group(1)}"), str(command))
                 path = details.get("file_path") or details.get("path") or ""
                 path = Path(str(path)).name if path else ""
                 summary = str(payload.get("title") or payload.get("description")
@@ -1458,11 +1460,7 @@ class ChatEngine:
                 content += f"\n项目主控：@{project.orchestrator_role_id}"
             self.post(
                 run["channel"], "platform", content, author_type="platform",
-                context={"runtime_interaction": {
-                    "run_id": run_id, "kind": kind,
-                    "result_type": ("question_waiting" if kind == "user_input_request"
-                                    else "approval_waiting"),
-                }},
+                context={"runtime_interaction": {"run_id": run_id}},
             )
         except Exception as exc:
             self.store.audit(

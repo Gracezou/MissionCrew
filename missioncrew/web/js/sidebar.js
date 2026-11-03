@@ -564,9 +564,8 @@ function appendAgentToolReceipt(message, pane, date) {
 
 function openRuntimeInteractionRun(event, runId) {
   event.preventDefault();
-  const pane = document.getElementById("msgs");
   const card = document.getElementById(`run-card-${runId}`);
-  if (!card || !pane?.contains(card)) {
+  if (!card) {
     toast("运行卡片不在当前视图", "error");
     return;
   }

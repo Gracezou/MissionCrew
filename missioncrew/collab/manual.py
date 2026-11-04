@@ -182,7 +182,9 @@ An orchestrator's turn:
   actually started and `chain_budget` shows the runs used and the limit of this collaboration
   chain. Any @roleID or @[roleID] in a message body you send (including your final reply) is plain
   text and never triggers execution. Do not pass mentions unless you need collaboration; do not
-  dispatch to yourself or invent roles.
+  dispatch to yourself in the current channel or invent roles. Mentioning yourself with another
+  `channel` starts a separate session of you in that channel; its result is not returned to the
+  turn that started it.
 - Each role's runtime/model is fixed when the project defines the role; you cannot and need not
   change it. Scheduling means choosing from the role roster by profile, capabilities and
   preferences.
@@ -209,8 +211,11 @@ An orchestrator's turn:
   dispatch or to post to another channel; do not call `message.publish` with empty `mentions` to
   post the same answer again, or the channel shows two copies of the result.
 - Executors (every role except the orchestrator) may also call `message.publish` and
-  `channel.create`, but their `mentions` may only name the orchestrator; any other role returns
-  `permission_denied`. Use it to bring the orchestrator into another channel (such as one you
+  `channel.create`, but their `mentions` may only name the orchestrator, or themselves when
+  `channel` is another channel; any other role returns `permission_denied`. Mentioning yourself
+  in another channel starts a separate session of you there (for example to work in a channel you
+  just created with its own workdir); its result is routed like the turn that started it (back to
+  the orchestrator, or only to the channel if a human mentioned you directly). Use it to bring the orchestrator into another channel (such as one you
   just created, with a brief stating what to do there) or, when a human mentioned you directly,
   to hand it follow-up work. The orchestrator handles that message in its channel and its
   replies are not returned to you, so do not wait for it. When the orchestrator dispatched your
@@ -424,7 +429,8 @@ _PEER_FLOW = """\
 
 This project has no orchestrator: every role holds the orchestrator-level management actions
 (channels, dashboards, data sources, guidelines, skills, automations, the recycle bin), but roles
-cannot dispatch each other; only humans start roles.
+cannot dispatch each other; only humans start roles, apart from a role starting itself in another
+channel.
 A turn:
 1. Read the task: the trigger message is a human request or an automation script message; if information is missing, raise it in your reply instead of widening the scope.
 2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
@@ -438,10 +444,16 @@ _PEER_MESSAGES = """\
 ## 7. Messages
 
 - This project has no orchestrator, so roles cannot dispatch each other: `message.publish`
-  rejects `mentions`, and any @roleID or @[roleID] in a message body you send (including your
-  final reply) is plain text and never triggers execution. Only humans start roles; when a human
-  picks several roles in one trigger message, each starts on its own without waiting for the
-  others, and each result is only published to the channel.
+  rejects any other role in `mentions`, and any @roleID or @[roleID] in a message body you send
+  (including your final reply) is plain text and never triggers execution. Only humans start
+  roles; when a human picks several roles in one trigger message, each starts on its own without
+  waiting for the others, and each result is only published to the channel.
+- The one exception is yourself: `message.publish` with another `channel` and `mentions` set to
+  your own id starts a separate session of you in that channel (for example to work in a channel
+  you just created with its own workdir); mentioning yourself in the current channel returns
+  `invalid_arguments`. That session's result stays in its channel and is not returned to the turn
+  that started it, so do not wait for it. These sessions count toward the collaboration chain's
+  run cap, shown as `chain_budget` in the result.
 - When the work needs another role, finish what you can and say in your final reply which role
   should take it and why; a human decides whether to mention it.
 - Active run status is not written into your context automatically; when a human asks about runs
@@ -469,7 +481,7 @@ _PEER_REPLACEMENTS = (
     ("(orchestrator only, id defaults", "(id defaults"),
     ("action's description, arguments and whether it is orchestrator-only.",
      "action's description and arguments (this project has no orchestrator, so every action is "
-     "open to every role; `message.publish` only posts and cannot dispatch)."),
+     "open to every role; `message.publish` cannot dispatch other roles)."),
     ("work with Tasks, dispatch\nmessages", "work with Tasks, post\nmessages"),
     ("so the orchestrator or a human can adjust", "so a human can adjust"),
     ("so a human (or the\n  orchestrator) can save it", "so a human can save it"),
@@ -477,7 +489,8 @@ _PEER_REPLACEMENTS = (
      "check\n  it before referencing or creating another channel."),
     ("A new channel\n  starts empty: post the task brief into it with `message.publish` and name the "
      "executor\n  explicitly in `mentions` to start the work.",
-     "A new channel\n  starts empty; a human mentions the roles that should work there."),
+     "A new channel\n  starts empty: a human mentions the roles that should work there, or you "
+     "mention\n  yourself there with `message.publish` to work in it."),
 )
 
 
@@ -494,7 +507,7 @@ def render_manual(project: Project) -> str:
     if not project.has_orchestrator:
         text = _replace_section(text, "## 0. Typical Flow", "## 1. ", _PEER_FLOW + "\n")
         text = _replace_section(text, "## 7. Messages", "## 8. ", _PEER_MESSAGES)
-        # 协作链预算只约束派发,角色不能派发时整节不适用
+        # 协作链预算一节讲派发,无主控时不适用;自我提及计入预算已在第 7 节说明
         text = _replace_section(text, "## 14. ", "", "").rstrip() + "\n"
         for old, new in _PEER_REPLACEMENTS:
             assert old in text, old

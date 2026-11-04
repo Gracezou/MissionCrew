@@ -131,7 +131,7 @@ _EXECUTOR_STEPS = """\
 
 EXECUTOR_WORKFLOW = _EXECUTOR_STEPS + """
 - You are not the project orchestrator: you cannot see the roster of other executor roles and cannot dispatch to other roles; any @ in your message text is plain text.
-- You may create a channel with `channel.create` and post to another channel with `message.publish`. Its `mentions` accepts only the orchestrator `{orchestrator_id}`: use it to bring the orchestrator into another channel (such as one you just created) or, when a human mentioned you directly, to hand it follow-up work; the orchestrator's replies stay in that channel and are not returned to you.
+- You may create a channel with `channel.create` and post to another channel with `message.publish`. Its `mentions` accepts only the orchestrator `{orchestrator_id}`, plus your own id when `channel` is another channel: mention the orchestrator to bring it into another channel (such as one you just created) or, when a human mentioned you directly, to hand it follow-up work; its replies stay in that channel and are not returned to you. Mention yourself in another channel to start a separate session of you there (for example to work in a channel you just created with its own workdir); that session's result is routed like this turn's and is not returned to this turn.
 - Submit only the complete result of this task. If the orchestrator dispatched this turn, the platform hands your result back to it automatically; if a human mentioned you directly, the result is only published to the channel and does not trigger the orchestrator, which can still read the full record when a human calls on it later."""
 
 # 仅人工点名的角色:不进 Agent 协作图,有无主控都按执行角色干活,结果只留给人类
@@ -153,7 +153,8 @@ PEER_WORKFLOW = """\
 3. Do the work: read/write code and run commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. You cannot dispatch other roles: when part of the work needs another role, finish what you can and name that role in your reply (see the "Role Roster" below) so a human can mention it.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
 5. Reply: your final reply is published to the chat channel in full and verbatim. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths.
-- This project has no orchestrator: every role holds the orchestrator-level management permissions but cannot dispatch other roles. Your result is only published to the channel and triggers no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others."""
+- This project has no orchestrator: every role holds the orchestrator-level management permissions but cannot dispatch other roles. Your result is only published to the channel and triggers no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others.
+- To work in another channel (for example one you just created with `channel.create` and its own workdir), call `message.publish` there with `mentions` set to your own id: it starts a separate session of you in that channel, whose result stays in that channel and is not returned to this turn."""
 
 DURABLE_CONTEXT_TEMPLATE = """\
 # MissionCrew Durable Shared Context
@@ -264,7 +265,7 @@ CONTROL_RULES_TEMPLATE = """\
 # Orchestrator Duties
 You are the only orchestrator of this project: you understand the project goals, break down the work and dispatch other roles; every MissionCrew write operation must go through the Agent Tool above.
 Discipline:
-- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution; dispatching works only through the `mentions` of `message.publish`. Do not pass mentions unless you need collaboration; do not dispatch to yourself or invent roles; each role's runtime/model is fixed in the project definition, and you cannot and need not change it.
+- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution; dispatching works only through the `mentions` of `message.publish`. Do not pass mentions unless you need collaboration; do not dispatch to yourself in the current channel (mentioning yourself with another `channel` starts a separate session of you there) or invent roles; each role's runtime/model is fixed in the project definition, and you cannot and need not change it.
 - After dispatching, do not use `sleep`, do not poll channel history, worktrees or run status, do not take over an executor's task, and do not send `message.publish` to a role that is still running to ask for interim status: a role's persistent session in a channel cannot accept a new turn mid-run, so such requests just queue behind the original task and cannot give live progress. Continue the current turn only if `dispatched` is empty or you still have immediate work that does not depend on the dispatched roles.
 - Your output this turn (the final reply) is automatically published in full as this turn's result to the channel of the trigger message: put answers to humans, conclusions, status and anything else you need to include into that one output. Use `message.publish` only when necessary, i.e. to dispatch (with `mentions`) or to post to another channel; do not call `message.publish` with empty `mentions` to post the answer again, or the same result appears twice in the channel.
 """ + _CONFIG_PAGE_RULE + """\
@@ -279,15 +280,16 @@ Collaboration chain budget: a single collaboration chain in this project allows 
 # 无主控项目:每个角色都有主控级管理权限,但不能互相派发,只由人类点名启动
 PEER_RULES = """\
 # Collaboration Duties (No-Orchestrator Project)
-This project has no orchestrator: every role holds the orchestrator-level management permissions (channels, dashboards, board data sources, guidelines, skills, automations, the recycle bin, run queries), but roles cannot dispatch each other and only humans start roles. Do the work yourself; every MissionCrew write operation must go through the Agent Tool above.
+This project has no orchestrator: every role holds the orchestrator-level management permissions (channels, dashboards, board data sources, guidelines, skills, automations, the recycle bin, run queries), but roles cannot dispatch each other: only humans start roles, apart from a role starting itself in another channel. Do the work yourself; every MissionCrew write operation must go through the Agent Tool above.
 Discipline:
-- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution, and `message.publish` rejects `mentions` in this project. When the work needs another role, say in your final reply which role should take it and why; a human decides whether to mention it.
+- Any @roleID or @[roleID] in a message body you send (including your final reply) is plain text and never triggers execution, and `message.publish` accepts no other role in `mentions`. When the work needs another role, say in your final reply which role should take it and why; a human decides whether to mention it.
+- The one exception is yourself: `message.publish` with another `channel` and `mentions` set to your own id starts a separate session of you in that channel; its result stays there and is not returned to this turn. In the current channel this returns `invalid_arguments`.
 - Your output this turn (the final reply) is automatically published in full as this turn's result to the channel of the trigger message: put answers to humans, conclusions, status and anything else you need to include into that one output. Use `message.publish` only to post to another channel; do not call it to post the answer again, or the same result appears twice in the channel.
 """ + _CONFIG_PAGE_RULE + """\
 On-demand queries:
 """ + _RUN_QUERY_RULE + """\
 - Other channels are not in your context: to see how work in another channel is going, call `channel.runs.list` / `channel.history` with `channel` once; do not poll on them.
-- The channel list is not in your context; query it with `channel.list`. The workdir of `channel.create` must be a project repository path or a subdirectory of one; a new channel starts empty, and a human mentions the roles that should work there.
+- The channel list is not in your context; query it with `channel.list`. The workdir of `channel.create` must be a project repository path or a subdirectory of one; a new channel starts empty: a human mentions the roles that should work there, or you mention yourself there to work in it.
 """ + _MANUAL_RULE
 
 # 主控的项目清单:附在公共区块末尾但不参与版本哈希,差异经本轮输入提示
@@ -305,14 +307,18 @@ def _role_line(r: Role) -> str:
 
 
 def _trigger_kind(record: dict, orchestrator_id: str,
-                  is_orchestrator: bool) -> str:
+                  is_orchestrator: bool, role_id: str = "") -> str:
     """一句话说明本轮触发是谁发的,主控据此区分人类请求与执行角色回报。"""
     author = record.get("author") or {}
     kind, author_id = str(author.get("type") or ""), str(author.get("id") or "")
     if kind == "human":
         text = "human message"
     elif kind == "agent":
-        if is_orchestrator and record.get("mention_spans"):
+        if role_id and author_id == role_id:
+            # 角色在另一个频道经 message.publish 启动了自己
+            text = ("brief you posted for yourself from another channel; this is a separate "
+                    "session, so carry out the brief here")
+        elif is_orchestrator and record.get("mention_spans"):
             # 执行角色经 message.publish 显式提及主控,是新请求而非结果回报
             text = (f"request from executor @{author_id}, who mentioned you explicitly; "
                     "handle it like a new request")
@@ -450,8 +456,8 @@ class ChatEngine:
         legal_spans: list[dict] = []
         # Agent 派发只认 message.publish 显式命令传入的结构化范围;正文里的任何 @
         # （含 @[role] 旧语法）都是普通文字。主控可派发任意角色;有主控时执行角色
-        # 只能提及主控,最终回复把完整结果交回主控,避免横向看见或调用名册;无主控
-        # 时角色不能互相派发,回复只留在频道。
+        # 只能提及主控,最终回复把完整结果交回主控,避免横向看见或调用名册;无主控时
+        # 角色不能互相派发,回复只留在频道。有无主控,角色都能在其他频道提及自己另起会话。
         can_dispatch = (author_type == "agent" and bool(project)
                         and project.can_dispatch(author))
         if author_type == "agent":
@@ -460,12 +466,20 @@ class ChatEngine:
                 mentions, legal_spans = self._validate_mention_spans(
                     content, mention_spans, channel.project_id or "",
                     by_agent=True)
-                # 剔除自己与无权提及的目标(agent_tools 已先拒绝,这里是引擎兜底)
+                origin_run = (self.store.get_chat_run(origin_run_id)
+                              if origin_run_id is not None else None)
+                cross_channel = bool(origin_run and origin_run["channel"] != channel.id)
+                # 剔除无权提及的目标(agent_tools 已先拒绝,这里是引擎兜底)
                 allowed = {item for item in mentions
-                           if item != author and project.can_mention(author, item)}
+                           if project.can_mention(author, item, cross_channel)}
                 mentions = [item for item in mentions if item in allowed]
                 legal_spans = [span for span in legal_spans
                                if span["role_id"] in allowed]
+                if author in allowed and origin_run:
+                    # 在其他频道启动自己:记下发起那轮的触发消息,新会话的结果
+                    # 沿用那一轮的交回规则(见 _is_direct_human_dispatch)
+                    context = {**(context or {}),
+                               "self_dispatch_origin": int(origin_run["trigger_message_id"])}
             if (not mentions and origin_run_id is None and author != orchestrator
                     and orchestrator_available
                     and not self._is_direct_human_dispatch(reply_to, author)):
@@ -560,6 +574,12 @@ class ChatEngine:
         if trigger_message_id is None:
             return False
         trigger = self.store.get_message(trigger_message_id)
+        if (trigger and trigger.get("author_type") == "agent"
+                and trigger.get("author") == role_id):
+            # 角色在其他频道启动了自己:沿用发起那一轮的派发语义
+            origin = self._decoded_context(trigger).get("self_dispatch_origin")
+            return (type(origin) is int
+                    and self._is_direct_human_dispatch(origin, role_id))
         return bool(
             trigger
             and trigger.get("author_type") in ("human", "automation")
@@ -1716,7 +1736,7 @@ class ChatEngine:
             resource_notice=resource_notice,
             reply_hint=CONTROL_REPLY_HINT if is_orchestrator else "",
             trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
-                                       is_orchestrator),
+                                       is_orchestrator, role.id),
             trigger=json.dumps(trigger_record, ensure_ascii=False))
         recovery_prompt = RECOVERY_PROMPT.format(
             history=_compact_records(history_records), turn_prompt=turn_prompt)
@@ -1797,6 +1817,15 @@ class ChatEngine:
         except (json.JSONDecodeError, TypeError):
             return []
         return [str(item) for item in mentions] if isinstance(mentions, list) else []
+
+    @staticmethod
+    def _decoded_context(message: dict) -> dict:
+        raw = message.get("context", "{}")
+        try:
+            context = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return context if isinstance(context, dict) else {}
 
     @staticmethod
     def _decoded_mention_spans(message: dict) -> list[dict]:

@@ -84,9 +84,7 @@ function renderBackendAgent(payload) {
 function renderPermissionRequest(run, event, payload) {
   const status = payload.status || "pending";
   const pending = status === "pending";
-  const statusLabel = { pending: "等待决定", auto_approved: "MissionCrew YOLO 已自动批准",
-    denied: "已按策略拒绝", resolved: `已处理：${payload.decision || ""}`,
-    timeout: "等待超时，已取消", stopped: "频道运行已停止" }[status] || status;
+  const statusLabel = permissionStatusLabel(status, payload);
   const actions = !pending ? "" : `<div class="ri-actions">
     <button onclick="sendRuntimeInteraction(${run.id},'${esc(payload.request_id)}','approve')">批准一次</button>
     ${payload.can_approve_session ? `<button onclick="sendRuntimeInteraction(${run.id},'${esc(payload.request_id)}','approve_session')">本会话批准</button>` : ""}
@@ -94,6 +92,12 @@ function renderPermissionRequest(run, event, payload) {
   </div>`;
   return `<span class="ri-status ${esc(status)}">${esc(statusLabel)}</span>
     ${interactionDetails(payload)}${actions}`;
+}
+
+function permissionStatusLabel(status, payload = {}) {
+  return { pending: "等待决定", auto_approved: "MissionCrew YOLO 已自动批准",
+    denied: "已按策略拒绝", resolved: `已处理：${payload.decision || ""}`,
+    timeout: "等待超时，已取消", stopped: "频道运行已停止" }[status] || status;
 }
 
 /* scope 区分渲染面(card=过程卡片 / live=实时输出框):同一提问在两处各有一份表单,
@@ -288,13 +292,13 @@ function renderRunEvent(run, event, openEventId) {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderPermissionRequest(run, event, payload);
-      preview = payload.status === "pending" ? "等待用户决定" : `已处理 · ${payload.status}`;
+      preview = permissionStatusLabel(payload.status, payload);
     }
   } else if (event.kind === "user_input_request") {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderUserInputRequest(run, event, payload);
-      preview = payload.status === "pending" ? "等待用户回答" : `已处理 · ${payload.status}`;
+      preview = payload.status === "pending" ? "提问待答" : `已处理 · ${payload.status}`;
     }
   } else if (event.kind === "usage") {
     const payload = parseStructuredRunEvent(event);
@@ -475,6 +479,7 @@ function syncRuns(runs, surface = null) {
       if (!anchor) continue;
       const el = document.createElement("details");
       el.className = "run-card";
+      el.id = `run-card-${run.id}`;
       el.dataset.trigger = run.trigger_message_id;
       el.dataset.runId = run.id;
       el.innerHTML = `<summary></summary><div class="rc-events"></div>`;

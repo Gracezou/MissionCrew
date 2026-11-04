@@ -1060,18 +1060,21 @@ class _ClaudeSession:
         denial = _policy_denial(tool_name, tool_input, config)
         if denial:
             emit_json(emit, "permission_request",
-                      {**payload, "status": "denied", "reason": denial})
+                      {**payload, "status": "denied", "reason": denial,
+                       "result_type": "policy_decision"})
             return {"behavior": "deny", "message": denial}
         if policy == "auto":
             emit_json(emit, "permission_request",
-                      {**payload, "status": "auto_approved"})
+                      {**payload, "status": "auto_approved",
+                       "result_type": "policy_decision"})
             return {"behavior": "allow", "updatedInput": tool_input}
         if policy == "deny" or not interact:
             reason = ("后台命令汇报回合无法交互审批,请在下一轮频道回合中重试"
                       if wake_turn and policy != "deny"
                       else "MissionCrew 权限策略拒绝了工具调用")
             emit_json(emit, "permission_request",
-                      {**payload, "status": "denied", "reason": reason})
+                      {**payload, "status": "denied", "reason": reason,
+                       "result_type": "policy_decision"})
             return {"behavior": "deny", "message": reason}
         response = interact("permission_request", payload)
         if response.get("decision") in ("approve", "approve_session"):

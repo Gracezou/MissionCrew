@@ -353,6 +353,7 @@ class ChatEngine:
         self._stopping_channels: set[str] = set()
         self._interaction_lock = threading.Lock()
         self._interactions: dict[str, _PendingInteraction] = {}
+        self._notified_interaction_runs: set[int] = set()
         self.agent_tools = AgentActionService(
             store, self.post, self.stop_run,
             history_records=self.channel_history_records,
@@ -665,6 +666,7 @@ class ChatEngine:
             # 等待权限或用户输入的回调必须先释放，否则 Runtime 进程终止前
             # 可能继续阻塞在 MissionCrew 的交互桥上。
             with self._interaction_lock:
+                self._notified_interaction_runs.difference_update(run_ids)
                 for pending in self._interactions.values():
                     if pending.run_id not in run_ids:
                         continue
@@ -746,6 +748,7 @@ class ChatEngine:
             self.store.append_run_event(run_id, "status", stopped_reason)
 
             with self._interaction_lock:
+                self._notified_interaction_runs.discard(run_id)
                 for pending in self._interactions.values():
                     if pending.run_id != run_id:
                         continue
@@ -933,6 +936,9 @@ class ChatEngine:
                                        f"@{role_id} 执行出错: {error}")
                 finally:
                     self.store.update_chat_run(run_id, "failed", error=error)
+        finally:
+            with self._interaction_lock:
+                self._notified_interaction_runs.discard(run_id)
 
     def _post_failure(self, channel: Channel, role_id: str, msg_id: int,
                       root_id: int, depth: int, content: str) -> None:
@@ -1364,6 +1370,7 @@ class ChatEngine:
                                      kind: str, payload: dict,
                                      timeout: Optional[float]) -> dict:
         """持久化待处理请求，并阻塞原生协议回调直到用户回答。"""
+        should_notify = False
         with self._run_state_lock:
             if not self.store.wait_chat_run_for_interaction(run_id, backend_id):
                 return {
@@ -1375,16 +1382,23 @@ class ChatEngine:
                 **payload,
                 "request_id": request_id,
                 "status": "pending",
+                "result_type": ("question_waiting" if kind == "user_input_request"
+                                else "approval_waiting"),
             }
             # 事件 commit 后立即对轮询方可见,落库与注册必须同在交互锁内;
             # 否则应答方可能抢在注册之前调 respond_interaction 而误报请求不存在。
             with self._interaction_lock:
+                should_notify = run_id not in self._notified_interaction_runs
                 event_id = self.store.append_interaction_event(
                     run_id, kind, visible)
+                if should_notify:
+                    self._notified_interaction_runs.add(run_id)
                 pending = _PendingInteraction(
                     run_id=run_id, backend_id=backend_id, kind=kind,
                     event_id=event_id, payload=visible)
                 self._interactions[request_id] = pending
+        if should_notify:
+            self._notify_runtime_interaction(run_id, kind, payload)
         self.store.audit(
             "platform", "runtime_interaction_requested",
             detail=f"run={run_id} kind={kind} request={request_id}")
@@ -1412,6 +1426,46 @@ class ChatEngine:
             detail=(f"run={run_id} kind={kind} request={request_id} "
                     f"decision={response['decision']}"))
         return response
+
+    def _notify_runtime_interaction(self, run_id: int, kind: str,
+                                    payload: dict) -> None:
+        try:
+            run = self.store.get_chat_run(run_id)
+            if not run:
+                return
+            channel = self.store.get_channel(run["channel"])
+            project = self.store.get_project(channel.project_id or "") if channel else None
+            label = "提问待答" if kind == "user_input_request" else "权限待审"
+            if kind == "user_input_request":
+                questions = payload.get("questions") or []
+                question = questions[0] if questions and isinstance(questions[0], dict) else {}
+                summary = str(question.get("question") or "Agent 正在等待回答")
+            else:
+                details = payload.get("details") or {}
+                command = details.get("command") or details.get("cmd") or ""
+                if isinstance(command, (list, tuple)):
+                    command = " ".join(map(str, command))
+                command = re.sub(
+                    r"\w+://\S+|(?<![\w])/(?:[^\s/]+/)*([^\s/]+)",
+                    lambda match: (match.group(0) if "://" in match.group(0)
+                                   else f"…/{match.group(1)}"), str(command))
+                path = details.get("file_path") or details.get("path") or ""
+                path = Path(str(path)).name if path else ""
+                summary = str(payload.get("title") or payload.get("description")
+                              or payload.get("tool") or command or path
+                              or payload.get("request_type") or "Agent 正在等待权限决定")
+            summary = " ".join(summary.split())[:180]
+            content = f"@{run['role_id']} 正在等待处理（{label}）：{summary}"
+            if project and not project.controls_platform(run["role_id"]):
+                content += f"\n项目主控：@{project.orchestrator_role_id}"
+            self.post(
+                run["channel"], "platform", content, author_type="platform",
+                context={"runtime_interaction": {"run_id": run_id}},
+            )
+        except Exception as exc:
+            self.store.audit(
+                "platform", "runtime_interaction_notification_failed",
+                detail=f"run={run_id} kind={kind} error={exc}")
 
     # ---- 内部:固定执行组合与上下文装配 ----
     def _pick_backend(self, _channel: Channel, role: Role):

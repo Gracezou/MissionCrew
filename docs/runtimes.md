@@ -158,6 +158,8 @@ pi 用于把**裸 OpenAI / Anthropic 兼容 API** 接成可协作的 Agent:平�
 
 原生 user-input/permission request 会以独立 JSON 事件持久化，聊天运行状态切换为 `waiting_user`。用户回答通过运行 id 与随机 request id 回传；原始回答只存在于内存中的待处理请求，不写入 run event，避免 secret input 或凭据进入日志。回答完成后原生请求收到 response，运行恢复为 `running`。
 
+交互事件以 `result_type` 区分 `question_waiting`（提问待答）、`approval_waiting`（权限待审）与权限事件中的 `policy_decision`（策略自动批准或拒绝）；只有前两类创建 `waiting_user` 并可操作。每个 Run 首次进入等待时，频道会收到一条带“打开运行卡片”按钮的平台提醒，同一 Run 后续等待不重复提醒。
+
 统一审批模式的含义：
 
 - `auto`：MissionCrew YOLO。后端仍保持 request-approval 模式，平台逐次自动批准并保存不含敏感回答的审计事件；不使用 Claude `bypassPermissions` 或 Codex `danger-full-access + never` 绕开平台。

@@ -161,6 +161,10 @@ Each turn: while the process is alive, `prompt` is sent directly (differences in
 
 Native user-input/permission requests are persisted as separate JSON events, and the chat run status switches to `waiting_user`. The user's answer is passed back by run id and a random request id; the raw answer exists only in the in-memory pending request and is not written to run events, so secret input or credentials never enter the logs. Once answered, the native request receives a response and the run returns to `running`.
 
+<!-- fork-divergence: interaction events use result_type to distinguish question_waiting, approval_waiting, and policy_decision (automatic approval or denial); only actionable requests enter waiting_user. The first wait in a run posts one channel reminder with a run-card button. Keep aligned with the Chinese runtimes.md. -->
+
+Interaction events use `result_type` to distinguish `question_waiting` (a question awaiting an answer), `approval_waiting` (a permission request awaiting review), and `policy_decision` (automatically approved or denied permission). Only actionable requests enter `waiting_user`. The first wait in each run posts one platform reminder in the channel with a button that opens the run card; later waits in the same run do not repeat the reminder.
+
 Meaning of the unified approval modes:
 
 - `auto`: MissionCrew YOLO. The runtime still stays in request-approval mode, and the platform approves each request automatically and saves an audit event without sensitive answers; Claude `bypassPermissions` or Codex `danger-full-access + never` are not used to bypass the platform.

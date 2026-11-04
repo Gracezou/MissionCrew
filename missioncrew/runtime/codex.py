@@ -508,11 +508,13 @@ class _CodexSession:
                    "details": params, "can_approve_session": True}
         if policy == "auto":
             emit_json(config.emit, "permission_request",
-                      {**payload, "status": "auto_approved"})
+                      {**payload, "status": "auto_approved",
+                       "result_type": "policy_decision"})
             return {"decision": "approve"}
         if policy == "deny" or not config.interact:
             emit_json(config.emit, "permission_request",
-                      {**payload, "status": "denied"})
+                      {**payload, "status": "denied",
+                       "result_type": "policy_decision"})
             return {"decision": "deny"}
         return config.interact("permission_request", payload)
 

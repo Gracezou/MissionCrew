@@ -246,6 +246,22 @@ An orchestrator's turn:
   work in that directory, recreate it first (e.g. `git worktree add`) or create a new channel
   bound to the correct directory.
 
+## 8.1 Managed Git worktrees (`workspace.*`)
+
+- `workspace.create` is available only to roles with project management permission and only while
+  the project setting allows managed worktrees. It creates one worktree, branch and bound channel
+  for a Task-sized unit. The repository must be a registered Git repository; the base must exist.
+  Dirty source trees are rejected unless `allow_dirty: true` is explicit. Creation failures roll
+  back newly created resources; check the returned error for any path needing manual recovery.
+- `workspace.finish` returns the diff summary, commits, ahead count and merge suggestion. It never
+  merges. A human must merge first. `workspace.remove` verifies the channel can be archived,
+  archives the channel and stops its Runtime, then removes the worktree and branch; it refuses
+  active runs, unmerged branches and worktrees with uncommitted changes (`worktree_dirty`).
+  Call `workspace.remove` from another channel; calling it in the managed channel's own Run returns
+  `channel_in_use` because that Run is still active.
+- Project worktree metadata is visible in channel listings and the channel header. Closing the
+  project setting prevents new worktrees but leaves existing channels usable.
+
 ## 9. Dashboards and Board Data Sources (dashboard.* / board_source.*)
 
 - Dashboards and data sources are not in your workspace: `dashboard.list` lists dashboards, and

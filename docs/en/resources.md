@@ -62,6 +62,18 @@ A human message without an explicit role mention requires an existing, enabled p
 
 A channel-level stop ends all `queued`, `running`, and `waiting_user` chat runs in that channel at once, releases pending interactions, terminates the corresponding runtime processes, and leaves a visible platform message and an audit record. The platform keeps the persisted native session/thread IDs, so later runs can restart the process and try to resume the context; file writes that have already completed are not rolled back. Even when the database has no active run, calling the stop API again cleans up orphan processes based on the runtime session saved for the channel.
 
+### Managed Git worktrees
+
+<!-- fork-divergence: Managed worktree lifecycle is maintained in this fork. Keep aligned with the Chinese version. -->
+
+The project orchestrator can use the Agent Tool action `workspace.create` to create a Task/channel-level work unit. The platform creates a separate worktree and branch under `.worktrees/<name>` in a registered Git repository, then creates a channel bound to that directory and can associate an existing Task with it. The base must exist. By default, the source repository must be clean; pass `allow_dirty: true` to proceed with uncommitted changes. The project setting `managed_worktrees_enabled` is on by default. Turning it off prevents new worktrees while existing ones remain usable.
+
+`workspace.finish` returns `diff --stat` against the base, the commit list, the number of commits ahead, merge status and a suggested command. It does not merge. A human must review and merge from the main working tree before calling `workspace.remove`; that action first verifies the channel can be archived, archives the channel and stops its Runtime, then removes the worktree and branch. It refuses cleanup when the branch is unmerged, the directory is missing, or a run is active. If the worktree has uncommitted changes, it returns `worktree_dirty` and refuses deletion. Creation failures roll back the worktree, branch and channel created by that attempt; if rollback fails, the error gives the path that needs manual inspection.
+
+`workspace.remove` must be called from another channel. Calling it during a Run in the managed channel itself returns `channel_in_use` because that channel still has an active Run.
+
+The channel list API and chat channel header show the managed marker, branch name, commits ahead of the base and whether the branch is merged. Git worktrees prevent parallel file conflicts; they are not a permission boundary. Project write access remains governed by the project's existing path configuration.
+
 Main APIs:
 
 - `GET /api/chat/channels`

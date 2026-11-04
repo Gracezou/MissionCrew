@@ -126,6 +126,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         else:
             data["task_board_group_by"] = (
                 existing.task_board_group_by if existing else "")
+        data["managed_worktrees_enabled"] = (
+            body.managed_worktrees_enabled if body.managed_worktrees_enabled is not None
+            else (existing.managed_worktrees_enabled if existing else True))
         try:
             project = Project.from_dict(data)
         except (TypeError, ValueError) as exc:

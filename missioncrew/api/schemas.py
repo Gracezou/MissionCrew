@@ -222,6 +222,7 @@ class ProjectInput(BaseModel):
     task_board_filters: Optional[list[dict]] = None
     # 内置任务看板的分列属性;None = 保留现值,空串 = 恢复筛选列
     task_board_group_by: Optional[str] = None
+    managed_worktrees_enabled: Optional[bool] = None
 
 
 class ResourceAdd(BaseModel):

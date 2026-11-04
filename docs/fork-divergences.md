@@ -17,6 +17,7 @@
 | `missioncrew/runtime/clis/pi.py`、`docs/en/runtimes.md` | pi 优先使用平台 vendored 安装，缺失时回退系统 PATH，Homebrew 安装走 `brew upgrade`。 | `tests/test_pi.py::test_pi_falls_back_to_system_binary_on_path`、`test_pi_update_plan_follows_install_source` | fork 支持用户已有的系统级 pi，并按真实来源升级，避免误写全局 npm 安装。 |
 | `missioncrew/collab/chat.py`、`missioncrew/runtime/claude.py`、`missioncrew/runtime/codex.py`、`missioncrew/web/js/sidebar.js`、`missioncrew/web/js/run-events.js`、`docs/en/runtimes.md` | 交互事件区分待答、待审和策略决定；每个 Run 首次等待时在频道发布平台提醒，并通过消息上下文按钮打开运行卡片。 | `tests/test_runtime_interactions.py`、`tests/test_native_runtimes.py` | fork 增加等待态可见性；上游同步时核对事件分类与频道提醒是否已有等价实现。 |
 | `tests/test_antigravity_usage.py` | Antigravity 假 CLI 探测超时设为 2 秒。 | `tests/test_antigravity_usage.py::test_probe_timeout_reaps_process_and_missing_binary_is_unavailable` | macOS 首次执行新脚本可能慢于 0.2 秒；这是跨系统测试稳定性的校准。 |
+| `missioncrew/collab/board_sources.py` | ISO 8601 时间解析前将末尾 `Z`/`z` 规范为 `+00:00`，兼容 Python 3.10。 | `tests/test_tasks.py::test_external_update_time_accepts_unix_seconds_and_zoned_iso_only` | 上游不会修复 Python 3.10 兼容；项目仍声明支持 Python 3.10。 |
 
 ## 同步上游时的核对步骤
 

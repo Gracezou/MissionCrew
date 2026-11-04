@@ -130,6 +130,9 @@ def clean_timestamp(value, what: str) -> float:
             seconds = float(text)
         except ValueError:
             try:
+                # fork-divergence: Python 3.10's fromisoformat rejects Z; upstream targets 3.11+.
+                if text.endswith(("Z", "z")):
+                    text = text[:-1] + "+00:00"
                 parsed = datetime.fromisoformat(text)
             except ValueError:
                 raise ValueError(

@@ -18,6 +18,7 @@
 | `missioncrew/collab/chat.py`、`missioncrew/runtime/claude.py`、`missioncrew/runtime/codex.py`、`missioncrew/web/js/sidebar.js`、`missioncrew/web/js/run-events.js`、`docs/en/runtimes.md` | 交互事件区分待答、待审和策略决定；每个 Run 首次等待时在频道发布平台提醒，并通过消息上下文按钮打开运行卡片。 | `tests/test_runtime_interactions.py`、`tests/test_native_runtimes.py` | fork 增加等待态可见性；上游同步时核对事件分类与频道提醒是否已有等价实现。 |
 | `missioncrew/collab/workspaces.py`、`missioncrew/collab/agent_tools.py`、`missioncrew/core/models.py`、`missioncrew/api/chat.py`、`missioncrew/api/projects.py`、`missioncrew/web/js/channels.js`、`missioncrew/web/js/settings-project.js`、`docs/resources.md` | 项目主控创建 Task/频道级 Git worktree；finish 仅给出合并候选，人工合并后 remove 才能清理并归档频道；项目开关默认开启。 | `tests/test_workspaces.py`、项目设置 API 持久化测试 | 频道/任务级工作树生命周期来自 Herdr 融合方案阶段 1；共享 Git 元数据用于并行防踩文件，不构成权限边界，未合并分支不得删除。 |
 | `tests/test_antigravity_usage.py` | Antigravity 假 CLI 探测超时设为 2 秒。 | `tests/test_antigravity_usage.py::test_probe_timeout_reaps_process_and_missing_binary_is_unavailable` | macOS 首次执行新脚本可能慢于 0.2 秒；这是跨系统测试稳定性的校准。 |
+| `missioncrew/collab/board_sources.py` | ISO 8601 时间解析前将末尾 `Z`/`z` 规范为 `+00:00`，兼容 Python 3.10。 | `tests/test_tasks.py::test_external_update_time_accepts_unix_seconds_and_zoned_iso_only` | 上游不会修复 Python 3.10 兼容；项目仍声明支持 Python 3.10。 |
 
 ## 同步上游时的核对步骤
 

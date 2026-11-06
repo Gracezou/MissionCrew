@@ -926,6 +926,7 @@ def test_external_update_time_accepts_unix_seconds_and_zoned_iso_only():
     assert clean(None, "t") == clean("", "t") == clean(0, "t") == 0.0
     assert clean(1760860800, "t") == clean("1760860800", "t") == 1760860800.0
     assert clean("2026-10-19T08:00:00Z", "t") == clean("2026-10-19T16:00:00+08:00", "t")
+    assert clean("2026-10-19T08:00:00z", "t") == clean("2026-10-19T08:00:00Z", "t")
     # 不带时区会差出数小时、毫秒会变成遥远的未来:都直接报错
     for bad, message in [("2026-10-19 16:00:00", "缺少时区"), ("昨天", "不是合法时间"),
                          (1760860800000, "不是毫秒"), (True, "Unix 秒"), (-1, "超出范围")]:

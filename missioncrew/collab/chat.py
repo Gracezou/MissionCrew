@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sys
 import tempfile
@@ -56,6 +57,7 @@ EXPLICIT_MENTION_RE = re.compile(r"@\[([\w-]+)\]")
 ANY_MENTION_RE = re.compile(r"@\[([\w-]+)\]|@([\w-]+)")   # 脱敏时两种写法一并处理
 HISTORY_WINDOW = 20    # 装配进 Prompt 的最近消息条数
 ACTION_RE = re.compile(r"<missioncrew-action>(.*?)</missioncrew-action>", re.S)
+LOGGER = logging.getLogger(__name__)
 
 
 def _reinject_due(session_row: Optional[dict]) -> bool:
@@ -1483,6 +1485,8 @@ class ChatEngine:
                 context={"runtime_interaction": {"run_id": run_id}},
             )
         except Exception as exc:
+            LOGGER.exception(
+                "运行时交互提醒发送失败 (run=%s kind=%s)", run_id, kind)
             self.store.audit(
                 "platform", "runtime_interaction_notification_failed",
                 detail=f"run={run_id} kind={kind} error={exc}")

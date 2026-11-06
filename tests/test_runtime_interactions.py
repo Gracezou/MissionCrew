@@ -105,8 +105,14 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         assert item["result_type"] == result_type
         assert "notification_sent" not in item
         assert seeded.get_chat_run(run_id)["status"] == "waiting_user"
-        messages = seeded.list_messages("general")
-        notices = [m for m in messages if m["author_type"] == "platform"
+        decision = "submit" if kind == "user_input_request" else "approve"
+        chat.respond_interaction(run_id, item["request_id"], {
+            "decision": decision, "answers": {},
+        })
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        notices = [m for m in seeded.list_messages("general")
+                   if m["author_type"] == "platform"
                    and "正在等待处理" in m["content"]]
         assert len(notices) == 1
         assert notices[0]["author"] == "platform"
@@ -118,12 +124,8 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         }
         assert "#run-card-" not in notices[0]["content"]
         assert "项目主控：@lead" in notices[0]["content"]
-        decision = "submit" if kind == "user_input_request" else "approve"
-        chat.respond_interaction(run_id, item["request_id"], {
-            "decision": decision, "answers": {},
-        })
-        worker.join(timeout=5)
-        assert not worker.is_alive()
+        assert not any(row["action"] == "runtime_interaction_notification_failed"
+                       for row in seeded.list_audit(limit=20))
         assert json.loads(next(item for item in seeded.run_events(run_id)
                                if item["id"] == event["id"])["content"])["status"] == "resolved"
         assert seeded.get_chat_run(run_id)["status"] == "running"

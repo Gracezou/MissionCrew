@@ -1419,8 +1419,11 @@ class ChatEngine:
                     run_id=run_id, backend_id=backend_id, kind=kind,
                     event_id=event_id, payload=visible)
                 self._interactions[request_id] = pending
-        if should_notify:
-            self._notify_runtime_interaction(run_id, kind, payload)
+            # 停止频道也按 run_state_lock → interaction_lock 获取锁。事件提交和
+            # 提醒发布一起对 stop 原子化；提醒在 interaction_lock 外发送，避免
+            # 阻塞 respond_interaction。
+            if should_notify:
+                self._notify_runtime_interaction(run_id, kind, payload)
         self.store.audit(
             "platform", "runtime_interaction_requested",
             detail=f"run={run_id} kind={kind} request={request_id}")

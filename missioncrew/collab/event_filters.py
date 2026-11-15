@@ -93,18 +93,31 @@ def validate_filter(script) -> str:
     if len(script) > FILTER_MAX_CHARS:
         raise ValueError(f"filter 最多 {FILTER_MAX_CHARS} 个字符")
     if script.startswith("#!"):
-        first_line = script.splitlines()[0][2:].strip()
-        interpreter = shlex.split(first_line)[0] if first_line else ""
-        if not interpreter or not (Path(interpreter).is_file()
-                                   if "/" in interpreter
-                                   else shutil.which(interpreter)):
-            raise ValueError("过滤脚本无法使用：shebang 指定的解释器不存在")
+        _validate_shebang(script)
     return script if script.strip() else ""
+
+
+def _validate_shebang(script: str) -> None:
+    """shebang 由内核按解释器路径执行,必须是存在且可执行的绝对路径。"""
+    try:
+        words = shlex.split(script.splitlines()[0][2:].strip())
+    except ValueError as exc:
+        raise ValueError("过滤脚本无法使用：shebang 格式不合法") from exc
+    interpreter = Path(words[0]) if words else Path()
+    if (not interpreter.is_absolute() or not interpreter.is_file()
+            or not os.access(interpreter, os.X_OK)):
+        raise ValueError("过滤脚本无法使用：shebang 指定的解释器不存在或不可执行")
 
 
 def run_event_filter(script: str, event: dict) -> FilterResult:
     """对一个事件运行过滤脚本,返回是否命中。任何异常都不抛出:回调轮询不能因为
     一段写坏的脚本停下来。"""
+    # fork-divergence: macOS bash 3.2 may return exit 1 for an absent shebang
+    # interpreter; 1 normally means "ignore", so preflight it at every execution.
+    try:
+        validate_filter(script)
+    except ValueError as exc:
+        return FilterResult(False, None, str(exc))
     workdir = _work_root() / uuid.uuid4().hex
     try:
         workdir.mkdir(parents=True, exist_ok=True)

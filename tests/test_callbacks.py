@@ -451,6 +451,14 @@ def test_filter_script_timeout_is_an_error_not_a_match(seeded, monkeypatch):
     assert not result.matched and result.exit_code is None and "未结束" in result.error
 
 
+def test_filter_runtime_rejects_missing_shebang_interpreter(seeded):
+    result = event_filters.run_event_filter(
+        "#!/missioncrew-test-missing/interpreter\necho should-not-run\n", {"event": "x"})
+    assert not result.matched
+    assert result.exit_code is None
+    assert "shebang" in result.error
+
+
 @pytest.mark.parametrize("arguments,fragment", [
     ({"webhook_source": "gh"}, "必须用 delay_seconds 或 at 给出超时时间"),
     ({"webhook_source": "missing", "delay_seconds": 60}, "webhook 来源不存在"),

@@ -20,6 +20,7 @@
 | `tests/test_antigravity_usage.py` | Antigravity 假 CLI 探测超时设为 2 秒。 | `tests/test_antigravity_usage.py::test_probe_timeout_reaps_process_and_missing_binary_is_unavailable` | macOS 首次执行新脚本可能慢于 0.2 秒；这是跨系统测试稳定性的校准。 |
 | `missioncrew/collab/board_sources.py` | ISO 8601 时间解析前将末尾 `Z`/`z` 规范为 `+00:00`，兼容 Python 3.10。 | `tests/test_tasks.py::test_external_update_time_accepts_unix_seconds_and_zoned_iso_only` | 上游不会修复 Python 3.10 兼容；项目仍声明支持 Python 3.10。 |
 | `missioncrew/collab/chat.py` | 普通频道提示角色自行使用 Git worktree；已绑定受管 worktree 的频道提示直接在该目录改代码，避免嵌套工作树破坏 `workspace.finish` 生命周期。 | `tests/test_workspaces.py::test_managed_worktree_prompt_does_not_request_nested_worktree` | 上游提示词针对普通 checkout；受管频道的目录与生命周期由 fork 的 `workspace.*` 管理。 |
+| `missioncrew/collab/event_filters.py` | 事件过滤脚本登记与每次运行前都验证 shebang 解释器存在、可执行且为绝对路径；避免 macOS bash 3.2 将解释器缺失返回为退出码 1、被误当作正常忽略。 | `tests/test_callbacks.py::test_event_callback_create_validates_arguments`、`test_filter_runtime_rejects_missing_shebang_interpreter` | 上游以 126/127 判定无法启动；macOS bash 3.2 对此返回 1。预检只检查路径，不执行脚本或扩大其环境权限。 |
 
 ## 同步上游时的核对步骤
 

@@ -189,10 +189,12 @@ def test_git_reads_the_token_through_the_helper_at_call_time(seeded, tmp_path):
 
 @pytest.mark.skipif(shutil.which("gh") is None, reason="需要 gh")
 def test_gh_treats_the_generated_config_as_logged_in(seeded, tmp_path):
+    gh = shutil.which("gh")
+    assert gh is not None
     save_github_token(seeded, "", CLASSIC)
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path),
            **github_env("webshop", credential_context_dir("webshop"), base={})}
-    shown = subprocess.run(["gh", "auth", "token"], env=env, cwd=tmp_path,
+    shown = subprocess.run([gh, "auth", "token"], env=env, cwd=tmp_path,
                            capture_output=True, text=True, timeout=20)
     assert shown.returncode == 0 and shown.stdout.strip() == CLASSIC, shown.stderr
     before = (github_cli_dir("webshop") / "hosts.yml").read_text()

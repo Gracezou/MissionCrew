@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -91,6 +92,13 @@ def validate_filter(script) -> str:
         raise ValueError("filter 必须是脚本文本")
     if len(script) > FILTER_MAX_CHARS:
         raise ValueError(f"filter 最多 {FILTER_MAX_CHARS} 个字符")
+    if script.startswith("#!"):
+        first_line = script.splitlines()[0][2:].strip()
+        interpreter = shlex.split(first_line)[0] if first_line else ""
+        if not interpreter or not (Path(interpreter).is_file()
+                                   if "/" in interpreter
+                                   else shutil.which(interpreter)):
+            raise ValueError("过滤脚本无法使用：shebang 指定的解释器不存在")
     return script if script.strip() else ""
 
 

@@ -105,8 +105,14 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         assert item["result_type"] == result_type
         assert "notification_sent" not in item
         assert seeded.get_chat_run(run_id)["status"] == "waiting_user"
-        messages = seeded.list_messages("general")
-        notices = [m for m in messages if m["author_type"] == "platform"
+        decision = "submit" if kind == "user_input_request" else "approve"
+        chat.respond_interaction(run_id, item["request_id"], {
+            "decision": decision, "answers": {},
+        })
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        notices = [m for m in seeded.list_messages("general")
+                   if m["author_type"] == "platform"
                    and "正在等待处理" in m["content"]]
         assert len(notices) == 1
         assert notices[0]["author"] == "platform"
@@ -118,12 +124,8 @@ def test_interaction_waiting_classification_reminds_once_and_resumes(
         }
         assert "#run-card-" not in notices[0]["content"]
         assert "项目主控：@lead" in notices[0]["content"]
-        decision = "submit" if kind == "user_input_request" else "approve"
-        chat.respond_interaction(run_id, item["request_id"], {
-            "decision": decision, "answers": {},
-        })
-        worker.join(timeout=5)
-        assert not worker.is_alive()
+        assert not any(row["action"] == "runtime_interaction_notification_failed"
+                       for row in seeded.list_audit(limit=20))
         assert json.loads(next(item for item in seeded.run_events(run_id)
                                if item["id"] == event["id"])["content"])["status"] == "resolved"
         assert seeded.get_chat_run(run_id)["status"] == "running"
@@ -258,6 +260,117 @@ def test_channel_stop_cancels_pending_interaction_without_reopening_run(
     audit = next(row for row in seeded.list_audit(limit=20)
                  if row["action"] == "runtime_interaction_resolved")
     assert audit["actor"] == "platform"
+
+
+def test_runtime_interaction_reminder_is_atomic_with_channel_stop(
+        seeded, monkeypatch):
+    trigger = seeded.add_message("general", "human", "human", "question", [])
+    run_id = seeded.add_chat_run("general", "dev", trigger, trigger, 0)
+    seeded.update_chat_run(run_id, "running", backend_id="std-1")
+    chat = ChatEngine(seeded, max_workers=1)
+    notify_entered = threading.Event()
+    allow_notify = threading.Event()
+    notify_finished = threading.Event()
+    stop_runtime_entered = threading.Event()
+    allow_runtime_stop = threading.Event()
+
+    class ObservedRLock:
+        """Expose whether the stopper contends with the notification lock."""
+        def __init__(self):
+            self._lock = threading.RLock()
+            self._state_lock = threading.Lock()
+            self._owner = None
+            self._depth = 0
+            self.stop_ready = threading.Event()
+            self.stop_blocked = threading.Event()
+            self.stop_acquired = threading.Event()
+
+        def __enter__(self):
+            thread_id = threading.get_ident()
+            is_stopper = threading.current_thread().name == "channel-stopper"
+            with self._state_lock:
+                if is_stopper and self._owner not in (None, thread_id):
+                    self.stop_blocked.set()
+                    self.stop_ready.set()
+            self._lock.acquire()
+            with self._state_lock:
+                if self._owner == thread_id:
+                    self._depth += 1
+                else:
+                    self._owner = thread_id
+                    self._depth = 1
+                if is_stopper:
+                    self.stop_acquired.set()
+                    self.stop_ready.set()
+            return self
+
+        def __exit__(self, *_exc):
+            with self._state_lock:
+                self._depth -= 1
+                if not self._depth:
+                    self._owner = None
+                self._lock.release()
+
+    observed_lock = ObservedRLock()
+    chat._run_state_lock = observed_lock
+    original_notify = chat._notify_runtime_interaction
+
+    def paused_notify(*args, **kwargs):
+        assert any(event["kind"] == "permission_request"
+                   for event in seeded.run_events(run_id))
+        notify_entered.set()
+        assert allow_notify.wait(5)
+        original_notify(*args, **kwargs)
+        notify_finished.set()
+
+    def paused_runtime_stop(*_args, **_kwargs):
+        stop_runtime_entered.set()
+        assert allow_runtime_stop.wait(5)
+        return 1
+
+    monkeypatch.setattr(chat, "_notify_runtime_interaction", paused_notify)
+    monkeypatch.setattr(runtime_manager, "stop", paused_runtime_stop)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(
+        chat._request_runtime_interaction(
+            run_id, "std-1", "permission_request", {"tool": "Bash"}, None)))
+    worker.start()
+    stopper = None
+    try:
+        assert notify_entered.wait(5)
+        stopper = threading.Thread(
+            target=lambda: chat.stop_channel_agents("general"),
+            name="channel-stopper")
+        stopper.start()
+        assert observed_lock.stop_ready.wait(5)
+        if observed_lock.stop_blocked.is_set():
+            # The stop is waiting for the pending notification to finish.
+            allow_notify.set()
+        else:
+            # Before the fix, stop acquired the lock and entered its process-stop
+            # phase while the pending notification was paused before post().
+            assert stop_runtime_entered.wait(5)
+            allow_notify.set()
+        assert notify_finished.wait(5)
+        allow_runtime_stop.set()
+        worker.join(timeout=5)
+        stopper.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert not stopper.is_alive()
+        assert result["decision"] == "cancel"
+        notices = [message for message in seeded.list_messages("general")
+                   if message["author_type"] == "platform"
+                   and "正在等待处理" in message["content"]]
+        assert len(notices) == 1
+        assert not any(row["action"] == "runtime_interaction_notification_failed"
+                       for row in seeded.list_audit(limit=20))
+    finally:
+        allow_notify.set()
+        allow_runtime_stop.set()
+        worker.join(timeout=5)
+        if stopper is not None:
+            stopper.join(timeout=5)
 
 
 def test_runtime_interaction_timeout_marks_event_and_resumes_run(seeded):

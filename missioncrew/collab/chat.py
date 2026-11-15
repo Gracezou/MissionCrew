@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sys
 import tempfile
@@ -56,6 +57,7 @@ EXPLICIT_MENTION_RE = re.compile(r"@\[([\w-]+)\]")
 ANY_MENTION_RE = re.compile(r"@\[([\w-]+)\]|@([\w-]+)")   # 脱敏时两种写法一并处理
 HISTORY_WINDOW = 20    # 装配进 Prompt 的最近消息条数
 ACTION_RE = re.compile(r"<missioncrew-action>(.*?)</missioncrew-action>", re.S)
+LOGGER = logging.getLogger(__name__)
 
 
 def _reinject_due(session_row: Optional[dict]) -> bool:
@@ -1417,8 +1419,11 @@ class ChatEngine:
                     run_id=run_id, backend_id=backend_id, kind=kind,
                     event_id=event_id, payload=visible)
                 self._interactions[request_id] = pending
-        if should_notify:
-            self._notify_runtime_interaction(run_id, kind, payload)
+            # 停止频道也按 run_state_lock → interaction_lock 获取锁。事件提交和
+            # 提醒发布一起对 stop 原子化；提醒在 interaction_lock 外发送，避免
+            # 阻塞 respond_interaction。
+            if should_notify:
+                self._notify_runtime_interaction(run_id, kind, payload)
         self.store.audit(
             "platform", "runtime_interaction_requested",
             detail=f"run={run_id} kind={kind} request={request_id}")
@@ -1483,6 +1488,8 @@ class ChatEngine:
                 context={"runtime_interaction": {"run_id": run_id}},
             )
         except Exception as exc:
+            LOGGER.exception(
+                "运行时交互提醒发送失败 (run=%s kind=%s)", run_id, kind)
             self.store.audit(
                 "platform", "runtime_interaction_notification_failed",
                 detail=f"run={run_id} kind={kind} error={exc}")

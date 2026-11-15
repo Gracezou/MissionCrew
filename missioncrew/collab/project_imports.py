@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import time
 from collections.abc import Collection
-from dataclasses import replace
 from functools import partial
 
 from ..core.config import mc_home, projects_dir
@@ -23,8 +22,8 @@ from .skills import import_skill_folder, project_skill_library_dir
 RESOURCE_TYPES = {"guideline", "skill", "automation"}
 CONFLICT_STRATEGIES = {"skip", "overwrite"}
 
-# fork-divergence: dataclasses.replace preserves fields that are not named, so
-# keep the model's complete copy/reset field accounting explicit and tested.
+# fork-divergence: only fields in the preserve list are copied; every other
+# model field starts at its dataclass default or the explicit reset value below.
 AUTOMATION_COPY_PRESERVED_FIELDS = frozenset({
     "name", "description", "script", "cron", "actions", "timeout_seconds",
 })
@@ -148,10 +147,13 @@ def _copy_automation(store: Store, source: Project, target: Project,
     # fork-divergence: webhook 已迁为全局来源, Automation 不再持有密钥。
     # 跨项目复制仅复制脚本定义;清除来源订阅、GitHub 过滤条件和运行状态,
     # 避免复制品继承外部触发权。新建时不会生成来源身份或 webhook 密钥。
-    copied = replace(
-        automation, id=target_id, project_id=target.id, enabled=False,
+    copied = Automation(
+        id=target_id, project_id=target.id, enabled=False,
         webhook_source="", github_repos=[], github_events=[],
         created_by_role_id="", last_run_at=0.0, last_status="",
+        **{name: getattr(automation, name)
+           for name in AUTOMATION_COPY_PRESERVED_FIELDS
+           if name not in AUTOMATION_COPY_RESET_FIELDS},
     )
     # 目标项目中的复制条目是新定义，时间戳由目标存储重新维护。
     copied.created_at = copied.updated_at = time.time()

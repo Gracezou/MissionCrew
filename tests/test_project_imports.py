@@ -208,6 +208,52 @@ def test_automation_copy_accounts_for_every_model_field():
     assert preserved | reset == names
 
 
+def test_automation_copy_resets_every_declared_field(seeded):
+    from missioncrew.collab.webhooks import save_webhook_source
+
+    client = TestClient(create_app())
+    _create_target(client)
+    save_webhook_source(seeded, id="shared-hook", kind="github",
+                        github={"project_id": "webshop"})
+    automation, _ = save_automation(
+        seeded, "webshop", id="reset-me", script="echo source", enabled=True,
+        webhook_source="shared-hook", github_repos=["owner/repo"],
+        github_events=["issues"], created_by_role_id="lead")
+    automation.last_run_at = 123.0
+    automation.last_status = "succeeded"
+    automation.created_at = 1.0
+    automation.updated_at = 2.0
+    seeded.put_automation(automation)
+
+    response = _import(client, "automation", ["reset-me"])
+
+    assert response.status_code == 200
+    copied = seeded.get_automation("target:reset-me")
+    assert (copied.id, copied.project_id) == ("target:reset-me", "target")
+    assert copied.enabled is False and copied.webhook_source == ""
+    assert copied.github_repos == [] and copied.github_events == []
+    assert copied.created_by_role_id == ""
+    assert copied.last_run_at == 0 and copied.last_status == ""
+    assert copied.created_at != 1.0 and copied.updated_at != 2.0
+
+
+def test_automation_copy_uses_only_the_preserve_field_list(seeded, monkeypatch):
+    client = TestClient(create_app())
+    _create_target(client)
+    source, _ = save_automation(
+        seeded, "webshop", id="field-list", script="echo source",
+        description="source description")
+    assert source.description == "source description"
+    monkeypatch.setattr(
+        project_imports, "AUTOMATION_COPY_PRESERVED_FIELDS",
+        project_imports.AUTOMATION_COPY_PRESERVED_FIELDS - {"description"})
+
+    response = _import(client, "automation", ["field-list"])
+
+    assert response.status_code == 200
+    assert seeded.get_automation("target:field-list").description == ""
+
+
 def test_cross_project_import_skip_and_overwrite_conflicts(seeded):
     client = TestClient(create_app())
     _create_target(client)

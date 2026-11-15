@@ -23,6 +23,17 @@ from .skills import import_skill_folder, project_skill_library_dir
 RESOURCE_TYPES = {"guideline", "skill", "automation"}
 CONFLICT_STRATEGIES = {"skip", "overwrite"}
 
+# fork-divergence: dataclasses.replace preserves fields that are not named, so
+# keep the model's complete copy/reset field accounting explicit and tested.
+AUTOMATION_COPY_PRESERVED_FIELDS = frozenset({
+    "name", "description", "script", "cron", "actions", "timeout_seconds",
+})
+AUTOMATION_COPY_RESET_FIELDS = frozenset({
+    "id", "project_id", "enabled", "webhook_source", "github_repos",
+    "github_events", "created_by_role_id", "last_run_at", "last_status",
+    "created_at", "updated_at",
+})
+
 
 def _result(item_id: str, status: str, *, reason: str = "",
             target_id: str = "") -> dict:

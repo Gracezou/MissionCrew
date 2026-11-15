@@ -1,6 +1,7 @@
 """准则、Skill 与自动化的跨项目复制。"""
 from __future__ import annotations
 
+from dataclasses import fields
 import os
 import shutil
 import subprocess
@@ -144,7 +145,8 @@ def test_cross_project_import_copies_all_resources_without_mutating_source(seede
 @pytest.mark.parametrize("overwrite", [False, True])
 def test_cross_project_import_automation_clears_global_source_subscription(seeded, overwrite):
     from missioncrew.collab.webhooks import (WebhookRejected, accept_webhook,
-                                             fan_out_event, save_webhook_source)
+                                             fan_out_event, save_webhook_source,
+                                             source_subscribers)
 
     client = TestClient(create_app())
     _create_target(client)
@@ -188,10 +190,22 @@ def test_cross_project_import_automation_clears_global_source_subscription(seede
     fanout = fan_out_event(seeded, service, webhook_source, delivery, auth="poll")
     assert fanout["targets"] == 1
     assert service.triggered == ["webshop:hooked"]
+    assert [item.id for item in source_subscribers(seeded, "shared-hook")] == [
+        "webshop:hooked"]
     # 来源是全局 GitHub 轮询资源：外部 POST 和项目名路径都不能触发新项目脚本。
     with pytest.raises(WebhookRejected) as rejected:
         accept_webhook(seeded, service, "target:hooked", {}, b"{}")
     assert rejected.value.status == 404
+
+
+def test_automation_copy_accounts_for_every_model_field():
+    from missioncrew.core.models import Automation
+
+    preserved = project_imports.AUTOMATION_COPY_PRESERVED_FIELDS
+    reset = project_imports.AUTOMATION_COPY_RESET_FIELDS
+    names = {item.name for item in fields(Automation)}
+    assert preserved.isdisjoint(reset)
+    assert preserved | reset == names
 
 
 def test_cross_project_import_skip_and_overwrite_conflicts(seeded):

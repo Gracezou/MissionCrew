@@ -986,6 +986,7 @@ class Store:
         return result
 
     def audit(self, actor: str, action: str, task_id: str = "", detail: str = "") -> None:
+        detail = self.redact_credentials(detail)
         self._execute(
             "INSERT INTO audit(ts, actor, action, task_id, detail) VALUES(?,?,?,?,?)",
             (time.time(), actor, action, task_id, detail),

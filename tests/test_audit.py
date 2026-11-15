@@ -54,6 +54,11 @@ def test_audit_limit_and_before_id_keep_equal_timestamps(seeded):
 
 def test_audit_redacts_credentials_without_truncating_other_detail(seeded):
     client = TestClient(create_app())
+    from missioncrew.collab.credentials import save_environment
+
+    secret = "github-secret-token"
+    save_environment(seeded, project_id="", name="GITHUB",
+                     variables=[{"name": "TOKEN", "secret": True, "value": secret}])
     detail = ("project=webshop token=token-value api_key=key-value "
               "Authorization: Bearer bearer-value password=pass-value "
               '{"webhook_secret": "json-value"} '
@@ -61,16 +66,26 @@ def test_audit_redacts_credentials_without_truncating_other_detail(seeded):
               "https://user:url-pass@example.test/path "
               "tokens revoked path=secrets.yaml https://gitcode.com/u/r.git "
               + "原因详情" * 100)
-    seeded.audit("human", "resource_failed", detail=detail)
+    seeded.audit("human", "resource_failed", detail=detail + f" raw={secret}")
     row = client.get("/api/audit").json()["entries"][0]
     for secret in ("token-value", "key-value", "bearer-value", "pass-value",
                    "json-value", "basic-value", "url-pass"):
         assert secret not in row["detail"]
+    assert "raw=github-secret-token" not in row["detail"]
+    assert "[credential:GITHUB.TOKEN]" in row["detail"]
     assert "project=webshop" in row["detail"]
     assert "tokens revoked path=secrets.yaml https://gitcode.com/u/r.git" in row["detail"]
     assert "原因详情" * 100 in row["detail"]
     assert "[已隐藏]" in row["detail"]
     assert set(row) == {"id", "ts", "actor", "action", "task_id", "detail"}
+
+
+def test_audit_keeps_credential_placeholders_intact(seeded):
+    client = TestClient(create_app())
+    seeded.audit("human", "credential_logged",
+                 detail="token=[credential:GITHUB.TOKEN]")
+    row = client.get("/api/audit").json()["entries"][0]
+    assert row["detail"] == "token=[credential:GITHUB.TOKEN]"
 
 
 def test_task_detail_redacts_audit_but_cli_store_keeps_original(seeded):
@@ -85,7 +100,7 @@ def test_task_detail_redacts_audit_but_cli_store_keeps_original(seeded):
     detail = client.get(f"/api/tasks/{task.id}").json()["audit"]
     assert "task-secret" not in str(detail)
     assert "[已隐藏]" in detail[0]["detail"]
-    assert "task-secret" in seeded.list_audit(task.id)[0]["detail"]
+    assert seeded.list_audit(task.id)[0]["detail"] == "project=webshop token=task-secret"
 
 
 def test_audit_widget_source_redacts_detail(seeded):

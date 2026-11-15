@@ -143,16 +143,18 @@ def test_cross_project_import_copies_all_resources_without_mutating_source(seede
 
 @pytest.mark.parametrize("overwrite", [False, True])
 def test_cross_project_import_automation_never_inherits_webhook_identity(seeded, overwrite):
-    from missioncrew.collab.webhooks import WebhookRejected, accept_webhook
+    from missioncrew.collab.webhooks import save_webhook_source
 
     client = TestClient(create_app())
     _create_target(client)
+    webhook_source, _ = save_webhook_source(seeded, id="shared-hook")
     source, _ = save_automation(
-        seeded, "webshop", id="hooked", script="echo source", webhook=True)
+        seeded, "webshop", id="hooked", script="echo source",
+        webhook_source="shared-hook")
     original = source.to_dict()
-    assert source.webhook_secret
     if overwrite:
-        save_automation(seeded, "target", id="hooked", script="echo old", webhook=True)
+        save_automation(seeded, "target", id="hooked", script="echo old",
+                        webhook_source="shared-hook")
 
     response = _import(client, "automation", ["hooked"], strategy="overwrite")
 
@@ -161,15 +163,12 @@ def test_cross_project_import_automation_never_inherits_webhook_identity(seeded,
         "overwritten" if overwrite else "copied")
     copied = seeded.get_automation("target:hooked")
     assert copied.enabled is False
-    assert copied.webhook is False
-    assert copied.webhook_secret == ""
+    assert copied.webhook_source == ""
+    assert copied.github_repos == [] and copied.github_events == []
     assert seeded.get_automation(source.id).to_dict() == original
-    assert source.webhook_secret not in response.text
-    # 不启动进程：新目标连 webhook 验签/触发阶段都不应进入。
-    with pytest.raises(WebhookRejected) as rejected:
-        accept_webhook(seeded, None, "target", "hooked",
-                       {"authorization": f"Bearer {source.webhook_secret}"}, b"{}")
-    assert rejected.value.status == 404
+    assert webhook_source.secret not in response.text
+    # 全局来源密钥不存于 Automation;复制品也不会订阅这个来源。
+    assert seeded.get_webhook_source("shared-hook").secret == webhook_source.secret
 
 
 def test_cross_project_import_skip_and_overwrite_conflicts(seeded):

@@ -539,10 +539,13 @@ vm.runInContext(`
   for (const withEnabled of [false, true]) {
     const legacy = roleFileItem({id: "dev", enabled: false}, withEnabled);
     if ("manual_only" in legacy) throw new Error("legacy file fabricated manual_only");
+    if ("max_concurrency" in legacy) throw new Error("legacy file fabricated max_concurrency");
     for (const manual_only of [true, false]) {
       const item = roleFileItem({id: "dev", manual_only}, withEnabled);
       if (item.manual_only !== manual_only) throw new Error("explicit flag lost");
     }
+    const limited = roleFileItem({id: "dev", max_concurrency: 3}, withEnabled);
+    if (limited.max_concurrency !== 3) throw new Error("explicit concurrency lost");
   }
   const marked = roleTransferRows([{id: "manual", enabled: false, manual_only: true}]);
   if (!marked.includes(">仅人工</span>") || !marked.includes(">默认停用</span>"))
@@ -1753,3 +1756,39 @@ def test_manual_only_role_round_trips_and_cannot_be_orchestrator(client, seeded)
         assert "manual_only" in client.get(f"/assets/js/{name}").text, name
     assert ("!role.manual_only || role.id === selectedId"
             in client.get("/assets/js/settings-project.js").text)
+
+
+def test_role_save_reschedules_waiting_channels(monkeypatch, seeded):
+    calls = []
+    monkeypatch.setattr(ChatEngine, "reschedule", lambda self: calls.append(self))
+    client = TestClient(create_app())
+    body = seeded.get_role("webshop", "dev").to_dict()
+    body["max_concurrency"] = 5
+    response = client.post("/api/roles", json=body)
+    assert response.status_code == 200, response.text
+    assert calls
+
+
+def test_role_import_keeps_omitted_max_concurrency(seeded):
+    client = TestClient(create_app())
+    dev = seeded.get_role("webshop", "dev")
+    dev.max_concurrency = 4
+    seeded.put_role(dev)
+    template = seeded.get_role_template("dev")
+    template.max_concurrency = 6
+    seeded.put_role_template(template)
+
+    project_import = client.post("/api/roles/import", json={
+        "project_id": "webshop",
+        "roles": [{"id": "dev", "runtime_id": "std-1", "model": "pro"}],
+        "overwrite_ids": ["dev"],
+    })
+    assert project_import.status_code == 200, project_import.text
+    assert seeded.get_role("webshop", "dev").max_concurrency == 4
+
+    template_import = client.post("/api/role-templates/import", json={
+        "roles": [{"id": "dev", "runtime_id": "std-1", "model": "pro"}],
+        "overwrite_ids": ["dev"],
+    })
+    assert template_import.status_code == 200, template_import.text
+    assert seeded.get_role_template("dev").max_concurrency == 6

@@ -46,26 +46,10 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/roles")
     def save_role(body: RoleInput):
-        return as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
-                       "human", role_updated=ctx.role_usage_linkage.role_updated)
-        project = store.get_project(body.project_id)
-        if project is None:
-            raise HTTPException(400, f"项目不存在: {body.project_id}")
-        reject_manual_only_orchestrator(project, body)
-        data = body.model_dump()
-        existing = store.get_role(body.project_id, body.id)
-        # 临时启停只允许走独立端点；编辑名称、模型等字段时保留实时状态，
-        # 避免旧表单保存时覆盖另一个页面刚完成的开关操作。
-        data["enabled"] = existing.enabled if existing else True
-        if data["sort_order"] is None:   # 编辑保留现有顺序;新角色排到项目末尾
-            data["sort_order"] = existing.sort_order if existing else 10 + max(
-                (r.sort_order for r in store.list_roles(body.project_id)), default=0)
-        role = Role(**data)
-        store.put_role(role)
-        ctx.role_usage_linkage.role_updated(role, previous=existing)
-        ctx.chat.reschedule()   # 并发上限调高后,等待中的频道立即按新上限派发
-        store.audit("human", "role_saved", detail=f"project={role.project_id} role={role.id}")
-        return store.get_role(role.project_id, role.id).to_dict()
+        result = as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
+                         "human", role_updated=ctx.role_usage_linkage.role_updated)
+        ctx.chat.reschedule()
+        return result
 
     @app.post("/api/roles/{role_id}/enabled")
     def set_role_enabled(role_id: str, body: RoleEnabledInput):
@@ -111,6 +95,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # fork-divergence: 旧文件未携带时不撤掉已有角色的仅人工限制。
             if "manual_only" not in item.model_fields_set and previous:
                 data["manual_only"] = previous.manual_only
+            if "max_concurrency" not in item.model_fields_set and previous:
+                data["max_concurrency"] = previous.max_concurrency
             role = Role(
                 **data,
                 project_id=project.id,
@@ -186,6 +172,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 data["manual_only"] = previous.manual_only
             if "enabled" not in item.model_fields_set and previous:
                 data["enabled"] = previous.enabled   # 文件未携带时不改已有模板
+            if "max_concurrency" not in item.model_fields_set and previous:
+                data["max_concurrency"] = previous.max_concurrency
             role = Role(
                 **data,
                 project_id="",

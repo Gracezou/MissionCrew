@@ -171,6 +171,7 @@ ACTION_DEFINITIONS = {
             "effort": "supported reasoning effort; empty uses CLI default",
             "usage_linkage_enabled": "follow account usage limits; default false",
             "manual_only": "human mention only; omitted preserves an existing value",
+            "max_concurrency": "cross-channel concurrency limit; omitted preserves an existing value",
             "name": "display name", "description": "role description",
             "capabilities": "array of supported role abilities",
             "preference": "free-form role preference", "color": "display color",
@@ -819,7 +820,7 @@ ACTION_ARGUMENTS = {
     "role.save": {
         "scope", "id", "runtime_id", "project_id", "enabled", "model", "effort",
         "usage_linkage_enabled", "manual_only", "name", "description",
-        "capabilities", "preference", "color", "sort_order",
+        "capabilities", "preference", "color", "sort_order", "max_concurrency",
     },
     "task.create": {
         "title", "summary", "body", "labels", "channel_ids", "status", "source",
@@ -899,8 +900,8 @@ CONVERSATION_RECEIPT_ACTIONS = (
         "message.publish", "channel.runs.list", "channel.run.stop",
         "channel.history", "channel.list", "recycle.list", "dashboard.list",
         "board_source.list", "guideline.list", "skill.list", "automation.list",
-        "document.history", "guideline.history", "skill.history", "role.list",
-"webhook.history", "document.history", "guideline.history", "skill.history", "callback.list",
+        "webhook.history", "document.history", "guideline.history", "skill.history",
+        "role.list", "callback.list",
     }
 )
 
@@ -912,10 +913,12 @@ class AgentActionService:
                  stop_run: Callable[..., dict],
                  history_records: Optional[Callable[..., list[dict]]] = None,
                  stop_channel_sessions: Optional[Callable[[str], int]] = None,
-                 callbacks: Optional[CallbackService] = None):
+                 callbacks: Optional[CallbackService] = None,
+                 reschedule: Optional[Callable[[], None]] = None):
         self.store = store
         # 角色登记的一次性回调;None = 没有聊天引擎(测试),callback.* 不可用
         self._callbacks = callbacks
+        self._reschedule = reschedule or (lambda: None)
         self._post_message = post_message
         self._stop_run = stop_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的
@@ -935,6 +938,9 @@ class AgentActionService:
                          role_updated: Callable) -> None:
         self._role_catalog = discovered_catalog
         self._role_updated = role_updated
+
+    def bind_rescheduler(self, reschedule: Callable[[], None]) -> None:
+        self._reschedule = reschedule
 
     @staticmethod
     def _unbound_role_catalog(_backend):
@@ -1420,6 +1426,8 @@ class AgentActionService:
                 role_updated=self._role_updated,
                 audit_suffix=f" run={context.run_id}",
             )
+            if scope == "project":
+                self._reschedule()
         except ValidationError as exc:
             issue = exc.errors()[0]
             field = ".".join(map(str, issue["loc"]))

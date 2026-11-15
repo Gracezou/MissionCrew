@@ -89,9 +89,12 @@ def test_role_save_preserves_restrictions_and_validates_like_http(seeded):
     chat = ChatEngine(seeded)
     _config, run_id, token = _run_config(seeded, chat, "lead")
     identity = chat.agent_tools.authenticate(token)
+    reschedules = []
+    chat.agent_tools.bind_rescheduler(lambda: reschedules.append(True))
     dev = seeded.get_role("webshop", "dev")
     dev.manual_only = True
     dev.enabled = False
+    dev.max_concurrency = 2
     seeded.put_role(dev)
     result = chat.agent_tools.execute(identity, "role.save", {
         "scope": "project", "id": "dev", "runtime_id": "std-1",
@@ -99,6 +102,14 @@ def test_role_save_preserves_restrictions_and_validates_like_http(seeded):
     }, run_id, "save-dev")
     assert result["role"]["manual_only"] is True
     assert result["role"]["enabled"] is False
+    assert result["role"]["max_concurrency"] == 2
+    changed_limit = chat.agent_tools.execute(identity, "role.save", {
+        "scope": "project", "id": "dev", "runtime_id": "std-1",
+        "description": "只改描述", "max_concurrency": 3,
+    }, run_id, "set-dev-concurrency")
+    assert changed_limit["role"]["description"] == "只改描述"
+    assert changed_limit["role"]["max_concurrency"] == 3
+    assert reschedules
     with pytest.raises(AgentToolError) as rejected:
         chat.agent_tools.execute(identity, "role.save", {
             "scope": "project", "id": "lead", "runtime_id": "std-1",

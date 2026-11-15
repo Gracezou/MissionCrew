@@ -101,6 +101,8 @@ def save_role_config(store, body, scope: str, discovered_catalog: Callable,
     # fork-divergence: 旧请求省略限制字段时保留现值。
     if "manual_only" not in body.model_fields_set and existing:
         data["manual_only"] = existing.manual_only
+    if "max_concurrency" not in body.model_fields_set and existing:
+        data["max_concurrency"] = existing.max_concurrency
     if data["sort_order"] is None:
         data["sort_order"] = existing.sort_order if existing else 10 + max(
             (role.sort_order for role in siblings), default=0)

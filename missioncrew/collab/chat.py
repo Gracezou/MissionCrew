@@ -91,8 +91,9 @@ class _PendingInteraction:
 # 提示词结构约定:人格(role_desc)是"选人用的专长画像",不是任务;
 # 任务只来自触发消息(由发起者——人类或调度角色——撰写的简报)。
 # 给角色的提示词一律用英文;人类可见内容的语言由公共区块里的 Language 一行约定。
+WORKTREE_INSTRUCTION = 'make code changes in your own git worktree (see "Must Follow")'
 WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read files and run "
-                   "commands here; make code changes in your own git worktree, see \"Must Follow\")")
+                   f"commands here; {WORKTREE_INSTRUCTION})")
 MANAGED_WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read files and "
                            "make code changes directly in this channel's bound managed "
                            "worktree; do not create a nested worktree)")
@@ -388,7 +389,7 @@ class ChatEngine:
         self._interaction_lock = threading.Lock()
         self._interactions: dict[str, _PendingInteraction] = {}
         self._notified_interaction_runs: set[int] = set()
-# 角色登记的一次性回调:轮询线程由服务装配时启动(测试直接调 tick)
+        # 角色登记的一次性回调:轮询线程由服务装配时启动(测试直接调 tick)
         self.callbacks = CallbackService(
             store, self._fire_callback, self._post_callback_notice)
         self.agent_tools = AgentActionService(
@@ -396,6 +397,7 @@ class ChatEngine:
             history_records=self.channel_history_records,
             stop_channel_sessions=self.stop_channel_sessions,
             callbacks=self.callbacks)
+        self.agent_tools.bind_rescheduler(self.reschedule)
         # 正在更新的 runtime 集合(由 server 注入共享):更新期间不派发执行,
         # 避免 Agent 跑在半更新的二进制上
         self.updating_backends: set[str] = set()
@@ -1769,7 +1771,9 @@ class ChatEngine:
         workdir, missing_workdir = self._resolve_workdir(channel)
         # fork-divergence: workspace.create already bound this channel to a managed worktree;
         # asking the role to create another worktree would nest it and break workspace.finish.
-        template = MANAGED_WORKDIR_SECTION if channel.managed_worktree else WORKDIR_SECTION
+        template = (MANAGED_WORKDIR_SECTION
+                    if channel.managed_worktree and missing_workdir is None
+                    else WORKDIR_SECTION)
         workdir_section = template.format(workdir=workdir)
         if missing_workdir is not None:
             workdir_section += "\n" + MISSING_WORKDIR_NOTICE.format(
@@ -1925,9 +1929,9 @@ class ChatEngine:
             workflow_section = EXECUTOR_WORKFLOW.format(
                 documents_dir=documents_dir, temp_dir=temp_dir,
                 orchestrator_id=orchestrator_id)
-        if channel.managed_worktree:
+        if channel.managed_worktree and missing_workdir is None:
             workflow_section = workflow_section.replace(
-                'make code changes in your own git worktree (see "Must Follow")',
+                WORKTREE_INSTRUCTION,
                 "make code changes directly in this channel's bound managed worktree")
         body_fields = dict(
             role_id=role.id, role_name=role.name, role_desc=role.description,

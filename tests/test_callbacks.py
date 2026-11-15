@@ -459,19 +459,20 @@ def test_existing_event_filter_is_skipped_without_sandbox(chat, seeded, monkeypa
     registered = _call(chat, identity, "callback.create", {
         "note": "等事件", "webhook_source": "gh", "filter": "exit 0",
         "delay_seconds": 600})
-    _deliver(seeded, "gh", "issues", {"action": "opened"})
+    delivery_id = _deliver(seeded, "gh", "issues", {"action": "opened"})
     monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "none")
-    called = []
-    monkeypatch.setattr(event_filters, "run_event_filter",
-                        lambda *args: called.append(args))
-    chat.callbacks._scan_events(seeded.get_chat_callback(
-        registered["callback"]["id"]))
-    callback = callbacks_mod.public_callback(seeded.get_chat_callback(
-        registered["callback"]["id"]))
+    row = seeded.get_chat_callback(registered["callback"]["id"])
+    chat.callbacks._scan_events(row)
+    updated = seeded.get_chat_callback(registered["callback"]["id"])
+    callback = callbacks_mod.public_callback(updated)
     progress = callback["watch"]["progress"]
-    assert called == []
+    assert int(updated["baseline"]) == delivery_id
     assert progress["errors"] == 1
     assert "当前环境没有可用沙箱" in progress["last_error"]
+    chat.callbacks._scan_events(updated)
+    rescanned = callbacks_mod.public_callback(
+        seeded.get_chat_callback(registered["callback"]["id"]))
+    assert rescanned["watch"]["progress"]["errors"] == 1
 
 
 def test_filter_script_gets_the_event_but_no_platform_capability(

@@ -192,9 +192,9 @@ def test_cross_project_import_automation_clears_global_source_subscription(seede
     assert service.triggered == ["webshop:hooked"]
     assert [item.id for item in source_subscribers(seeded, "shared-hook")] == [
         "webshop:hooked"]
-    # 来源是全局 GitHub 轮询资源：外部 POST 和项目名路径都不能触发新项目脚本。
+    # 来源是全局 GitHub 轮询资源：即使用它的有效路径，外部 POST 仍被拒绝。
     with pytest.raises(WebhookRejected) as rejected:
-        accept_webhook(seeded, service, "target:hooked", {}, b"{}")
+        accept_webhook(seeded, service, webhook_source.path, {}, b"{}")
     assert rejected.value.status == 404
 
 

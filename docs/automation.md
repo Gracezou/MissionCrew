@@ -87,7 +87,7 @@ webhook 来源是平台全局的投递入口，只定义投递地址、密钥和
 
   `source` 是收到投递的 webhook 来源 id；`provider` 是发送平台，按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串，这时 `delivery` 取 Standard Webhooks 的 `webhook-id`；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
 - **投递记录**：每个来源收到的事件都留有记录，保留 7 天、每个来源最多 1000 条。通过验签的投递都会记，包括还没有脚本订阅时收到的和 GitHub 的 `ping`；被拒收（验签失败）的投递不记，原因在审计里。每条记录有收到时间、发送平台、事件名、动作（`payload.action`，GitLab 取 `object_attributes.action`）、仓库（`payload.repository.full_name`，GitLab 取 `project.path_with_namespace`）、投递 id、验证方式，以及交给了哪些脚本和结果（运行记录 id、已排队或因排队已满被丢弃；空表示没有脚本接收）。事件全文也一并保存，与脚本读到的事件文件相同；超过 256 KB 的只保存请求头和摘要，全文里出现的已保存凭据同样会被替换成 `[credential:<名称>]`。人在「全局设置 → Webhook 来源」每行的「记录」里查看，可以按事件、动作、仓库筛选，点一行看全文；自动化详情页的「Webhook」区也有同一个入口。主控用 `webhook.history` 查询同一份记录（参数 `source`，可选 `event`、`action`、`repository`、`limit`、`before_id`；带 `id` 返回那一条的事件全文 `event_file`），写脚本的过滤条件前先看来源实际送来过哪些事件，脚本没有按预期运行时也据此排查。
-- **一次性订阅**：除了让自动化脚本长期订阅来源，聊天角色还可以用 `callback.create` 的 `webhook_source` 只等一个事件：登记之后来源收到的第一个匹配事件（按事件名、动作、仓库和可选的过滤脚本判断）让该角色回到登记的频道继续工作，到超时时间没等到也会回来。适合「我的 PR 合并后接着做下一步」这类等待，不必为此建一个长期运行的脚本。参数与过滤脚本的约定见 [Agent Tool API](agent-tool-api.md)。
+- **一次性订阅**：除了让自动化脚本长期订阅来源，聊天角色还可以用 `callback.create` 的 `webhook_source` 只等一个事件：登记之后来源收到的第一个匹配事件（按事件名、动作、仓库和可选的过滤脚本判断）让该角色回到登记的频道继续工作，到超时时间没等到也会回来。过滤脚本仅在当前环境有可用沙箱时接受；没有沙箱时不能使用过滤脚本，但可以登记不带过滤脚本的回调。适合「我的 PR 合并后接着做下一步」这类等待，不必为此建一个长期运行的脚本。参数与过滤脚本的约定见 [Agent Tool API](agent-tool-api.md)。
 - **过滤交给脚本**：平台不按事件类型、仓库或动作过滤，共用来源的每个脚本都会收到该来源的全部投递，脚本读事件后对不关心的投递直接 `exit 0`。这样的运行也会留一条记录，便于排查到过哪些事件。
 
 示例：`acme/webshop` 的 Issue 打开、关闭或重新打开时立即同步，其余事件（包括同一来源送来的其他仓库事件）忽略；cron 每 30 分钟兜底一次。注意 `board_source.save` 是整体同步，webhook 触发时也要拉全量再保存，不能只拿事件里那一条 Issue 去保存，否则其他任务会被删除。

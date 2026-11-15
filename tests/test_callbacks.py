@@ -361,6 +361,7 @@ def test_event_callback_fires_on_the_first_matching_delivery(chat, seeded):
     assert len(_callback_messages(seeded)) == 1              # 一次性
 
 
+@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
 def test_event_callback_filter_script_decides_and_times_out_with_progress(chat, seeded):
     save_webhook_source(seeded, id="gh")
     identity, run_id, _config = _start_run(seeded, chat, "dev")
@@ -409,6 +410,49 @@ def test_event_callback_filter_script_decides_and_times_out_with_progress(chat, 
     assert seeded.get_chat_callback(broken["callback"]["id"])["status"] == "fired"
 
 
+def test_event_callback_filter_rejected_without_sandbox_before_trial(chat, seeded, monkeypatch):
+    save_webhook_source(seeded, id="gh")
+    identity, _run_id, _config = _start_run(seeded, chat, "dev")
+    called = []
+    monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "none")
+    monkeypatch.setattr(event_filters, "run_event_filter",
+                        lambda *args: called.append(args))
+    with pytest.raises(AgentToolError) as error:
+        _call(chat, identity, "callback.create", {
+            "note": "等事件", "webhook_source": "gh", "filter": "exit 0",
+            "delay_seconds": 600})
+    assert "当前环境没有可用沙箱" in error.value.message
+    assert "不带过滤脚本的回调" in error.value.message
+    assert called == []
+    assert seeded.list_chat_callbacks(status="pending") == []
+
+
+def test_existing_event_filter_is_skipped_without_sandbox(chat, seeded, monkeypatch):
+    save_webhook_source(seeded, id="gh")
+    identity, _run_id, _config = _start_run(seeded, chat, "dev")
+    # 先用可用沙箱登记，模拟回调迁移到当前无沙箱的机器。
+    monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "bwrap")
+    monkeypatch.setattr(event_filters, "run_event_filter",
+                        lambda *_: event_filters.FilterResult(False, 1))
+    registered = _call(chat, identity, "callback.create", {
+        "note": "等事件", "webhook_source": "gh", "filter": "exit 0",
+        "delay_seconds": 600})
+    _deliver(seeded, "gh", "issues", {"action": "opened"})
+    monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "none")
+    called = []
+    monkeypatch.setattr(event_filters, "run_event_filter",
+                        lambda *args: called.append(args))
+    chat.callbacks._scan_events(seeded.get_chat_callback(
+        registered["callback"]["id"]))
+    callback = callbacks_mod.public_callback(seeded.get_chat_callback(
+        registered["callback"]["id"]))
+    progress = callback["watch"]["progress"]
+    assert called == []
+    assert progress["errors"] == 1
+    assert "当前环境没有可用沙箱" in progress["last_error"]
+
+
+@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
 def test_filter_script_gets_the_event_but_no_platform_capability(seeded, tmp_path):
     event = {"source": "gh", "provider": "github", "event": "issues", "delivery": "d-1",
              "payload": {"action": "opened", "issue": {"number": 7}}}
@@ -445,6 +489,7 @@ def test_filter_script_is_sandboxed_without_network_or_writable_files(seeded, tm
     assert not outside.exists()
 
 
+@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
 def test_filter_script_timeout_is_an_error_not_a_match(seeded, monkeypatch):
     monkeypatch.setattr(event_filters, "FILTER_TIMEOUT_SECONDS", 1)
     result = event_filters.run_event_filter("sleep 30\n", {"event": "x"})
@@ -479,6 +524,7 @@ def test_event_callback_create_validates_arguments(chat, seeded, arguments, frag
     assert seeded.list_chat_callbacks(status="pending") == []
 
 
+@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
 def test_executor_checks_history_and_filter_is_tried_on_a_real_delivery(chat, seeded):
     save_webhook_source(seeded, id="gh")
     _deliver(seeded, "gh", "pull_request", _pr(12), delivery="old-12")

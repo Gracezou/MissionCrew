@@ -9,8 +9,8 @@
 - 不给能力:不签发 Agent Tool 令牌,环境变量里没有平台地址、凭据目录和 GitHub 身份,
   所以它调不了任何平台动作,也拿不到任何密钥。
 - 关进沙箱(本机有可用的 bubblewrap 时):没有网络,整个文件系统只读,主目录与平台
-  数据目录不可见,只有一个用完即删的临时目录可写。没有 bubblewrap 的机器上只有第一层,
-  `filter_sandbox()` 会如实报告,登记回调的回执里也带着。
+  数据目录不可见,只有一个用完即删的临时目录可写。没有 bubblewrap 时拒绝登记过滤器,
+  轮询已有过滤器也会按错误处理。
 """
 from __future__ import annotations
 
@@ -118,6 +118,10 @@ def run_event_filter(script: str, event: dict) -> FilterResult:
         validate_filter(script)
     except ValueError as exc:
         return FilterResult(False, None, str(exc))
+    # fork-divergence: filter scripts are executable code; refuse them when the
+    # host cannot isolate them, including callbacks migrated from another host.
+    if script.strip() and filter_sandbox() == "none":
+        return FilterResult(False, None, "当前环境没有可用沙箱，不能执行事件过滤脚本")
     workdir = _work_root() / uuid.uuid4().hex
     try:
         workdir.mkdir(parents=True, exist_ok=True)

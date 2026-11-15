@@ -21,6 +21,7 @@
 | `missioncrew/collab/board_sources.py` | ISO 8601 时间解析前将末尾 `Z`/`z` 规范为 `+00:00`，兼容 Python 3.10。 | `tests/test_tasks.py::test_external_update_time_accepts_unix_seconds_and_zoned_iso_only` | 上游不会修复 Python 3.10 兼容；项目仍声明支持 Python 3.10。 |
 | `missioncrew/collab/chat.py` | 普通频道提示角色自行使用 Git worktree；已绑定受管 worktree 的频道提示直接在该目录改代码，避免嵌套工作树破坏 `workspace.finish` 生命周期。 | `tests/test_workspaces.py::test_managed_worktree_prompt_does_not_request_nested_worktree` | 上游提示词针对普通 checkout；受管频道的目录与生命周期由 fork 的 `workspace.*` 管理。 |
 | `missioncrew/collab/event_filters.py` | 事件过滤脚本登记与每次运行前都验证 shebang 解释器存在、可执行且为绝对路径；避免 macOS bash 3.2 将解释器缺失返回为退出码 1、被误当作正常忽略。 | `tests/test_callbacks.py::test_event_callback_create_validates_arguments`、`test_filter_runtime_rejects_missing_shebang_interpreter` | 上游以 126/127 判定无法启动；macOS bash 3.2 对此返回 1。预检只检查路径，不执行脚本或扩大其环境权限。 |
+| `missioncrew/collab/event_filters.py`、`missioncrew/collab/agent_tools.py` | 无可用 bubblewrap 沙箱时拒绝登记事件过滤脚本，已有过滤器轮询时也不执行并记为错误；无过滤回调仍可用。 | `tests/test_callbacks.py::test_event_callback_filter_rejected_without_sandbox_before_trial`、`test_existing_event_filter_is_skipped_without_sandbox` | 过滤脚本是可执行代码；无隔离时会以服务进程身份运行，可能绕过 Runtime 权限与审批。 |
 
 ## 同步上游时的核对步骤
 

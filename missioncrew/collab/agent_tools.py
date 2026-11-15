@@ -2658,9 +2658,14 @@ class AgentActionService:
             if not isinstance(value, str):
                 raise AgentToolError("invalid_arguments", f"{name} 必须是字符串")
             spec[name] = value.strip()
+        raw_filter = arguments.get("filter") or ""
+        if isinstance(raw_filter, str) and raw_filter.strip() and filter_sandbox() == "none":
+            raise AgentToolError(
+                "invalid_arguments",
+                "当前环境没有可用沙箱，不能使用事件过滤脚本；可以改用不带过滤脚本的回调")
         try:
             repos = normalize_repos(arguments.get("repository") or [])
-            spec["filter"] = validate_filter(arguments.get("filter") or "")
+            spec["filter"] = validate_filter(raw_filter)
         except ValueError as exc:
             raise AgentToolError("invalid_arguments", str(exc)) from exc
         if len(repos) > 1:
@@ -2668,12 +2673,6 @@ class AgentActionService:
         spec["repository"] = repos[0] if repos else ""
         if not spec["filter"]:
             return spec, None
-        # fork-divergence: do not trial-run executable filters on hosts without
-        # an isolation sandbox; filters are optional, event callbacks are not.
-        if filter_sandbox() == "none":
-            raise AgentToolError(
-                "invalid_arguments",
-                "当前环境没有可用沙箱，不能使用事件过滤脚本；可以改用不带过滤脚本的回调")
         recent = self.store.list_webhook_deliveries(
             source.id, limit=1, event=spec["event"], action=spec["action"],
             repository=spec["repository"])

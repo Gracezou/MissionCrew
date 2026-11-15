@@ -428,6 +428,19 @@ def test_event_callback_filter_rejected_without_sandbox_before_trial(chat, seede
     assert seeded.list_chat_callbacks(status="pending") == []
 
 
+def test_callback_filter_checks_sandbox_before_shebang(chat, seeded, monkeypatch):
+    save_webhook_source(seeded, id="gh")
+    identity, _run_id, _config = _start_run(seeded, chat, "dev")
+    monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "none")
+    with pytest.raises(AgentToolError) as error:
+        _call(chat, identity, "callback.create", {
+            "note": "等事件", "webhook_source": "gh",
+            "filter": "#!/private-missing/interpreter\nexit 0\n",
+            "delay_seconds": 600})
+    assert "当前环境没有可用沙箱" in error.value.message
+    assert "shebang" not in error.value.message
+
+
 def test_existing_event_filter_is_skipped_without_sandbox(chat, seeded, monkeypatch):
     save_webhook_source(seeded, id="gh")
     identity, _run_id, _config = _start_run(seeded, chat, "dev")

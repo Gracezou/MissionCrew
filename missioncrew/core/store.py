@@ -2059,19 +2059,21 @@ class Store:
     def append_interaction_event(self, run_id: int, kind: str,
                                  payload: dict) -> int:
         """交互请求必须独占一行，不能与相邻 JSON 事件拼接。"""
+        content = self.redact_credentials(json.dumps(payload, ensure_ascii=False))
         return self._execute(
             "INSERT INTO run_events(run_id, kind, content, created_at) "
             "VALUES(?,?,?,?)",
-            (run_id, kind, json.dumps(payload, ensure_ascii=False), time.time()),
+            (run_id, kind, content, time.time()),
         )
 
     def update_interaction_event(self, event_id: int, run_id: int,
                                  payload: dict) -> bool:
         """只更新指定 run 的交互行，避免跨运行猜测 request id。"""
+        content = self.redact_credentials(json.dumps(payload, ensure_ascii=False))
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE run_events SET content=? WHERE id=? AND run_id=?",
-                (json.dumps(payload, ensure_ascii=False), event_id, run_id),
+                (content, event_id, run_id),
             )
             self._conn.commit()
             return cursor.rowcount == 1

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import signal
 import subprocess
@@ -99,14 +98,11 @@ def validate_filter(script) -> str:
 
 def _validate_shebang(script: str) -> None:
     """shebang 由内核按解释器路径执行,必须是存在且可执行的绝对路径。"""
-    try:
-        words = shlex.split(script.splitlines()[0][2:].strip())
-    except ValueError as exc:
-        raise ValueError("过滤脚本无法使用：shebang 格式不合法") from exc
+    words = script.splitlines()[0][2:].split()
     interpreter = Path(words[0]) if words else Path()
     if (not interpreter.is_absolute() or not interpreter.is_file()
             or not os.access(interpreter, os.X_OK)):
-        raise ValueError("过滤脚本无法使用：shebang 指定的解释器不存在或不可执行")
+        raise ValueError("过滤脚本无法使用：shebang 解释器必须是存在且可执行的绝对路径")
 
 
 def run_event_filter(script: str, event: dict) -> FilterResult:

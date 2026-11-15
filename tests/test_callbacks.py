@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -502,6 +503,13 @@ def test_filter_runtime_rejects_missing_shebang_interpreter(seeded):
     assert not result.matched
     assert result.exit_code is None
     assert "shebang" in result.error
+
+
+def test_filter_shebang_uses_plain_whitespace_and_rejects_path_lookup(seeded):
+    with pytest.raises(ValueError, match="解释器"):
+        event_filters.validate_filter(f'#!"{sys.executable}"\nexit 0\n')
+    with pytest.raises(ValueError, match="解释器"):
+        event_filters.validate_filter("#!python3\nexit 0\n")
 
 
 @pytest.mark.parametrize("arguments,fragment", [

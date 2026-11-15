@@ -306,7 +306,8 @@ class AutomationService:
             self.store.audit(
                 "platform", "automation_webhook_dropped",
                 detail=f"project={automation_id.partition(':')[0]} "
-                       f"automation={automation_id} delivery={event.get('delivery', '')} "
+                       f"automation={automation_id} source={source_id} "
+                       f"delivery={event.get('delivery', '')} "
                        f"reason={reason}")
 
     def _run_script(self, automation: Automation, trigger: str = "manual",

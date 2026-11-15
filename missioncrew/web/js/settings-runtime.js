@@ -99,7 +99,7 @@ function editGlobalRoleTemplate(id) {
     id: "", name: "", description: "", capabilities: [], preference: "",
     runtime_id: "", model: "", effort: "", color: "#3564d7",
     usage_linkage_enabled: false, enabled: true, manual_only: false,
-usage_linkage_enabled: false, manual_only: false, max_concurrency: 0,
+    max_concurrency: 0,
   };
   const abilityChips = Object.entries(traitMeta.abilities).map(([key, label]) =>
     `<span class="chip ${(role.capabilities || []).includes(key) ? "on" : ""}" data-cap="${key}"

@@ -1321,7 +1321,7 @@ class Store:
                 (automation.id,
                  json.dumps(automation.to_dict(), ensure_ascii=False)),
             )
-# ---- 全局 webhook 来源 ----
+    # ---- 全局 webhook 来源 ----
     def put_webhook_source(self, source: WebhookSource) -> None:
         source.updated_at = time.time()
         self._put("webhook_sources", source.id, source.to_dict())

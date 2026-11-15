@@ -915,12 +915,11 @@ class AgentActionService:
                  stop_run: Callable[..., dict],
                  history_records: Optional[Callable[..., list[dict]]] = None,
                  stop_channel_sessions: Optional[Callable[[str], int]] = None,
-                 callbacks: Optional[CallbackService] = None,
-                 reschedule: Optional[Callable[[], None]] = None):
+                 callbacks: Optional[CallbackService] = None):
         self.store = store
         # 角色登记的一次性回调;None = 没有聊天引擎(测试),callback.* 不可用
         self._callbacks = callbacks
-        self._reschedule = reschedule or (lambda: None)
+        self._reschedule: Callable[[], None] = lambda: None
         self._post_message = post_message
         self._stop_run = stop_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的

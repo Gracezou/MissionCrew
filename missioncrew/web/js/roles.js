@@ -38,6 +38,7 @@ function roleFileItem(role, withTemplateEnabled = false) {
   }));
   // fork-divergence: 旧文件缺少 manual_only 时不伪造 false，让服务端保留现值。
   if (typeof role.manual_only === "boolean") item.manual_only = role.manual_only;
+  else delete item.manual_only;
   if (withTemplateEnabled && typeof role.enabled === "boolean") item.enabled = role.enabled;
   return item;
 }

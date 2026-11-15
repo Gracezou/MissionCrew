@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..core.models import MENTION_ID_RE, ROLE_ABILITIES, Role
 from ..runtime import runtime_manager
@@ -24,6 +24,7 @@ class RoleTemplateInput(BaseModel):
     preference: str = ""
     color: str = ""
     sort_order: int | None = None
+    max_concurrency: int = Field(default=0, ge=0)
 
 
 class RoleInput(RoleTemplateInput):

@@ -2648,7 +2648,8 @@ class AgentActionService:
         投递,没有就用只含这些字段的空事件。试跑只为尽早暴露写坏的脚本(起不来、
         超时就拒绝登记),命中与否如实回给角色,由它判断条件是否写对。
         """
-        from .event_filters import filter_sandbox, run_event_filter, validate_filter
+        from .event_filters import (FILTER_MAX_CHARS, filter_sandbox,
+                                    run_event_filter, validate_filter)
         from .github_events import normalize_repos
 
         source = self.store.get_webhook_source(source_id)
@@ -2661,6 +2662,9 @@ class AgentActionService:
                 raise AgentToolError("invalid_arguments", f"{name} 必须是字符串")
             spec[name] = value.strip()
         raw_filter = arguments.get("filter") or ""
+        if isinstance(raw_filter, str) and len(raw_filter) > FILTER_MAX_CHARS:
+            raise AgentToolError(
+                "invalid_arguments", f"filter 最多 {FILTER_MAX_CHARS} 个字符")
         if isinstance(raw_filter, str) and raw_filter.strip() and filter_sandbox() == "none":
             raise AgentToolError(
                 "invalid_arguments",

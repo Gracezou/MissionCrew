@@ -320,6 +320,13 @@ def _pr(number, action="merged", repo="acme/webshop"):
 NUMBER_12 = 'grep -q \'"number": 12\'\n'
 
 
+def _allow_filter_runner_without_bwrap(monkeypatch):
+    """Exercise the isolated environment contract on hosts without bubblewrap."""
+    if event_filters.filter_sandbox() == "none":
+        monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "bwrap")
+        monkeypatch.setattr(event_filters, "_bwrap_prefix", lambda _workdir: [])
+
+
 def test_event_callback_fires_on_the_first_matching_delivery(chat, seeded):
     save_webhook_source(seeded, id="gh")
     _deliver(seeded, "gh", "pull_request", _pr(12))          # 登记之前的事件不算
@@ -362,8 +369,9 @@ def test_event_callback_fires_on_the_first_matching_delivery(chat, seeded):
     assert len(_callback_messages(seeded)) == 1              # 一次性
 
 
-@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
-def test_event_callback_filter_script_decides_and_times_out_with_progress(chat, seeded):
+def test_event_callback_filter_script_decides_and_times_out_with_progress(
+        chat, seeded, monkeypatch):
+    _allow_filter_runner_without_bwrap(monkeypatch)
     save_webhook_source(seeded, id="gh")
     identity, run_id, _config = _start_run(seeded, chat, "dev")
     matching = _call(chat, identity, "callback.create", {
@@ -466,8 +474,9 @@ def test_existing_event_filter_is_skipped_without_sandbox(chat, seeded, monkeypa
     assert "当前环境没有可用沙箱" in progress["last_error"]
 
 
-@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
-def test_filter_script_gets_the_event_but_no_platform_capability(seeded, tmp_path):
+def test_filter_script_gets_the_event_but_no_platform_capability(
+        seeded, tmp_path, monkeypatch):
+    _allow_filter_runner_without_bwrap(monkeypatch)
     event = {"source": "gh", "provider": "github", "event": "issues", "delivery": "d-1",
              "payload": {"action": "opened", "issue": {"number": 7}}}
     # 事件在标准输入和事件文件里都有,事件名等摘要在环境变量里
@@ -503,8 +512,8 @@ def test_filter_script_is_sandboxed_without_network_or_writable_files(seeded, tm
     assert not outside.exists()
 
 
-@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
 def test_filter_script_timeout_is_an_error_not_a_match(seeded, monkeypatch):
+    _allow_filter_runner_without_bwrap(monkeypatch)
     monkeypatch.setattr(event_filters, "FILTER_TIMEOUT_SECONDS", 1)
     result = event_filters.run_event_filter("sleep 30\n", {"event": "x"})
     assert not result.matched and result.exit_code is None and "未结束" in result.error
@@ -536,8 +545,10 @@ def test_filter_shebang_uses_plain_whitespace_and_rejects_path_lookup(seeded):
     ({"webhook_source": "gh", "filter": "#!/nonexistent/interpreter\n", "delay_seconds": 60},
      "过滤脚本无法使用"),
 ])
-def test_event_callback_create_validates_arguments(chat, seeded, arguments, fragment):
+def test_event_callback_create_validates_arguments(
+        chat, seeded, arguments, fragment, monkeypatch):
     save_webhook_source(seeded, id="gh")
+    monkeypatch.setattr(event_filters, "filter_sandbox", lambda: "bwrap")
     identity, _run_id, _config = _start_run(seeded, chat, "dev")
     with pytest.raises(AgentToolError) as error:
         _call(chat, identity, "callback.create", {"note": "x", **arguments})
@@ -545,8 +556,9 @@ def test_event_callback_create_validates_arguments(chat, seeded, arguments, frag
     assert seeded.list_chat_callbacks(status="pending") == []
 
 
-@pytest.mark.skipif(event_filters.filter_sandbox() != "bwrap", reason="需要可用的 bubblewrap")
-def test_executor_checks_history_and_filter_is_tried_on_a_real_delivery(chat, seeded):
+def test_executor_checks_history_and_filter_is_tried_on_a_real_delivery(
+        chat, seeded, monkeypatch):
+    _allow_filter_runner_without_bwrap(monkeypatch)
     save_webhook_source(seeded, id="gh")
     _deliver(seeded, "gh", "pull_request", _pr(12), delivery="old-12")
     identity, _run_id, config = _start_run(seeded, chat, "dev")

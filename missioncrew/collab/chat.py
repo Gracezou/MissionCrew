@@ -93,6 +93,9 @@ class _PendingInteraction:
 # 给角色的提示词一律用英文;人类可见内容的语言由公共区块里的 Language 一行约定。
 WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read files and run "
                    "commands here; make code changes in your own git worktree, see \"Must Follow\")")
+MANAGED_WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read files and "
+                           "make code changes directly in this channel's bound managed "
+                           "worktree; do not create a nested worktree)")
 # 频道绑定目录缺失时的回退提示:让 Agent 知道当前目录不是代码仓,避免误操作
 MISSING_WORKDIR_NOTICE = (
     "Note: the working directory `{bound}` bound to this channel no longer exists (for "
@@ -1764,7 +1767,10 @@ class ChatEngine:
                   run_id: int = 0,
                   merged_ids: Sequence[int] = ()) -> ExecutionConfig:
         workdir, missing_workdir = self._resolve_workdir(channel)
-        workdir_section = WORKDIR_SECTION.format(workdir=workdir)
+        # fork-divergence: workspace.create already bound this channel to a managed worktree;
+        # asking the role to create another worktree would nest it and break workspace.finish.
+        template = MANAGED_WORKDIR_SECTION if channel.managed_worktree else WORKDIR_SECTION
+        workdir_section = template.format(workdir=workdir)
         if missing_workdir is not None:
             workdir_section += "\n" + MISSING_WORKDIR_NOTICE.format(
                 bound=missing_workdir, workdir=workdir)
@@ -1919,6 +1925,10 @@ class ChatEngine:
             workflow_section = EXECUTOR_WORKFLOW.format(
                 documents_dir=documents_dir, temp_dir=temp_dir,
                 orchestrator_id=orchestrator_id)
+        if channel.managed_worktree:
+            workflow_section = workflow_section.replace(
+                'make code changes in your own git worktree (see "Must Follow")',
+                "make code changes directly in this channel's bound managed worktree")
         body_fields = dict(
             role_id=role.id, role_name=role.name, role_desc=role.description,
             role_capabilities=", ".join(role.capabilities) or "none specified",

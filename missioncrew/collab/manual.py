@@ -26,7 +26,7 @@ search `platform-docs/`: MissionCrew's own documentation, indexed by
 An executor's turn:
 1. Read the task: the task comes only from the brief in the trigger message; if information is missing, raise it in your reply instead of widening the scope.
 2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
-3. Do the work: read/write code and run commands in the working directory; touch only authorized directories; put temporary files in the conventional directory or the workspace `temp/`.
+3. Do the work: read code and run commands in the working directory, and make code changes in your own git worktree (section 3); touch only authorized directories; put temporary files in the conventional directory or the workspace `temp/`.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool.
 5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links; results of tasks the orchestrator dispatched go back to it automatically.
 
@@ -35,7 +35,7 @@ An orchestrator's turn:
 2. Choose who and where: pick roles from the role roster; whether to open a new channel follows the project guidelines; run `channel.list` before referencing or dispatching to another channel.
 3. Dispatch: `message.publish` with `channel`, `mentions` and a brief stating the background, requirements and acceptance criteria.
 4. Wrap up and wait for reports: when `dispatched` is non-empty, say in one sentence that the work was dispatched and end the turn; do not poll, chase or take over; the platform wakes you up automatically.
-5. Review and summarize: check against the acceptance criteria, then dispatch further or write the conclusion; record milestone conclusions with `task.brief`; run verification commands in the repository directories.
+5. Review and summarize: check against the acceptance criteria, then dispatch further or write the conclusion; record milestone conclusions with `task.brief`; run verification commands in the repository directories (for code changes, in the git worktree the executor reported).
 
 ## 1. Platform and Workspace
 
@@ -52,7 +52,8 @@ An orchestrator's turn:
   the platform regenerates both views every turn; `project.md` project summary and repositories; `channel-history.json` full channel history
   (executors get a redacted view); `temp/` temporary directory when the project has no convention;
   `manual.md` this manual; `platform-docs/` read-only copy of MissionCrew's own documentation
-  (`README.md` there lists every document).
+  (`README.md` there lists every document); `credentials/` secrets and settings humans saved for the project
+  (section 12).
 - Do not read or print `.agent-tool-token`; the Agent Tool CLI reads the token file itself.
 
 ## 2. Resource URLs and External References
@@ -60,7 +61,8 @@ An orchestrator's turn:
 - Project resource prefix `__PROJECT_URL__`: channel `/channels/<channel id>`, task `/tasks/<task id>`,
   dashboard `/dashboards/<dashboard id>` (the built-in task board id is `tasks`), guideline
   `/guidelines/<name>`, skill `/skills/<id>`, document `/documents/<path in the document library>`,
-  recycle bin `/recycle-bin`.
+  recycle bin `/recycle-bin`, project settings `/settings` (its credentials form
+  `/settings/credentials`).
 - These URLs are web identifiers, not file paths. Replies must reference platform resources with
   these links and documents as `[title](__DOCUMENTS_URL__/path)`; never output absolute workspace
   paths, the real `.missioncrew` path or `file://` links.
@@ -68,7 +70,7 @@ An orchestrator's turn:
   `$MISSIONCREW_DOCUMENTS_DIR/<relative path>`; do not guess or search for the physical location
   of `.missioncrew`.
 
-## 3. File System Boundary and Path Failures
+## 3. File System Boundary, Git Worktrees and Path Failures
 
 - Read and write only the read/write directories listed in the prompt and their subdirectories.
   Do not access `/tmp`, `/var/tmp`, other project directories, unauthorized files in the user's
@@ -94,6 +96,26 @@ An orchestrator's turn:
   described above. Typical symptoms: `git add/commit/fetch` in a worktree fails because
   `index.lock`/`FETCH_HEAD` is read-only, or skill files under the repository's `.agents/skills`
   cannot be written.
+- Code changes go in your own git worktree, never directly in a shared checkout: other roles and
+  humans may be editing the same repository at the same time. Reading code and running checks
+  that change no files can stay in the working directory.
+  - Create: `git worktree add -b <branch> <repository>/.worktrees/<name> [<base>]`, based on the
+    branch the brief names, otherwise the current HEAD. Follow the repository's own worktree and
+    branch naming conventions first; otherwise include your role id in the branch and directory
+    names so parallel work does not collide. If the main checkout's `git status` then lists
+    `.worktrees/` as untracked, add it to `.git/info/exclude` (local, never committed).
+  - Reuse: if the working directory is already a worktree created for this task (for example, the
+    channel is bound to it), work in it instead of nesting another one; when a later turn
+    continues the same work, return to the worktree you reported.
+  - Set up: a new worktree has none of the main checkout's untracked files (installed
+    dependencies, virtual environments, local config); prepare them inside the worktree as the
+    repository's docs describe.
+  - `git worktree add` and commits in a worktree write to the main repository's `.git`; if they
+    fail with `Read-only file system`, request elevation as described above.
+  - Hand off: state the worktree path and branch in your final reply and leave the worktree in
+    place so others can review and verify it. Commit, merge back and remove it
+    (`git worktree remove`, then delete the branch) only as the brief or project guidelines say;
+    a channel bound to a removed directory falls back to the platform default directory.
 
 ## 4. Calling the Agent Tool
 
@@ -368,17 +390,49 @@ An orchestrator's turn:
 
 - `automation.save` creates or updates a project automation script: script is the full script
   text (run as an executable when it has a shebang, otherwise with bash), cron is a five-field
-  crontab (empty string = no schedule), webhook true also accepts deliveries from external
-  systems (GitHub, GitCode, ...) on the platform's dedicated webhook port, and actions is the
+  crontab (empty string = no schedule), webhook_source subscribes it to a global webhook source
+  so deliveries from external systems (GitHub, GitCode, ...) trigger it, and actions is the
   allowlist of actions the script token may call. Scripts are triggered by cron, webhook
   deliveries or manually, and can call platform actions through the `missioncrew.agent_tool` CLI
   at runtime (refreshing dashboard data on a schedule, syncing external systems into Tasks,
   posting inspection reports to channels, etc.).
-- A webhook's signing secret is shown only to humans on the automation page and never to you:
-  after enabling it, give the human the `webhook_path` from the result and ask them to configure
-  the external system with the secret from that page. A script reads what triggered it from
-  `MISSIONCREW_TRIGGER` and the webhook event from `MISSIONCREW_WEBHOOK_EVENT_FILE`, and filters
-  the events it cares about itself.
+- Webhook sources are global (shared by all projects; one source can trigger several scripts)
+  and only humans create them, with their delivery URL and secret, in Global settings → Webhook
+  sources; you never see a secret. `automation.list` lists the existing sources: pick one for
+  `webhook_source`, and if none fits, ask the human to create one there and tell you its id. A
+  script reads what triggered it from `MISSIONCREW_TRIGGER` and the webhook event from
+  `MISSIONCREW_WEBHOOK_EVENT_FILE`, and filters the events it cares about itself, because every
+  script on a shared source receives all of its deliveries.
+- A source listed with `kind: github` is a GitHub polling source: no external system posts to
+  it; the platform queries GitHub with the `GITHUB` environment's `TOKEN` and delivers new events to
+  scripts as webhook-shaped events. A human creates the source once (identity, polling interval,
+  whether the account's notifications are included) and it is not tied to repositories: you
+  choose them yourself. Subscribe with `webhook_source` plus `github_repos` (an array of
+  `owner/repo`), and optionally `github_events` to receive only some event names; adding a
+  repository to `github_repos` later is all it takes to watch a new one. Polling of a newly
+  listed repository starts at once and only events from then on are delivered. Each event runs
+  the script once with `MISSIONCREW_TRIGGER=webhook`, `MISSIONCREW_WEBHOOK_PROVIDER=github` and
+  the event name in `MISSIONCREW_WEBHOOK_EVENT` (`issues`, `pull_request`, `issue_comment`,
+  `push`, ... or `notification`); the event file has `transport: poll`. Payloads follow GitHub's
+  Events API, which differs from webhook payloads: a merged pull request arrives as
+  `pull_request` with action `merged`, and `payload.pull_request` only has number, url, head and
+  base, so fetch details with `gh api` when the script needs them. Events can be about a minute
+  late. After saving, check `automation.list`: `github_errors` on the script names repositories
+  the platform cannot poll (missing, or the token has no access); fix the name or tell the human
+  which access the token lacks. Ask the human only when no polling source exists yet.
+- The platform only reads GitHub for you: it never registers webhooks on repositories and
+  never changes notifications. When you need something the polling source does not deliver
+  (state the Events API omits, your own comparison of issue or pull request lists, a tighter
+  check), write a cron script that queries GitHub itself with `gh api` and keeps what it saw
+  last time in its working directory; do not create webhooks or other settings on GitHub
+  unless a human asks for exactly that.
+- `webhook.history` shows what a source really received in the last 7 days (external webhook
+  deliveries or polled GitHub events): event name, action, repository and which scripts each
+  one ran, including events no script received (empty `outcomes`). Filter with `event`,
+  `action` and `repository`, and pass `id` to get one delivery's full event, the same JSON a
+  script reads from `MISSIONCREW_WEBHOOK_EVENT_FILE`. Read it before writing or changing a
+  script's filter or `github_events`, so the filter matches events that actually occur, and to
+  find out why a script did not run for an event you expected.
 - Scripts are not in your workspace: `automation.list` lists them, and with `id` returns the full
   script and its recent runs (status, exit code, the tail of stdout/stderr; `before_id` pages
   back through all kept runs), so read it before changing or fixing a script. `automation.run` starts a manual run in the background (scripts
@@ -401,14 +455,63 @@ An orchestrator's turn:
   order, whose expression matches its labels, except tasks already in the 已完成 status;
   `task.create` then returns `auto_dispatch`. Delete scripts with `automation.delete`.
 
-## 12. Recycle Bin (recycle.*)
+## 12. Credentials (credential.*)
+
+- Humans save secrets and settings (tokens, passwords, keys, addresses, user names) in project
+  settings or global settings; you never receive secrets in chat. They are kept as
+  environments: a named group of variables that are used together. Each environment available
+  to this project is a directory `$MISSIONCREW_CREDENTIALS_DIR/<ENVIRONMENT>/` (the workspace's
+  `credentials/`) with one file per variable, such as `STAGING_ADMIN/URL`,
+  `STAGING_ADMIN/USERNAME`, `STAGING_ADMIN/PASSWORD`, or just `SENTRY/TOKEN`. `index.json`
+  there lists every environment with its purpose, scope (a project environment replaces a
+  global one with the same name as a whole) and `variables`: each variable says whether it is
+  `secret` and whether it is `available` (already has a value). Files change as soon as a
+  human edits an environment, so read the file at the moment you use it.
+- Variables with `secret: false` are plain configuration: the value is also in `index.json`
+  and you may quote it. Read a `secret: true` variable only inline in the command that needs
+  it, for example `NPM_TOKEN="$(cat "$MISSIONCREW_CREDENTIALS_DIR/NPM/TOKEN")" npm publish`,
+  `E="$MISSIONCREW_CREDENTIALS_DIR/STAGING_ADMIN"; curl -u "$(cat "$E/USERNAME"):$(cat
+  "$E/PASSWORD")" "$(cat "$E/URL")/api"`, or a tool's own `--password-file`/`--token-file`
+  option pointing at the file. Never print it (a bare `cat` of the file, `echo`, `env`,
+  `set -x`, verbose HTTP logs), copy it into other files, repositories, git remote URLs,
+  scripts, Tasks, documents or messages, or quote it in your reply. Automation scripts get the
+  same directory through the same variable.
+- The `GITHUB` environment's `TOKEN` is the project's GitHub identity. While it is saved the
+  platform signs `gh` and git in with it: `GH_CONFIG_DIR` points at a generated gh
+  configuration and git gets a credential helper for HTTPS remotes on github.com. Run
+  `gh pr list`, `gh api ...` or `git push` directly; do not pass the token yourself and do not
+  run `gh auth login`. SSH remotes keep using the machine's own keys. If `GH_CONFIG_DIR` is
+  not set in your session (the token was saved after the session started), read the file
+  inline instead: `GH_TOKEN="$(cat "$MISSIONCREW_CREDENTIALS_DIR/GITHUB/TOKEN")" gh pr list`.
+  Without it `gh` and git use the login of the user running MissionCrew. `gh api user` shows
+  which account you are; a 403 or 404 from GitHub usually means the token lacks that
+  permission or repository, so report it instead of trying another account.
+- When the task needs a value that is not in `index.json`, call `credential.request` with an
+  upper-case environment `name`, a `description` of what it is for and the minimal
+  permissions it needs, and `variables`: a list of `{name, secret, value}`, required even for
+  a single value (`[{"name": "TOKEN"}]`). Group values that go together into one environment
+  instead of requesting them separately. Mark everything that must stay private as
+  `secret: true` (the default) and leave its value out, a human fills it in; for
+  `secret: false` variables pass the value if you already know it (a user name from the
+  repository's docs, a base URL). Requesting variables an environment of this project lacks
+  adds them to it. The platform asks the human with a link to the form. When you mention the
+  form yourself, link it as `__PROJECT_URL__/settings/credentials` (the result's
+  `resource_url`), not as a page address you made up. Never ask humans to paste a secret into
+  chat. Then report in your final reply that the work is waiting for those variables, and
+  continue once their files exist.
+- The platform replaces any saved secret value it finds in messages, run logs, Agent Tool
+  arguments and published documents with `[credential:<ENVIRONMENT>.<VARIABLE>]`. That is a
+  safety net for mistakes, not a way to use secrets: a value written anywhere is still a leak
+  to report.
+
+## 13. Recycle Bin (recycle.*)
 
 - Deleted platform resources such as documents, guidelines, skills, dashboards and channels go to
   the project's unified recycle bin (deletion is orchestrator only). `recycle.list` lists it and
   `recycle.restore` restores; use `recycle.purge` only when the user explicitly asks for permanent
   deletion.
 
-## 13. Config-Page Collaboration
+## 14. Config-Page Collaboration
 
 - Collaboration messages from a config page state the current page, the current item, unsaved
   drafts, and the fields, line numbers and original text the user selected. If the user only asks
@@ -416,11 +519,51 @@ An orchestrator's turn:
   or modify, persist it with the corresponding `guideline.save` / `skill.save` /
   `document.publish` action.
 
-## 14. Collaboration Chain Budget
+## 15. Collaboration Chain Budget
 
 - A single collaboration chain in this project allows at most __MAX_RUNS__ agent runs. This is
   only a total cap against runaway loops and does not limit dispatch depth; break down, assign,
   review and drive the work autonomously within the budget.
+
+## 16. Callbacks (callback.*)
+
+- When work has to continue later, register a one-shot callback with `callback.create` and end
+  the turn, instead of `sleep`, polling or a runtime's own scheduler: the platform starts you
+  again in the current channel at a time (`delay_seconds` or `at`), when a channel gets a new
+  message from a human, another role or an automation script (`channel`), when a Task
+  changes (`task`), or when a webhook source receives a matching event (`webhook_source`).
+  Typical uses: retry after a quota resets, follow up when a human replies, continue when
+  another channel's work lands, review when a Task's status changes, continue when your pull
+  request is merged or its CI finishes.
+- Watch at most one channel, Task or webhook source; adding a time makes it a deadline, so
+  whichever happens first fires it. A channel or Task watch without a time expires after 7
+  days. Your own messages and your own Task changes through this tool never fire your
+  callbacks.
+- Waiting for an external event: pass `webhook_source` (the id of a global webhook source;
+  it can be an external webhook or a GitHub polling source) and narrow it with `event`,
+  `action` and `repository`. On a GitHub polling source the platform starts polling the
+  `repository` you name, so you can wait on a repository nobody subscribed to yet. The first
+  event received after you register that matches fires the callback; the callback message
+  names the event and the delivery record, and `webhook.history` with that `id` returns the
+  full event. An event watch must have a timeout (`delay_seconds` or `at`): if nothing
+  matched by then you are started anyway and told how many events were checked, so decide
+  there whether to keep waiting, check GitHub yourself with `gh`, or report.
+- When event, action and repository are not precise enough, add `filter`: a script that
+  receives one event as JSON on stdin (also in `MISSIONCREW_WEBHOOK_EVENT_FILE`) and answers
+  with its exit code, `exit 0` for a match and 1 to ignore, for example
+  `jq -e '.payload.number == 12'`. Any other exit code or running longer than 10 seconds
+  counts as an error and the event is ignored. The script can only decide: it runs without an
+  Agent Tool token, credentials or network, so do the actual work in the callback run, not in
+  the filter. Look at real events first with `webhook.history`; `callback.create` tries the
+  filter once and returns the outcome as `filter_check`, and `callback.list` shows how many
+  events were checked and the last filter error.
+- `note` is repeated in the callback message, so make it self-contained: the task, branch or
+  document, and the next step. The callback run is a normal run with its own Agent Tool token;
+  its reply follows the hand-back rules of the turn that registered it.
+- A callback fires once; register again in that run if you still need to wait. `callback.list`
+  shows your waiting callbacks and `callback.cancel` cancels one (the orchestrator can cancel
+  any in the project). Humans see them in the channel and can cancel them; stopping the
+  channel's agents cancels all of them there.
 """
 
 
@@ -434,7 +577,7 @@ channel.
 A turn:
 1. Read the task: the trigger message is a human request or an automation script message; if information is missing, raise it in your reply instead of widening the scope.
 2. Gather context: read channel history, guidelines, skills and project documents only when needed; do not preload.
-3. Do the work: read/write code and run commands in the working directory; when part of the work needs another role, finish what you can and name that role in your reply so a human can mention it.
+3. Do the work: read code and run commands in the working directory, and make code changes in your own git worktree (section 3); when part of the work needs another role, finish what you can and name that role in your reply so a human can mention it.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool.
 5. Reply: lead with the conclusion, then what you did; reference resources with `/resources/...` links. The result is only published to the channel and triggers no other role.
 """
@@ -491,6 +634,8 @@ _PEER_REPLACEMENTS = (
      "executor\n  explicitly in `mentions` to start the work.",
      "A new channel\n  starts empty: a human mentions the roles that should work there, or you "
      "mention\n  yourself there with `message.publish` to work in it."),
+    ("(the orchestrator can cancel\n  any in the project)",
+     "(without an orchestrator,\n  every role can cancel any in the project)"),
 )
 
 
@@ -508,7 +653,7 @@ def render_manual(project: Project) -> str:
         text = _replace_section(text, "## 0. Typical Flow", "## 1. ", _PEER_FLOW + "\n")
         text = _replace_section(text, "## 7. Messages", "## 8. ", _PEER_MESSAGES)
         # 协作链预算一节讲派发,无主控时不适用;自我提及计入预算已在第 7 节说明
-        text = _replace_section(text, "## 14. ", "", "").rstrip() + "\n"
+        text = _replace_section(text, "## 15. ", "## 16. ", "")
         for old, new in _PEER_REPLACEMENTS:
             assert old in text, old
             text = text.replace(old, new)

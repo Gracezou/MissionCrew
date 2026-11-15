@@ -29,13 +29,16 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..runtime import runtime_manager
 from ..core.config import (chat_max_workers, context_reinject_bytes,
                            context_reinject_turns, mc_home)
 from .agent_tools import (AgentActionService, AgentIdentity, AgentToolError,
                           DispatchInactiveError, default_agent_tool_url)
+from .callbacks import CallbackService
+from .credentials import effective_credentials
+from .github import github_env
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls)
 from .resource_urls import (channel_resource_url, dashboard_resource_url,
@@ -44,7 +47,8 @@ from .resource_urls import (channel_resource_url, dashboard_resource_url,
 from .workspace import (channel_page_context_dir, channel_uploads_dir,
                         chat_workspace_dir, platform_history_dir,
                         prepare_agent_workspace, write_task_files)
-from ..core.models import (DEFAULT_MAX_CHAIN_RUNS, INJECTION_FULL_MODES,
+from ..core.models import (DEFAULT_MAX_CHAIN_RUNS, GITHUB_ENVIRONMENT,
+                           GITHUB_TOKEN_VARIABLE, INJECTION_FULL_MODES,
                            Backend, Channel, ExecutionConfig, Role,
                            RuntimePolicy)
 from .project_context import (project_allowed_dirs, project_resource_versions,
@@ -87,8 +91,8 @@ class _PendingInteraction:
 # 提示词结构约定:人格(role_desc)是"选人用的专长画像",不是任务;
 # 任务只来自触发消息(由发起者——人类或调度角色——撰写的简报)。
 # 给角色的提示词一律用英文;人类可见内容的语言由公共区块里的 Language 一行约定。
-WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read/write files "
-                   "and run commands here to do the work)")
+WORKDIR_SECTION = ("Working directory: `{workdir}` (the current directory; read files and run "
+                   "commands here; make code changes in your own git worktree, see \"Must Follow\")")
 # 频道绑定目录缺失时的回退提示:让 Agent 知道当前目录不是代码仓,避免误操作
 MISSING_WORKDIR_NOTICE = (
     "Note: the working directory `{bound}` bound to this channel no longer exists (for "
@@ -127,7 +131,7 @@ Language: write everything MissionCrew shows to humans (final replies, messages,
 _EXECUTOR_STEPS = """\
 1. Read the task: the task comes only from the brief in the "Trigger Message" at the bottom; your role profile is not a task. If the brief is missing information, raise it in your reply instead of guessing or widening the scope.
 2. Gather context only when needed; do not preload. Channel history is `channel-history.json` under "Workspace Overview"; for guidelines and skills, check their descriptions under "Project Materials" first and read the full text only if relevant; project documents are in `{documents_dir}`.
-3. Do the work: read/write code and run commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses (such as the project's `.tmp/` or `.e2e/`); without such a convention use `{temp_dir}`, and clean up when the task is done.
+3. Do the work: read code and run commands in the working directory, and make code changes in your own git worktree (see "Must Follow"); touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses (such as the project's `.tmp/` or `.e2e/`); without such a convention use `{temp_dir}`, and clean up when the task is done.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
 5. Reply: your final reply is published to the chat channel in full and verbatim, where humans see it. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths."""
 
@@ -146,13 +150,13 @@ ORCHESTRATOR_WORKFLOW = """\
 2. Choose who and where: pick roles from the "Role Roster" below by profile, capabilities and preferences. Whether to open a new channel follows the project guidelines; without a convention, dispatch in the current channel. Before referencing, dispatching to, or creating another channel, check with `channel.list` (scope=active/archived/all) to avoid duplicate channels.
 3. Dispatch: call `message.publish` with `channel` (`{channel_id}` for the current channel) and a `mentions` array of roles; the content states the background, requirements and acceptance criteria. Dispatching always goes through `message.publish` with the target roles listed explicitly in `mentions`; there is no other way.
 4. Wrap up and wait for reports: once `message.publish` returns a non-empty `dispatched`, your dispatch duty for this turn is done; say briefly in your final reply that the work was dispatched, then end the turn, and do not call `message.publish` again for that note. When the executor finishes or fails, the platform automatically starts a new orchestrator turn with its full result; review, dispatch further, or summarize then.
-5. Review and summarize: check reports against the acceptance criteria, then dispatch further or write the conclusion. Record milestone conclusions in the Task with `task.brief`; state across turns lives there, not in session memory. Run verification commands inside the "Project repositories" directories; the current working directory is not necessarily a repository."""
+5. Review and summarize: check reports against the acceptance criteria, then dispatch further or write the conclusion. Record milestone conclusions in the Task with `task.brief`; state across turns lives there, not in session memory. Run verification commands inside the "Project repositories" directories (for code changes, in the git worktree the executor reported); the current working directory is not necessarily a repository."""
 
 # 无主控项目:每个角色都有主控级管理权限,但只执行、不派发,由人类点名启动
 PEER_WORKFLOW = """\
 1. Read the task: this turn's input is the human request (or automation script message) in the "Trigger Message" at the bottom; its type is on the "This Turn's Trigger" line. Your role profile is not a task. If the request is missing information, raise it in your reply instead of guessing or widening the scope.
 2. Gather context only when needed; do not preload. Channel history is `channel-history.json` under "Workspace Overview"; for guidelines and skills, check their descriptions under "Project Materials" first and read the full text only if relevant; project documents are in `{documents_dir}`.
-3. Do the work: read/write code and run commands in the working directory; touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. You cannot dispatch other roles: when part of the work needs another role, finish what you can and name that role in your reply (see the "Role Roster" below) so a human can mention it.
+3. Do the work: read code and run commands in the working directory, and make code changes in your own git worktree (see "Must Follow"); touch only the read/write directories listed under "Must Follow". Put temporary files in a task directory the repository already uses; without such a convention use `{temp_dir}`, and clean up when the task is done. You cannot dispatch other roles: when part of the work needs another role, finish what you can and name that role in your reply (see the "Role Roster" below) so a human can mention it.
 4. Write back to the platform: publish documents, create or update Tasks and append status briefs only through the Agent Tool below; do not edit files under `documents/` or `tasks/` directly.
 5. Reply: your final reply is published to the chat channel in full and verbatim. Lead with the conclusion, then briefly say what you did; do not paste long logs; reference platform resources with `/resources/...` links, never internal paths.
 - This project has no orchestrator: every role holds the orchestrator-level management permissions but cannot dispatch other roles. Your result is only published to the channel and triggers no other role; when a human mentions several roles at once, each one starts on its own without waiting for the others.
@@ -174,6 +178,15 @@ TURN_PROMPT = """\
 {resource_notice}{reply_hint}# This Turn's Trigger: {trigger_kind}
 # Trigger Message (JSON; your task brief is written by the sender)
 {trigger}
+"""
+
+# 角色忙碌期间排队的多条触发消息合并成一轮:逐条列出消息与各自的触发类型
+MERGED_TURN_PROMPT = """\
+{resource_notice}{reply_hint}# This Turn's Trigger: {count} messages that arrived while you were busy, merged into this one turn
+Handle every message below in this turn and cover each of them in your single final reply; a later message may refine or supersede an earlier one.
+{trigger_kinds}
+# Trigger Messages (JSON, one message per line, oldest first; each task brief is written by its sender)
+{triggers}
 """
 
 # 能调用 message.publish 的角色每轮都带:增量回合不重发公共上下文,长会话里
@@ -313,7 +326,10 @@ def _trigger_kind(record: dict, orchestrator_id: str,
     """一句话说明本轮触发是谁发的,主控据此区分人类请求与执行角色回报。"""
     author = record.get("author") or {}
     kind, author_id = str(author.get("type") or ""), str(author.get("id") or "")
-    if kind == "human":
+    if record.get("kind") == "callback":
+        text = ("a callback you registered with `callback.create` fired; the message says what "
+                "happened and repeats your note, so continue that work")
+    elif kind == "human":
         text = "human message"
     elif kind == "agent":
         if role_id and author_id == role_id:
@@ -346,15 +362,22 @@ class ChatEngine:
         self.store = store
         # 并发上限默认读全局配置(env MISSIONCREW_CHAT_MAX_WORKERS);
         # 显式传参供测试与特殊调用方使用。
+        self._max_workers = max(
+            1, chat_max_workers() if max_workers is None else max_workers)
         self._pool = ThreadPoolExecutor(
-            max_workers=chat_max_workers() if max_workers is None else max_workers,
-            thread_name_prefix="chat-run")
+            max_workers=self._max_workers, thread_name_prefix="chat-run")
         self._futures: list[Future] = []
         self._futures_lock = threading.Lock()
         self._history_lock = threading.Lock()
         self._chain_run_lock = threading.Lock()
-        self._agent_execution_locks_guard = threading.Lock()
-        self._agent_execution_locks: dict[tuple[str, str], threading.Lock] = {}
+        # 执行位调度:排队运行只登记在 _waiting,不占执行池线程;拿到执行位的
+        # channel×role 才提交到池里。执行位同时受全局上限(_max_workers)与角色
+        # 并发上限(Role.max_concurrency,同项目同角色跨频道计数)约束。
+        # 锁顺序:_run_state_lock → _sched_lock,持有 _sched_lock 时不得再取前者。
+        self._sched_lock = threading.Lock()
+        self._waiting: dict[tuple[str, str], tuple[int, Channel]] = {}
+        self._executing: set[tuple[str, str]] = set()
+        self._role_slots: dict[tuple[str, str], int] = {}
         # 频道停止与运行发布共用同一把锁：停止先赢时禁止迟到回复和后续调度，
         # 回复先赢时停止操作会连同刚产生的后续运行一起捕获。
         self._run_state_lock = threading.RLock()
@@ -362,16 +385,20 @@ class ChatEngine:
         self._interaction_lock = threading.Lock()
         self._interactions: dict[str, _PendingInteraction] = {}
         self._notified_interaction_runs: set[int] = set()
+# 角色登记的一次性回调:轮询线程由服务装配时启动(测试直接调 tick)
+        self.callbacks = CallbackService(
+            store, self._fire_callback, self._post_callback_notice)
         self.agent_tools = AgentActionService(
             store, self.post, self.stop_run,
             history_records=self.channel_history_records,
-            stop_channel_sessions=self.stop_channel_sessions)
+            stop_channel_sessions=self.stop_channel_sessions,
+            callbacks=self.callbacks)
         # 正在更新的 runtime 集合(由 server 注入共享):更新期间不派发执行,
         # 避免 Agent 跑在半更新的二进制上
         self.updating_backends: set[str] = set()
-        # Claude 后台命令结束后 CLI 会自发唤醒模型汇报;平台把这类 turn
-        # 落成频道里的新运行,汇报按常规回路交回主控验收。turn 开始时同步
-        # 落成运行并签发令牌,turn 结束后在执行池里收尾
+        # 后台命令结束或 Runtime 自带定时器到点后,CLI 会自发唤醒模型汇报;
+        # 平台把这类 turn 落成频道里的新运行,汇报按常规回路交回主控验收。
+        # turn 开始时同步落成运行并签发令牌,turn 结束后在执行池里收尾
         runtime_manager.set_wake_handler(
             self._handle_runtime_wake, begin=self._begin_runtime_wake)
 
@@ -382,12 +409,10 @@ class ChatEngine:
             return f"{base}::context-{channel.context_start_message_id}"
         return base
 
-    def _agent_execution_lock(self, channel_id: str,
-                              role_id: str) -> threading.Lock:
-        """同一 channel×role 只允许一个 Run 装配并持有 Agent Tool capability。"""
-        key = (channel_id, role_id)
-        with self._agent_execution_locks_guard:
-            return self._agent_execution_locks.setdefault(key, threading.Lock())
+    def _slot_busy(self, channel_id: str, role_id: str) -> bool:
+        """channel×role 是否持有执行位(正在装配或执行一轮,持有 Agent Tool 令牌)。"""
+        with self._sched_lock:
+            return (channel_id, role_id) in self._executing
 
     def respond_interaction(self, run_id: int, request_id: str,
                             response: dict) -> None:
@@ -576,9 +601,12 @@ class ChatEngine:
         if trigger_message_id is None:
             return False
         trigger = self.store.get_message(trigger_message_id)
-        if (trigger and trigger.get("author_type") == "agent"
-                and trigger.get("author") == role_id):
-            # 角色在其他频道启动了自己:沿用发起那一轮的派发语义
+        if trigger and ((trigger.get("author_type") == "agent"
+                         and trigger.get("author") == role_id)
+                        or (trigger.get("kind") == "callback"
+                            and role_id in self._decoded_mentions(trigger))):
+            # 角色在其他频道启动了自己,或自己登记的回调触发:沿用发起
+            # (登记)那一轮的派发语义
             origin = self._decoded_context(trigger).get("self_dispatch_origin")
             return (type(origin) is int
                     and self._is_direct_human_dispatch(origin, role_id))
@@ -680,6 +708,9 @@ class ChatEngine:
         with self._run_state_lock:
             runs = self.store.stop_active_chat_runs(channel_id)
             self._stopping_channels.add(channel_id)
+            # 停止 = 不再调度:本频道登记的回调一并取消,否则过后又把角色叫起来
+            cancelled_callbacks = self.store.cancel_chat_callbacks(
+                "用户停止了频道中的 Agent", channel=channel_id)
             run_ids = {run["id"] for run in runs}
             for run in runs:
                 self.store.append_run_event(
@@ -720,11 +751,13 @@ class ChatEngine:
                     )
 
             with self._run_state_lock:
-                if runs or stopped or runtime_errors:
+                if runs or stopped or runtime_errors or cancelled_callbacks:
                     content = (f"已停止当前频道中的 {len(runs)} 个 Agent 运行"
                                if runs else "当前频道没有活动 Agent 运行")
                     if stopped:
                         content += f"，并终止 {stopped} 个 Runtime 进程"
+                    if cancelled_callbacks:
+                        content += f"，取消 {len(cancelled_callbacks)} 个等待中的回调"
                     if runtime_errors:
                         content += f"；其中 {runtime_errors} 个 Runtime 终止请求失败，请检查运行状态"
                     marker_id = self.store.add_message(
@@ -735,16 +768,18 @@ class ChatEngine:
         finally:
             with self._run_state_lock:
                 self._stopping_channels.discard(channel_id)
-        if runs or stopped or runtime_errors:
+        if runs or stopped or runtime_errors or cancelled_callbacks:
             self.store.audit(
                 "human", "chat_agents_stopped",
                 detail=(f"channel={channel_id} runs={len(runs)} "
                         f"interrupted=0 stopped={stopped} "
-                        f"errors={runtime_errors} marker={marker_id}"),
+                        f"errors={runtime_errors} marker={marker_id} "
+                        f"callbacks={len(cancelled_callbacks)}"),
             )
         result = {
             "ok": True,
             "stopped_runs": len(runs),
+            "cancelled_callbacks": len(cancelled_callbacks),
             "interrupted_runtimes": 0,
             "stopped_runtimes": stopped,
             "runtime_errors": runtime_errors,
@@ -928,22 +963,114 @@ class ChatEngine:
                                    f"不再触发 @{role_id}。", [], msg_id, root_id, depth)
             self._write_channel_history(channel)
             return
-        try:
-            future = self._pool.submit(self._execute, run_id, channel, role_id,
-                                       msg_id, root_id, depth)
-        except RuntimeError as e:   # 执行池已关闭:运行不能停留在 queued
-            self.store.update_chat_run(run_id, "failed", error=f"聊天引擎已关闭: {e}")
-            return
-        with self._futures_lock:
-            self._futures.append(future)
+        self._schedule(channel, role_id, run_id)
 
-    def _execute(self, run_id: int, channel: Channel, role_id: str,
-                 msg_id: int, root_id: int, depth: int) -> None:
-        with self._run_state_lock:
-            if not self.store.chat_run_is_active(run_id):
+    # ---- 执行位调度 ----
+    def _schedule(self, channel: Channel, role_id: str, run_id: int) -> None:
+        """登记一条排队运行并尝试派发。拿不到执行位时只留在队列里、不占线程,
+        并在运行上记一条等待原因,运行卡片里可以看到它在等什么。"""
+        key = (channel.id, role_id)
+        with self._sched_lock:
+            first = self._waiting.get(key, (run_id, channel))[0]
+            self._waiting[key] = (min(first, run_id), channel)
+            self._dispatch_locked()
+            reason = (self._wait_reason_locked(channel, role_id)
+                      if key in self._waiting else "")
+        if reason:
+            self.store.append_run_event(run_id, "status", reason)
+
+    def reschedule(self) -> None:
+        """按当前配置重新派发等待中的工作;角色并发上限调高后立即生效,
+        不必等某个执行位空出来。"""
+        with self._sched_lock:
+            self._dispatch_locked()
+
+    def _role_limit(self, project_id: str, role_id: str) -> int:
+        role = self.store.get_role(project_id, role_id)
+        return max(0, role.max_concurrency) if role else 0
+
+    def _role_at_limit_locked(self, role_key: tuple[str, str]) -> bool:
+        limit = self._role_limit(*role_key)
+        return bool(limit) and self._role_slots.get(role_key, 0) >= limit
+
+    def _dispatch_locked(self) -> None:
+        """按最早排队的运行先后,把能拿到执行位的 channel×role 交给执行池。
+
+        调用方持有 ``_sched_lock``。同一 channel×role 同时只有一个执行位;角色
+        达到并发上限时跳过它、留在队列里,不挡其他角色;全局执行位满了就停。
+        """
+        for key, (_first, channel) in sorted(
+                self._waiting.items(), key=lambda item: item[1][0]):
+            if len(self._executing) >= self._max_workers:
                 return
+            role_key = (channel.project_id or "", key[1])
+            if key in self._executing or self._role_at_limit_locked(role_key):
+                continue
+            del self._waiting[key]
+            self._executing.add(key)
+            self._role_slots[role_key] = self._role_slots.get(role_key, 0) + 1
+            try:
+                future = self._pool.submit(self._run_slot, channel, key[1])
+            except RuntimeError as e:   # 执行池已关闭:运行不能停留在 queued
+                self._release_slot_locked(key, role_key)
+                for run in self.store.queued_chat_runs(*key):
+                    self.store.update_chat_run(
+                        int(run["id"]), "failed", error=f"聊天引擎已关闭: {e}")
+                continue
+            with self._futures_lock:
+                self._futures.append(future)
+
+    def _release_slot_locked(self, key: tuple[str, str],
+                             role_key: tuple[str, str]) -> None:
+        self._executing.discard(key)
+        remaining = self._role_slots.get(role_key, 0) - 1
+        if remaining > 0:
+            self._role_slots[role_key] = remaining
+        else:
+            self._role_slots.pop(role_key, None)
+
+    def _wait_reason_locked(self, channel: Channel, role_id: str) -> str:
+        if (channel.id, role_id) in self._executing:
+            return (f"排队等待:@{role_id} 在本频道的上一轮还在执行,"
+                    "结束后把排队消息合并成一轮处理")
+        role_key = (channel.project_id or "", role_id)
+        if self._role_at_limit_locked(role_key):
+            limit = self._role_limit(*role_key)
+            return (f"排队等待:@{role_id} 已在 {limit} 个频道执行,"
+                    f"达到角色并发上限 {limit},有频道结束后按排队顺序启动")
+        return (f"排队等待:全局执行位已满({self._max_workers}),"
+                "有执行结束后按排队顺序启动")
+
+    def _run_slot(self, channel: Channel, role_id: str) -> None:
+        """执行池里的一个工作线程:持有 channel×role 的执行位,把该角色此刻排队
+        的运行合并成一轮执行;结束后归还执行位,并按队列派发后续工作。
+
+        本轮执行期间到达的消息继续排队,归还执行位时按数据库里的排队运行重新
+        登记(排队时间取其中最早一条),与其他等待者按先后竞争下一个执行位。
+        """
+        key = (channel.id, role_id)
         try:
-            self._execute_inner(run_id, channel, role_id, msg_id, root_id, depth)
+            claimed = self._claim_queued_runs(channel, role_id)
+            if claimed is not None:
+                self._execute_claimed(channel, role_id, *claimed)
+        finally:
+            with self._sched_lock:
+                self._release_slot_locked(key, (channel.project_id or "", role_id))
+                queued = self.store.queued_chat_runs(channel.id, role_id)
+                if queued:
+                    latest = self._waiting.get(key, (0, channel))[1]
+                    self._waiting[key] = (int(queued[0]["id"]), latest)
+                else:
+                    self._waiting.pop(key, None)
+                self._dispatch_locked()
+
+    def _execute_claimed(self, channel: Channel, role_id: str, run: dict,
+                         merged_ids: list[int]) -> None:
+        run_id, msg_id = int(run["id"]), int(run["trigger_message_id"])
+        root_id, depth = int(run["root_id"]), int(run["depth"])
+        try:
+            self._execute_inner_serialized(
+                run_id, channel, role_id, msg_id, root_id, depth, merged_ids)
         except Exception as e:  # 后台线程的异常必须落到频道里,不能无声丢失
             error = str(e)
             project = self.store.get_project(channel.project_id or "")
@@ -961,6 +1088,47 @@ class ChatEngine:
         finally:
             with self._interaction_lock:
                 self._notified_interaction_runs.discard(run_id)
+            if channel.project_id:
+                self.agent_tools.deactivate_run_token(
+                    channel.project_id, channel.id, role_id,
+                    chat_workspace_dir(channel.project_id, channel.id, role_id),
+                    run_id)
+
+    def _claim_queued_runs(self, channel: Channel,
+                           role_id: str) -> Optional[tuple[dict, list[int]]]:
+        """取出角色在本频道排队的全部运行,合并成一轮。
+
+        角色忙碌期间到达的每条触发消息各有一条排队运行;轮到它时不再一条条
+        执行,而是选一条作为「承接运行」实际执行,其余运行标成 ``merged`` 并指向
+        它。返回 (承接运行, 其余运行的触发消息 id);没有排队运行时返回 None。
+
+        承接运行的触发消息决定回复挂在哪条消息下、沿用哪条协作链,以及结果
+        是否交回主控,所以这样选:执行角色的排队消息里只要有需要把结果交回主控的
+        (主控派发的任务),就取其中最新一条,否则主控会等不到回报;其余情况取
+        最新一条。与停止共用运行状态锁:停止先赢时这里看不到排队运行。
+        """
+        with self._run_state_lock:
+            queued = self.store.queued_chat_runs(channel.id, role_id)
+            if not queued:
+                return None
+            run = queued[-1]
+            project = self.store.get_project(channel.project_id or "")
+            orchestrator = project.orchestrator_role_id if project else ""
+            if len(queued) > 1 and orchestrator and role_id != orchestrator:
+                returning = [
+                    item for item in queued if not self._is_direct_human_dispatch(
+                        int(item["trigger_message_id"]), role_id)]
+                if returning:
+                    run = returning[-1]
+            absorbed = [item for item in queued if item["id"] != run["id"]]
+            self.store.merge_queued_chat_runs(
+                int(run["id"]), [int(item["id"]) for item in absorbed])
+            if absorbed:
+                self.store.audit(
+                    "platform", "chat_runs_merged",
+                    detail=(f"channel={channel.id} role={role_id} run={run['id']} "
+                            f"merged={','.join(str(item['id']) for item in absorbed)}"))
+            return run, [int(item["trigger_message_id"]) for item in absorbed]
 
     def _post_failure(self, channel: Channel, role_id: str, msg_id: int,
                       root_id: int, depth: int, content: str) -> None:
@@ -1021,9 +1189,13 @@ class ChatEngine:
         """以一条平台消息为触发锚点落成运行;频道正在停止时不再开新运行。"""
         described = "、".join(f"`{task['description']}`" for task in tasks
                              if task.get("description"))
-        trigger_text = (f"@{role.id} 的后台命令已结束"
-                        + (f"：{described}" if described else "")
-                        + "，以下是其自动汇报。")
+        if tasks:
+            trigger_text = (f"@{role.id} 的后台命令已结束"
+                            + (f"：{described}" if described else "")
+                            + "，以下是其自动汇报。")
+        else:
+            # 没有已结束的后台命令:Runtime 自己开了一轮(自带定时器等)
+            trigger_text = f"@{role.id} 由 Runtime 自行唤醒（如自带的定时提醒），以下是其汇报。"
         with self._run_state_lock:
             if channel.id in self._stopping_channels:
                 return None
@@ -1037,6 +1209,76 @@ class ChatEngine:
                 effort=role.effort or "")
         self._write_channel_history(channel)
         return trigger_id, run_id
+
+    def _fire_callback(self, callback: dict, content: str,
+                       context: dict) -> Optional[int]:
+        """回调触发:在登记的频道发一条平台消息并照常启动登记的角色(新协作链)。
+
+        认领(pending → fired)、发消息与建运行在运行状态锁内完成,与停止频道
+        互斥;频道正在停止时返回 None,回调留待下一轮。频道或角色已不可用时
+        取消回调。"""
+        callback_id = int(callback["id"])
+        channel = self.store.get_channel(str(callback["channel"]))
+        role = (self.store.get_role(channel.project_id or "", str(callback["role_id"]))
+                if channel else None)
+        problem = ("频道已删除" if channel is None else
+                   "频道已归档" if channel.archived else
+                   "角色已删除" if role is None else
+                   "角色已停用" if not role.enabled else "")
+        if problem or channel is None or role is None:
+            self.store.finish_chat_callback(callback_id, "cancelled", problem)
+            return None
+        mention = f"@{role.id}"
+        detail = str((context.get("callback") or {}).get("detail") or "")
+        with self._run_state_lock:
+            if channel.id in self._stopping_channels:
+                return None
+            if not self.store.finish_chat_callback(callback_id, "fired", detail):
+                return None   # 刚被取消
+            msg_id = self.store.add_message(
+                channel.id, "platform", "platform", content, [role.id],
+                kind="callback", context=context,
+                mention_spans=([{"role_id": role.id, "start": 0, "end": len(mention)}]
+                               if content.startswith(mention) else []))
+            self.store.set_chat_callback_message(callback_id, msg_id)
+            self._write_channel_history(channel)
+            self._trigger(channel, role.id, msg_id, msg_id, 0)
+        return msg_id
+
+    def _post_callback_notice(self, channel_id: str, content: str,
+                              context: dict) -> None:
+        """回调过期等提示:只发平台消息,不触发任何角色。"""
+        channel = self.store.get_channel(channel_id)
+        if channel is None:
+            return
+        self.store.add_message(channel_id, "platform", "platform", content, [],
+                               kind="callback", context=context)
+        self._write_channel_history(channel)
+
+    def _credentials_line(self, project_id: str) -> str:
+        """公共上下文里的凭据提示:只列环境和变量的名字,值在工作区 credentials/ 的
+        文件里。只要有一个变量有值的环境就列出,没值的变量不列。"""
+        environments = {
+            item.name: [variable.name for variable in item.variables if variable.has_value]
+            for item in effective_credentials(self.store, project_id)}
+        saved = "; ".join(f"`{name}` ({', '.join(variables)})"
+                          for name, variables in environments.items() if variables) or "none yet"
+        github = (
+            f" `{GITHUB_ENVIRONMENT}/{GITHUB_TOKEN_VARIABLE}` is also the project's GitHub "
+            "identity: when `$GH_CONFIG_DIR` is set, `gh` and git over HTTPS to github.com "
+            "are already signed in with it, so run them directly without passing the token."
+            if GITHUB_TOKEN_VARIABLE in environments.get(GITHUB_ENVIRONMENT, []) else "")
+        return (
+            "Credentials humans saved for this project, as environments (a group of "
+            f"variables, one file each): {saved}. They are files "
+            "`$MISSIONCREW_CREDENTIALS_DIR/<ENVIRONMENT>/<VARIABLE>`; `index.json` there "
+            "gives purposes and which variables are secret. Use a secret only inline in the "
+            "command that needs it, such as "
+            "`TOKEN=\"$(cat \"$MISSIONCREW_CREDENTIALS_DIR/<ENVIRONMENT>/<VARIABLE>\")\" "
+            "<command>`; never print it or write it into files, messages or documents, and "
+            "never ask for a secret in chat: call `credential.request` when one is missing "
+            "(manual.md section 12)." + github
+        )
 
     def _run_event_emitter(self, run_id: int, project, document_roots: list):
         """运行过程事件的落库入口:运行结束后丢弃迟到事件,含文档路径的
@@ -1067,6 +1309,10 @@ class ChatEngine:
         if resolved is None:
             return None
         channel, role, backend, backend_id = resolved
+        if self._slot_busy(channel.id, role.id):
+            # 同一 channel×role 的常规运行正在装配或执行,令牌归它:此时落成
+            # 唤醒运行会撤销它刚签发的令牌。退回缓冲路径,常规 turn 开始时交付
+            return None
         opened = self._open_wake_run(
             channel, role, backend, backend_id, self._wake_tasks(payload))
         if opened is None:
@@ -1183,9 +1429,10 @@ class ChatEngine:
                 if not self.store.chat_run_is_active(run_id):
                     return
                 try:
+                    what = "后台命令汇报" if tasks else "自行唤醒的一轮"
                     self._post_failure(
                         channel, role.id, anchor, root, depth - 1,
-                        f"@{role.id}(后端 {backend_id})后台命令汇报失败: {error}")
+                        f"@{role.id}(后端 {backend_id}){what}失败: {error}")
                 finally:
                     self.store.update_chat_run(
                         run_id, "failed", backend_id=backend_id, error=error)
@@ -1244,22 +1491,12 @@ class ChatEngine:
                          detail=f"channel={channel.id} role={role.id} "
                                 f"backend={backend_id} tasks={len(tasks)}")
 
-    def _execute_inner(self, run_id: int, channel: Channel, role_id: str,
-                       msg_id: int, root_id: int, depth: int) -> None:
-        with self._agent_execution_lock(channel.id, role_id):
-            try:
-                self._execute_inner_serialized(
-                    run_id, channel, role_id, msg_id, root_id, depth)
-            finally:
-                if channel.project_id:
-                    self.agent_tools.deactivate_run_token(
-                        channel.project_id, channel.id, role_id,
-                        chat_workspace_dir(channel.project_id, channel.id, role_id),
-                        run_id)
-
     def _execute_inner_serialized(self, run_id: int, channel: Channel,
                                   role_id: str, msg_id: int,
-                                  root_id: int, depth: int) -> None:
+                                  root_id: int, depth: int,
+                                  merged_ids: Sequence[int] = ()) -> None:
+        """持有 channel×role 的执行位执行一轮;``merged_ids`` 是排队时并入本轮的
+        其他触发消息,与 ``msg_id`` 一起写进本轮输入。"""
         role = self.store.get_role(channel.project_id or "", role_id)
         if role is None:
             with self._run_state_lock:
@@ -1293,7 +1530,8 @@ class ChatEngine:
                          detail=f"channel={channel.id} role={role_id} "
                                 f"backend={backend.id} depth={depth} {trace}")
 
-        cfg = self._assemble(channel, role, backend, msg_id, run_id=run_id)
+        cfg = self._assemble(channel, role, backend, msg_id, run_id=run_id,
+                             merged_ids=merged_ids)
         project = self.store.get_project(channel.project_id or "")
         library = library_for(channel.project_id or "")
         document_roots = [
@@ -1523,7 +1761,8 @@ class ChatEngine:
         return default, bound
 
     def _assemble(self, channel: Channel, role: Role, backend, msg_id: int,
-                  run_id: int = 0) -> ExecutionConfig:
+                  run_id: int = 0,
+                  merged_ids: Sequence[int] = ()) -> ExecutionConfig:
         workdir, missing_workdir = self._resolve_workdir(channel)
         workdir_section = WORKDIR_SECTION.format(workdir=workdir)
         if missing_workdir is not None:
@@ -1563,6 +1802,9 @@ class ChatEngine:
                 env["MISSIONCREW_TASKS_DIR"] = str(workspace.tasks)
                 env["MISSIONCREW_MANUAL"] = str(workspace.manual)
                 env["MISSIONCREW_PLATFORM_DOCS_DIR"] = str(workspace.platform_docs)
+                env["MISSIONCREW_CREDENTIALS_DIR"] = str(workspace.credentials)
+                # 项目有 GitHub 身份(GITHUB 环境的 TOKEN)时,gh 与 git 直接以它工作
+                env.update(github_env(project.id, workspace.credentials))
                 manual_path = str(workspace.manual)
                 project_line = project.name + (
                     f" · {' '.join(project.description.split())}" if project.description else "")
@@ -1610,7 +1852,13 @@ class ChatEngine:
                     "Publish a file: `\"$MISSIONCREW_AGENT_TOOL_PYTHON\" -m "
                     "missioncrew.agent_tool publish-file "
                     "--source <local file> --path <path in the document library>`\n"
-                    "Available actions: " + ", ".join(allowed_actions)
+                    "Available actions: " + ", ".join(allowed_actions) + "\n"
+                    + ("To continue later (at a time, when a channel gets a new message or when "
+                       "a Task changes), register `callback.create` and end the turn instead of "
+                       "`sleep` or polling; when it fires the platform starts you again in this "
+                       "channel with your note (manual.md section 16).\n"
+                       if "callback.create" in allowed_actions else "")
+                    + self._credentials_line(project.id)
                 )
                 allowed_dirs = project_allowed_dirs(project, library, workspace.root)
                 if (project.controls_platform(role.id)
@@ -1624,17 +1872,18 @@ class ChatEngine:
         manual_only = self._manual_only_role(project, role)
         known_roles = {r.id: r for r in self.store.list_roles(channel.project_id or "")}
 
+        # 本轮的触发消息:通常只有 msg_id 一条;排队合并时还有并入的其他消息
+        trigger_ids = sorted({msg_id, *merged_ids})
         history_records = []
-        trigger_message = self.store.get_message(msg_id)
         for m in self.store.recent_messages(
                 channel.id, HISTORY_WINDOW, channel.context_start_message_id):
-            if m["id"] != msg_id and is_orchestrator:
+            if m["id"] not in trigger_ids and is_orchestrator:
                 history_records.append(
                     self._message_record(m, role, project, known_roles))
 
-        trigger_record = (self._message_record(
-                              trigger_message, role, project, known_roles)
-                          if trigger_message else {})
+        trigger_records = [
+            self._message_record(m, role, project, known_roles)
+            for m in map(self.store.get_message, trigger_ids) if m]
         channel_history_path = self._write_channel_history(channel, role, project)
         history_parent = str(channel_history_path.parent.resolve())
         if history_parent not in allowed_dirs:
@@ -1739,12 +1988,23 @@ class ChatEngine:
             except (json.JSONDecodeError, TypeError):
                 seen = {}
             resource_notice = _change_notice(snapshot, seen)
-        turn_prompt = TURN_PROMPT.format(
-            resource_notice=resource_notice,
-            reply_hint=CONTROL_REPLY_HINT if is_orchestrator else "",
-            trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
-                                       is_orchestrator, role.id),
-            trigger=json.dumps(trigger_record, ensure_ascii=False))
+        reply_hint = CONTROL_REPLY_HINT if is_orchestrator else ""
+        if len(trigger_records) > 1:
+            turn_prompt = MERGED_TURN_PROMPT.format(
+                resource_notice=resource_notice, reply_hint=reply_hint,
+                count=len(trigger_records),
+                trigger_kinds="\n".join(
+                    f"- Message {record['id']}: " + _trigger_kind(
+                        record, orchestrator_id, is_orchestrator, role.id)
+                    for record in trigger_records),
+                triggers=_compact_records(trigger_records))
+        else:
+            trigger_record = trigger_records[0] if trigger_records else {}
+            turn_prompt = TURN_PROMPT.format(
+                resource_notice=resource_notice, reply_hint=reply_hint,
+                trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
+                                           is_orchestrator, role.id),
+                trigger=json.dumps(trigger_record, ensure_ascii=False))
         recovery_prompt = RECOVERY_PROMPT.format(
             history=_compact_records(history_records), turn_prompt=turn_prompt)
         prompt = common_prompt + "\n" + recovery_prompt

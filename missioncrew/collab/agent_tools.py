@@ -23,9 +23,11 @@ from typing import Callable, Optional
 from pydantic import ValidationError
 
 from . import board_sources
+from .callbacks import CallbackService, public_callback, resolve_fire_at
 from . import channels as channel_ops
 from . import workspaces as workspace_ops
 from .content_channels import content_channel, rebind_content_channel
+from .credentials import request_environment
 from .documents import (document_resource_url, library_for,
                         normalize_document_resource_urls, safe_relative_path)
 from .guidelines import (guideline_history, read_guideline_version, save_guideline,
@@ -39,7 +41,8 @@ from .role_config import (RoleConfigError, RoleInput, RoleTemplateInput,
                           save_role_config)
 from .resource_urls import (automation_resource_url, channel_resource_url,
                             dashboard_resource_url, guideline_resource_url,
-                            skill_resource_url, task_resource_url)
+                            settings_resource_url, skill_resource_url,
+                            task_resource_url)
 from .skill_versions import skill_version_library
 from .skills import (read_skill_version, save_project_skill, save_project_skill_markdown,
                      skill_history, skill_package, sync_project_skill_library)
@@ -63,6 +66,27 @@ MAX_HISTORY_READ_BYTES = 5 * 1024 * 1024
 TOKEN_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 TOKEN_RENEWAL_WINDOW_SECONDS = 24 * 60 * 60
 LOGGER = logging.getLogger(__name__)
+
+
+def _redact_arguments(value, redact: Callable[[str], str]):
+    """递归替换参数里所有字符串中的凭据原文(键名不动)。"""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {key: _redact_arguments(item, redact) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_arguments(item, redact) for item in value]
+    return value
+
+
+def _redact_text_bytes(payload: bytes, redact: Callable[[str], str]) -> bytes:
+    """文本文件脱敏后重新编码;不是 UTF-8 的二进制文件原样返回。"""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return payload
+    cleaned = redact(text)
+    return payload if cleaned == text else cleaned.encode("utf-8")
 
 
 class AgentToolError(Exception):
@@ -528,9 +552,9 @@ ACTION_DEFINITIONS = {
     },
     "automation.save": {
         "description": (
-            "Create or update a project automation script; it is triggered by cron, by webhook "
-            "deliveries on the platform's dedicated webhook port, or manually, and it calls "
-            "platform actions with its own token"
+            "Create or update a project automation script; it is triggered by cron, by "
+            "deliveries to the global webhook source it subscribes to, or manually, and it "
+            "calls platform actions with its own token"
         ),
         "orchestrator_only": True,
         "arguments": {
@@ -539,10 +563,21 @@ ACTION_DEFINITIONS = {
                        "otherwise with bash)"),
             "cron": "five-field crontab; an empty string means no schedule",
             "enabled": "whether scheduled (cron) triggering is enabled",
-            "webhook": ("true accepts webhook deliveries (can be combined with cron); the "
-                        "result gives webhook_path, and the signing secret is shown only to "
-                        "humans on the automation page, so ask a human to configure the "
-                        "external system"),
+            "webhook_source": ("id of an existing global webhook source to subscribe to "
+                               "(automation.list lists them: webhook endpoints and GitHub "
+                               "polling sources; can be combined with cron); every delivery "
+                               "to that source runs this script; an empty string removes "
+                               "the webhook trigger. Sources and their secrets are managed "
+                               "only by humans in global settings"),
+            "github_repos": ("only with a GitHub polling source (kind github): array of "
+                             "`owner/repo` whose events this script receives; the platform "
+                             "starts polling a newly listed repository at once and delivers "
+                             "only events that happen from then on; omit it to keep the "
+                             "current value, pass [] to stop receiving repository events"),
+            "github_events": ("only with a GitHub polling source: array of event names this "
+                              "script receives (issues, pull_request, issue_comment, push, "
+                              "release, ..., and notification for the account inbox when "
+                              "the source has it on); [] means all"),
             "actions": "allowlist array of actions it may call; omit it to keep the current value",
             "timeout_seconds": "timeout of a single run in seconds",
         },
@@ -553,8 +588,12 @@ ACTION_DEFINITIONS = {
         "arguments": {"id": "short script id"},
     },
     "automation.list": {
-        "description": ("On demand, list project automation scripts (schedule, enabled, actions "
-                        "allowlist, last run); pass id to get the full script and its recent "
+        "description": ("On demand, list project automation scripts (schedule, enabled, webhook "
+                        "source, actions allowlist, last run) and the global webhook sources "
+                        "they can subscribe to (kind github = a GitHub polling source: a "
+                        "script subscribes with webhook_source plus its own github_repos; "
+                        "github_errors on a script names repositories the platform could "
+                        "not poll); pass id to get the full script and its recent "
                         "runs with the tail of their output, e.g. to fix a failing script; "
                         "page back with before_id through all kept runs (run_count)"),
         "orchestrator_only": True,
@@ -565,6 +604,26 @@ ACTION_DEFINITIONS = {
                           "for paging back"),
         },
     },
+    "webhook.history": {
+        "description": ("On demand, list what a global webhook source received recently "
+                        "(external webhook deliveries or events from GitHub polling, newest "
+                        "first, kept for 7 days): event name, action, repository, delivery "
+                        "id and which scripts it ran, including events no script received. "
+                        "Use it to see which events a source really emits before writing or "
+                        "fixing a script's filter; pass id to get one delivery's full event, "
+                        "the same JSON a script reads from MISSIONCREW_WEBHOOK_EVENT_FILE"),
+        # 执行角色登记事件回调前也要对照历史写过滤条件,回调触发后还要读事件全文
+        "orchestrator_only": False,
+        "arguments": {
+            "source": "id of the webhook source (automation.list lists them)",
+            "id": "optional delivery record id; returns that delivery with its full event",
+            "event": "optional filter: exact event name, e.g. issues or pull_request",
+            "action": "optional filter: exact action, e.g. opened or merged",
+            "repository": "optional filter: owner/repo",
+            "limit": "how many deliveries to list; default 20, at most 100",
+            "before_id": "only list earlier deliveries with id below this value, for paging back",
+        },
+    },
     "automation.run": {
         "description": ("Trigger a manual run of an automation script now (also when scheduling "
                         "is disabled); it runs in the background, so check the result later "
@@ -572,6 +631,100 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "automation_allowed": False,
         "arguments": {"id": "short script id"},
+    },
+    "credential.request": {
+        "description": (
+            "Ask a human to save secrets and settings (token, password, key, address, user "
+            "name) the task needs instead of asking for them in chat. Credentials are kept "
+            "as environments: a named group of variables that are used together, each one "
+            "either a secret or plain configuration. The platform posts a notice in the "
+            "current channel with a link to the form, and once a human fills it in each "
+            "variable appears as the file $MISSIONCREW_CREDENTIALS_DIR/<name>/<VARIABLE>, "
+            "readable from your next command on. Environments the project already has "
+            "(including global ones) are listed in index.json in that directory; asking "
+            "for variables that all have values returns already_exists. The result's "
+            "resource_url is the link to that form; use it as is when you point a human to "
+            "it"
+        ),
+        "orchestrator_only": False,
+        "automation_allowed": False,
+        "arguments": {
+            "name": ("environment name in upper case letters, digits and underscores, e.g. "
+                     "STAGING_ADMIN or SENTRY; it becomes the directory name. GITHUB is "
+                     "reserved for the project's GitHub identity (variable TOKEN)"),
+            "description": ("what it is for and the minimal permissions it needs, shown to "
+                            "the human who fills it in"),
+            "variables": ("required: a list of {name, secret, value}, even when you need a "
+                          "single value, e.g. [{\"name\": \"TOKEN\"}]. name is upper case "
+                          "like URL, USERNAME, PASSWORD, TOKEN. secret defaults to true: a "
+                          "human fills the value and the platform redacts it; never pass a "
+                          "secret value here. With secret false the value is plain "
+                          "configuration, visible to everyone: give the value when you "
+                          "already know it, or leave it for the human. For an environment "
+                          "this project already has, only the variables it lacks are added"),
+        },
+    },
+    "callback.create": {
+        "description": (
+            "Register a one-shot callback that starts you again in the current channel later: "
+            "at a time (delay_seconds or at), when a channel gets a new message from someone "
+            "else (channel), when a Task changes (task), or when a webhook source receives a "
+            "matching event (webhook_source: an external webhook delivery or a polled GitHub "
+            "event, narrowed with event/action/repository and an optional filter script). "
+            "Give at most one of channel/task/webhook_source; with a time as well, whichever "
+            "happens first fires it, so the time works as a deadline. A channel or Task watch "
+            "without a time expires after 7 days; an event watch must have a time, which is "
+            "its timeout: if no event matched by then you are started anyway and told so. "
+            "When it fires, the platform "
+            "posts a callback message here that says what happened and repeats your note, and "
+            "starts a normal run of you with its own Agent Tool token; your reply follows the "
+            "same hand-back rules as the turn that registered it. It fires once; register again "
+            "in that run if you need to keep waiting. Humans can see and cancel it in the "
+            "channel, and stopping the channel's agents cancels it. Use it instead of `sleep`, "
+            "polling or a runtime's own scheduler"
+        ),
+        "orchestrator_only": False,
+        "automation_allowed": False,
+        "arguments": {
+            "note": ("required: what to do when called back; the callback message repeats it, "
+                     "so make it self-contained (task, branch, next step)"),
+            "delay_seconds": "seconds from now, at least 30 and at most 30 days",
+            "at": "absolute time in ISO 8601 with a time zone, e.g. 2026-11-09T07:22:00Z",
+            "channel": ("short id of a project channel to watch; a new message there from a "
+                        "human, a role other than you, or an automation script fires it"),
+            "task": ("id of a project Task to watch; any change of its title, summary, body, "
+                     "labels/status, channels, link, archive state or a new brief fires it; "
+                     "your own changes through this tool do not"),
+            "webhook_source": ("id of a global webhook source to watch (automation.list lists "
+                               "them); the first event it receives after now that matches "
+                               "event/action/repository and the filter fires the callback; "
+                               "requires delay_seconds or at as the timeout"),
+            "event": "with webhook_source: exact event name, e.g. pull_request or issues",
+            "action": "with webhook_source: exact action, e.g. merged or opened",
+            "repository": ("with webhook_source: owner/repo; on a GitHub polling source the "
+                           "platform also starts polling that repository for you"),
+            "filter": ("with webhook_source: script text that decides whether one event "
+                       "matches (run as an executable when it has a shebang, otherwise with "
+                       "bash). It gets the event JSON on stdin and in "
+                       "MISSIONCREW_WEBHOOK_EVENT_FILE, the same file an automation script "
+                       "reads; exit 0 = match, 1 = ignore, anything else counts as an error "
+                       "and is ignored. It can only decide: it has no Agent Tool token, no "
+                       "credentials and no network. Example: "
+                       "jq -e '.payload.number == 12 and .payload.action == \"merged\"'"),
+        },
+    },
+    "callback.list": {
+        "description": "List your callbacks that are still waiting in this project",
+        "orchestrator_only": False,
+        "automation_allowed": False,
+        "arguments": {},
+    },
+    "callback.cancel": {
+        "description": ("Cancel a waiting callback by id; you can cancel your own, the "
+                        "orchestrator can cancel any in the project"),
+        "orchestrator_only": False,
+        "automation_allowed": False,
+        "arguments": {"id": "callback id returned by callback.create or callback.list"},
     },
     "recycle.list": {
         "description": "List the current project's unified recycle bin",
@@ -719,12 +872,20 @@ ACTION_ARGUMENTS = {
     "skill.list": {"id"},
     "skill.history": {"id", "revision", "file", "limit"},
     "automation.save": {
-        "id", "name", "description", "script", "cron", "enabled", "webhook", "actions",
-        "timeout_seconds",
+        "id", "name", "description", "script", "cron", "enabled", "webhook_source",
+        "github_repos", "github_events",
+        "actions", "timeout_seconds",
     },
     "automation.delete": {"id"},
     "automation.list": {"id", "runs", "before_id"},
+    "webhook.history": {"source", "id", "event", "action", "repository", "limit",
+                        "before_id"},
     "automation.run": {"id"},
+    "credential.request": {"name", "description", "variables"},
+    "callback.create": {"note", "delay_seconds", "at", "channel", "task",
+                        "webhook_source", "event", "action", "repository", "filter"},
+    "callback.list": set(),
+    "callback.cancel": {"id"},
     "recycle.list": set(),
     "recycle.restore": {"id"},
     "recycle.purge": {"id"},
@@ -739,6 +900,7 @@ CONVERSATION_RECEIPT_ACTIONS = (
         "channel.history", "channel.list", "recycle.list", "dashboard.list",
         "board_source.list", "guideline.list", "skill.list", "automation.list",
         "document.history", "guideline.history", "skill.history", "role.list",
+"webhook.history", "document.history", "guideline.history", "skill.history", "callback.list",
     }
 )
 
@@ -749,8 +911,11 @@ class AgentActionService:
     def __init__(self, store: Store, post_message: Callable[..., int],
                  stop_run: Callable[..., dict],
                  history_records: Optional[Callable[..., list[dict]]] = None,
-                 stop_channel_sessions: Optional[Callable[[str], int]] = None):
+                 stop_channel_sessions: Optional[Callable[[str], int]] = None,
+                 callbacks: Optional[CallbackService] = None):
         self.store = store
+        # 角色登记的一次性回调;None = 没有聊天引擎(测试),callback.* 不可用
+        self._callbacks = callbacks
         self._post_message = post_message
         self._stop_run = stop_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的
@@ -1158,6 +1323,7 @@ class AgentActionService:
             raise AgentToolError(
                 "permission_denied", f"{subject} 无权执行 {action}", 403,
             )
+        arguments = _redact_arguments(arguments, self.store.redact_credentials)
         handlers = {
             "role.list": self._list_roles,
             "role.save": self._save_role,
@@ -1200,12 +1366,26 @@ class AgentActionService:
             "automation.save": self._save_automation,
             "automation.delete": self._delete_automation,
             "automation.list": self._list_automations,
+            "webhook.history": self._webhook_history,
             "automation.run": self._run_automation,
+            "credential.request": self._request_credential,
+            "callback.create": self._create_callback,
+            "callback.list": self._list_callbacks,
+            "callback.cancel": self._cancel_callback,
             "recycle.list": self._list_recycle_bin,
             "recycle.restore": self._restore_recycle_item,
             "recycle.purge": self._purge_recycle_item,
         }
-        return handlers[action](project, identity, arguments, context)
+        handler = handlers[action]
+        task_id = (str(arguments.get("id") or "")
+                   if action.startswith("task.") and not identity.is_automation
+                   and self._callbacks is not None else "")
+        if task_id:
+            # 登记者自己改所盯的 Task 不应把自己叫醒:改动前后由回调服务顺延基线
+            with self._callbacks.own_task_change(
+                    identity.channel_id, identity.role_id, task_id):
+                return handler(project, identity, arguments, context)
+        return handler(project, identity, arguments, context)
 
     def _list_roles(self, project: Project, identity: AgentIdentity,
                     _arguments: dict, _context: AgentRunContext) -> dict:
@@ -1550,6 +1730,8 @@ class AgentActionService:
                 raise AgentToolError("invalid_arguments", "content_base64 不是有效 Base64") from exc
         if len(payload) > MAX_DOCUMENT_BYTES:
             raise AgentToolError("file_too_large", "单个发布文件不能超过 50 MB", 413)
+        if has_base64:
+            payload = _redact_text_bytes(payload, self.store.redact_credentials)
         overwrite = arguments.get("overwrite", False)
         if not isinstance(overwrite, bool):
             raise AgentToolError("invalid_arguments", "overwrite 必须是布尔值")
@@ -2172,7 +2354,9 @@ class AgentActionService:
                 script=arguments.get("script"),
                 cron=arguments.get("cron"),
                 enabled=arguments.get("enabled"),
-                webhook=arguments.get("webhook"),
+                webhook_source=arguments.get("webhook_source"),
+                github_repos=arguments.get("github_repos"),
+                github_events=arguments.get("github_events"),
                 actions=arguments.get("actions"),
                 timeout_seconds=arguments.get("timeout_seconds"),
                 actor=identity.actor,
@@ -2181,14 +2365,15 @@ class AgentActionService:
         except ValueError as exc:
             raise AgentToolError("invalid_arguments", str(exc), 400) from exc
         triggers = [f"cron `{automation.cron}`"] if automation.cron else []
-        if automation.webhook:
-            triggers.append("webhook")
-        # 密钥只给人看:Agent 拿到的配置里没有 webhook_secret
+        if automation.webhook_source:
+            triggers.append(f"webhook 来源 {automation.webhook_source}"
+                            + (f"(仓库 {', '.join(automation.github_repos)})"
+                               if automation.github_repos else ""))
         return {
             "summary": (f"已{'创建' if created else '更新'}自动化脚本 "
                         f"{automation.name}({' + '.join(triggers) or '仅手动触发'})"),
-            "automation": {**automation.public_dict(),
-                           "webhook_path": webhook_path(automation)},
+            "automation": {**automation.to_dict(),
+                           "webhook_path": self._automation_webhook_path(automation)},
             "resource_url": automation_resource_url(project.id, automation.id),
         }
 
@@ -2220,16 +2405,38 @@ class AgentActionService:
             raise AgentToolError("not_found", "自动化脚本不存在", 404)
         return automation
 
+    def _automation_webhook_path(self, automation) -> str:
+        source = (self.store.get_webhook_source(automation.webhook_source)
+                  if automation.webhook_source else None)
+        # GitHub 轮询来源没有投递地址
+        return webhook_path(source) if source and source.kind == "webhook" else ""
+
+    def _github_subscription(self, automation) -> dict:
+        """脚本对 GitHub 轮询来源的订阅:仓库、事件白名单,以及平台轮询这些仓库时
+        遇到的错误(仓库不存在、token 无权访问),便于 Agent 自己发现并改正。"""
+        if not automation.github_repos and not automation.github_events:
+            return {}
+        streams = (self.store.get_webhook_source_state(automation.webhook_source)
+                   .get("streams") or {})
+        errors = {repo: streams[f"repo:{repo.lower()}"]["error"]
+                  for repo in automation.github_repos
+                  if (streams.get(f"repo:{repo.lower()}") or {}).get("error")}
+        return {"github_repos": automation.github_repos,
+                "github_events": automation.github_events,
+                **({"github_errors": errors} if errors else {})}
+
     def _list_automations(self, project: Project, _identity: AgentIdentity,
                           arguments: dict, _context: AgentRunContext) -> dict:
-        """不带 id 列出摘要;带 id 返回脚本全文与最近运行(输出只留末尾)。"""
+        """不带 id 列出摘要与可订阅的 webhook 来源;带 id 返回脚本全文与最近运行
+        (输出只留末尾)。来源只给公开字段,密钥只给人看。"""
         def summary_row(automation) -> dict:
             return {
                 "id": automation.id.removeprefix(f"{project.id}:"),
                 "name": automation.name, "description": automation.description,
                 "cron": automation.cron, "enabled": automation.enabled,
-                "webhook": automation.webhook,
-                "webhook_path": webhook_path(automation) if automation.webhook else "",
+                "webhook_source": automation.webhook_source,
+                "webhook_path": self._automation_webhook_path(automation),
+                **self._github_subscription(automation),
                 "actions": automation.actions,
                 "timeout_seconds": automation.timeout_seconds,
                 "last_run_at": automation.last_run_at,
@@ -2261,8 +2468,58 @@ class AgentActionService:
                     "run_count": self.store.count_automation_runs(automation.id),
                     "runs": runs}
         rows = [summary_row(item) for item in self.store.list_automations(project.id)]
-        return {"summary": f"项目 {project.id} 共 {len(rows)} 个自动化脚本",
-                "automations": rows}
+        sources = []
+        for item in self.store.list_webhook_sources():
+            row = {"id": item.id, "name": item.name, "description": item.description,
+                   "enabled": item.enabled, "kind": item.kind,
+                   "webhook_path": webhook_path(item) if item.kind == "webhook" else ""}
+            if item.kind == "github":
+                # 轮询来源不绑定仓库(脚本用 github_repos 自己订阅);token 不在其中
+                row["github"] = {key: item.github.get(key) for key in (
+                    "notifications", "participating", "interval_seconds")}
+            sources.append(row)
+        return {"summary": (f"项目 {project.id} 共 {len(rows)} 个自动化脚本,"
+                            f"平台共 {len(sources)} 个 webhook 来源"),
+                "automations": rows, "webhook_sources": sources}
+
+    def _webhook_history(self, _project: Project, _identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        """来源的投递记录:不带 id 列摘要(可按事件、动作、仓库过滤并翻页),带 id
+        返回那一条的事件全文。来源是全局资源,任何项目的脚本订阅后都会收到它的
+        投递,所以历史同样对各项目的主控可见;记录里没有来源密钥。"""
+        from .webhooks import public_delivery
+
+        source_id = str(arguments.get("source") or "").strip()
+        source = self.store.get_webhook_source(source_id) if source_id else None
+        if source is None:
+            raise AgentToolError("not_found", f"webhook 来源不存在: {source_id or '(未填)'}", 404)
+
+        def integer(name: str, default: int, low: int, high: int) -> int:
+            value = arguments.get(name, default)
+            if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+                raise AgentToolError("invalid_arguments", f"{name} 必须是 {low}..{high} 的整数")
+            return value
+
+        if arguments.get("id") is not None:
+            row = self.store.get_webhook_delivery(integer("id", 0, 1, 2 ** 62))
+            if row is None or row["source_id"] != source.id:
+                raise AgentToolError("not_found", "投递记录不存在(可能已过保留期)", 404)
+            return {"summary": (f"来源 {source.id} 的投递 #{row['id']}:"
+                                f"{row['event'] or '(无事件名)'} {row['action']}".rstrip()),
+                    "delivery": public_delivery(row), "event_file": row["event_data"]}
+        filters = {}
+        for name in ("event", "action", "repository"):
+            value = arguments.get(name, "")
+            if not isinstance(value, str):
+                raise AgentToolError("invalid_arguments", f"{name} 必须是字符串")
+            filters[name] = value.strip()
+        rows = self.store.list_webhook_deliveries(
+            source.id, limit=integer("limit", 20, 1, 100),
+            before_id=integer("before_id", 0, 0, 2 ** 62), **filters)
+        total = self.store.count_webhook_deliveries(source.id)
+        return {"summary": f"来源 {source.id} 共保留 {total} 条投递记录,本次返回 {len(rows)} 条",
+                "source": source.id, "total": total,
+                "deliveries": [public_delivery(row) for row in rows]}
 
     def _run_automation(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:
@@ -2283,6 +2540,174 @@ class AgentActionService:
             "run_id": run_id,
             "resource_url": automation_resource_url(project.id, automation.id),
         }
+
+    def _request_credential(self, project: Project, identity: AgentIdentity,
+                            arguments: dict, _context: AgentRunContext) -> dict:
+        self._require_chat_identity(identity)
+        name = str(arguments.get("name") or "").strip()
+        description = str(arguments.get("description") or "").strip()
+        if not description:
+            raise AgentToolError(
+                "invalid_arguments", "description 必填:说明这组变量的用途和所需的最小权限")
+        if arguments.get("variables") is None:
+            raise AgentToolError(
+                "invalid_arguments",
+                "variables 必填:列出需要的变量,如 [{\"name\": \"TOKEN\"}];"
+                "凭据以环境为单位,一个环境是一组变量")
+        settings_url = settings_resource_url(project.id, "credentials")
+        try:
+            credential, _created = request_environment(
+                self.store, project_id=project.id, name=name, description=description,
+                variables=arguments["variables"], actor=identity.actor)
+        except FileExistsError as exc:
+            raise AgentToolError(
+                "already_exists",
+                f"环境 {name} 里这些变量都已可用,直接读取 "
+                f"$MISSIONCREW_CREDENTIALS_DIR/{name}/<变量名>", 409) from exc
+        except ValueError as exc:
+            raise AgentToolError("invalid_arguments", str(exc)) from exc
+        listed = [{"name": item.name, "secret": item.secret,
+                   "status": "available" if item.has_value else "pending"}
+                  for item in credential.variables]
+        pending = [item["name"] for item in listed if item["status"] == "pending"]
+        waiting = (f"待填写变量 {'、'.join(f'`{key}`' for key in pending)}。"
+                   f"请在[项目设置 → 凭据]({settings_url})中填写,不要把值直接发在聊天里"
+                   if pending else "变量都已有值,无需填写")
+        return {
+            "summary": f"请求环境 `{credential.name}`({credential.description})。{waiting}",
+            "credential": {"name": credential.name, "description": credential.description,
+                           "status": "pending" if pending else "available",
+                           "variables": listed},
+            "resource_url": settings_url,
+        }
+
+    def _require_callbacks(self) -> CallbackService:
+        if self._callbacks is None:
+            raise AgentToolError("unsupported_action", "当前环境没有回调服务", 501)
+        return self._callbacks
+
+    def _create_callback(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, context: AgentRunContext) -> dict:
+        self._require_chat_identity(identity)
+        service = self._require_callbacks()
+        fire_at = resolve_fire_at(
+            arguments.get("delay_seconds"), arguments.get("at"), time.time())
+        raw_channel = str(arguments.get("channel") or "").strip()
+        raw_task = str(arguments.get("task") or "").strip()
+        raw_source = str(arguments.get("webhook_source") or "").strip()
+        if sum(map(bool, (raw_channel, raw_task, raw_source))) > 1:
+            raise AgentToolError("invalid_arguments",
+                                 "channel、task、webhook_source 只能盯一个")
+        event_fields = [name for name in ("event", "action", "repository", "filter")
+                        if arguments.get(name) not in (None, "")]
+        if event_fields and not raw_source:
+            raise AgentToolError(
+                "invalid_arguments",
+                f"{', '.join(event_fields)} 只在给出 webhook_source 时有效")
+        watch_kind = watch_target = ""
+        spec = filter_check = None
+        if raw_source:
+            watch_kind, watch_target = "event", raw_source
+            spec, filter_check = self._event_watch_spec(raw_source, arguments)
+        elif raw_channel:
+            watch_kind, watch_target = "channel", self._project_channel(project, raw_channel).id
+        elif raw_task:
+            task = self.store.get_task(raw_task)
+            if task is None or task.project_id != project.id:
+                raise AgentToolError("not_found", f"Task 不存在或不属于本项目: {raw_task}", 404)
+            watch_kind, watch_target = "task", task.id
+        run = self.store.get_chat_run(context.run_id) if context.run_id else None
+        row = service.create(
+            project_id=project.id, channel_id=identity.channel_id,
+            role_id=identity.role_id, note=str(arguments.get("note") or ""),
+            fire_at=fire_at, watch_kind=watch_kind, watch_target=watch_target, spec=spec,
+            origin_run_id=context.run_id,
+            origin_trigger=int(run["trigger_message_id"]) if run else 0)
+        view = public_callback(row)
+        result = {"callback": view,
+                  "summary": (f"登记回调 #{view['id']}：{view['conditions']}"
+                              + ("" if watch_kind == "event" else "时") + "回到本频道")}
+        if filter_check is not None:
+            result["filter_check"] = filter_check
+        return result
+
+    def _event_watch_spec(self, source_id: str, arguments: dict) -> tuple[dict, Optional[dict]]:
+        """校验盯事件的条件,返回 (匹配条件, 过滤脚本的试跑结果)。
+
+        有过滤脚本时拿它试跑一次:优先用来源历史里符合事件名/动作/仓库的最近一条
+        投递,没有就用只含这些字段的空事件。试跑只为尽早暴露写坏的脚本(起不来、
+        超时就拒绝登记),命中与否如实回给角色,由它判断条件是否写对。
+        """
+        from .event_filters import filter_sandbox, run_event_filter, validate_filter
+        from .github_events import normalize_repos
+
+        source = self.store.get_webhook_source(source_id)
+        if source is None:
+            raise AgentToolError("not_found", f"webhook 来源不存在: {source_id}", 404)
+        spec = {}
+        for name in ("event", "action"):
+            value = arguments.get(name, "")
+            if not isinstance(value, str):
+                raise AgentToolError("invalid_arguments", f"{name} 必须是字符串")
+            spec[name] = value.strip()
+        try:
+            repos = normalize_repos(arguments.get("repository") or [])
+            spec["filter"] = validate_filter(arguments.get("filter") or "")
+        except ValueError as exc:
+            raise AgentToolError("invalid_arguments", str(exc)) from exc
+        if len(repos) > 1:
+            raise AgentToolError("invalid_arguments", "repository 只能给一个仓库")
+        spec["repository"] = repos[0] if repos else ""
+        if not spec["filter"]:
+            return spec, None
+        recent = self.store.list_webhook_deliveries(
+            source.id, limit=1, event=spec["event"], action=spec["action"],
+            repository=spec["repository"])
+        if recent:
+            sample = (self.store.get_webhook_delivery(int(recent[0]["id"])) or {}).get(
+                "event_data") or {}
+        else:
+            sample = {"source": source.id, "provider": "", "event": spec["event"],
+                      "delivery": "", "payload": {}}
+        outcome = run_event_filter(spec["filter"], sample)
+        if outcome.exit_code in (None, 126, 127):
+            raise AgentToolError(
+                "invalid_arguments", f"过滤脚本无法使用: {outcome.error}")
+        return spec, {
+            "tested_on": (f"delivery #{recent[0]['id']}" if recent
+                          else "an empty sample event (the source has no matching history yet)"),
+            "matched": outcome.matched, "exit_code": outcome.exit_code,
+            "error": outcome.error, "sandbox": filter_sandbox(),
+        }
+
+    def _list_callbacks(self, project: Project, identity: AgentIdentity,
+                        _arguments: dict, _context: AgentRunContext) -> dict:
+        self._require_chat_identity(identity)
+        rows = self.store.list_chat_callbacks(
+            project_id=project.id, role_id=identity.role_id, status="pending")
+        return {"callbacks": [public_callback(row) for row in rows]}
+
+    def _cancel_callback(self, project: Project, identity: AgentIdentity,
+                         arguments: dict, _context: AgentRunContext) -> dict:
+        self._require_chat_identity(identity)
+        service = self._require_callbacks()
+        raw_id = arguments.get("id")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)) \
+                or not str(raw_id).strip().lstrip("#").isdigit():
+            raise AgentToolError("invalid_arguments", "id 必须是回调编号")
+        callback_id = int(str(raw_id).strip().lstrip("#"))
+        row = self.store.get_chat_callback(callback_id)
+        if row is None or row["project_id"] != project.id:
+            raise AgentToolError("not_found", f"回调不存在: {callback_id}", 404)
+        if (row["role_id"] != identity.role_id
+                and not project.controls_platform(identity.role_id)):
+            raise AgentToolError(
+                "permission_denied", "只能取消自己登记的回调", 403)
+        if row["status"] != "pending" or not service.cancel(
+                callback_id, identity.actor, f"@{identity.role_id} 取消"):
+            raise AgentToolError(
+                "invalid_arguments", f"回调 #{callback_id} 已结束（{row['status']}）")
+        return {"summary": f"取消回调 #{callback_id}（{public_callback(row)['conditions']}）"}
 
     def _save_guideline(self, project: Project, identity: AgentIdentity,
                         arguments: dict, _context: AgentRunContext) -> dict:

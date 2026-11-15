@@ -1,13 +1,17 @@
-"""Webhook 触发自动化:验签、事件整理与投递入队。
+"""Webhook 触发自动化:全局 webhook 来源的维护、验签、事件整理与投递扇出。
 
-外部系统(GitHub、GitCode、GitLab 或自建服务)把事件 POST 到专用 webhook 端口的
-`/hooks/<项目>/<脚本短 id>`。每个开启 webhook 的脚本有自己的密钥,投递至少带一种
-用它验得过的凭据:GitHub 风格 HMAC-SHA256 签名头(`X-Hub-Signature-256` /
-`X-GitCode-Signature-256`)、Standard Webhooks 签名(`webhook-id` / `webhook-timestamp`
-/ `webhook-signature`,svix-* 同义)或密码头(`X-GitCode-Token` / `X-Gitlab-Token` /
-`Authorization: Bearer`)。验签通过的投递整理成事件文件交给脚本,由脚本自己决定
-处理哪些事件;平台只代答 GitHub 的 ping。HTTP 监听本身在 api/webhooks.py,这里
-不依赖任何 Web 框架,便于单测。
+webhook 来源(WebhookSource)是全局的投递入口:外部系统(GitHub、GitCode、GitLab
+或自建服务)把事件 POST 到专用 webhook 端口的 `/hooks/<来源路径>`。每个来源有
+自己的密钥,投递至少带一种用它验得过的凭据:GitHub 风格 HMAC-SHA256 签名头
+(`X-Hub-Signature-256` / `X-GitCode-Signature-256`)、Standard Webhooks 签名
+(`webhook-id` / `webhook-timestamp` / `webhook-signature`,svix-* 同义)或密码头
+(`X-GitCode-Token` / `X-Gitlab-Token` / `Authorization: Bearer`)。验签通过的投递
+整理成事件,交给所有订阅该来源的自动化脚本(各项目都可以订阅同一个来源),由
+脚本自己决定处理哪些事件;平台只代答 GitHub 的 ping。HTTP 监听本身在
+api/webhooks.py,这里不依赖任何 Web 框架,便于单测。
+
+来源还有一种类型 kind=github:不接收外部投递,由 github_events.py 用 GitHub token
+轮询生成同形的事件,同样经 fan_out_event 交给订阅脚本。
 """
 from __future__ import annotations
 
@@ -16,12 +20,13 @@ import binascii
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 from typing import Optional
 from urllib.parse import parse_qs, quote
 
-from ..core.models import Automation
+from ..core.models import WebhookSource
 from ..core.store import Store
 
 # GitHub 单次投递上限 25 MiB;超出直接拒收,不读完正文
@@ -48,6 +53,13 @@ PROVIDER_HEADERS = (
 )
 
 
+# 投递记录:每个来源收到的事件留档,供人排查、供 Agent 对照历史写过滤条件
+DELIVERY_RETENTION_SECONDS = 7 * 24 * 3600
+DELIVERY_KEEP_PER_SOURCE = 1000
+# 单条记录的事件全文上限;更大的只留摘要与请求头,正文不存
+DELIVERY_MAX_BYTES = 256 * 1024
+
+
 class WebhookRejected(Exception):
     """投递被拒:status 是回给发送方的 HTTP 状态码,message 只含简短原因。"""
 
@@ -63,9 +75,105 @@ def new_webhook_secret() -> str:
     return STANDARD_SECRET_PREFIX + base64.b64encode(secrets.token_bytes(32)).decode()
 
 
-def webhook_path(automation: Automation) -> str:
-    short = automation.id.removeprefix(f"{automation.project_id}:")
-    return f"/hooks/{quote(automation.project_id, safe='')}/{quote(short, safe='')}"
+# 来源 id 与路径段的字符集同其他平台短 id;路径最多 4 段(旧版迁移来的是 `<项目>/<脚本>`)
+SOURCE_ID_RE = re.compile(r"[\w-]{1,100}")
+SOURCE_PATH_RE = re.compile(r"[\w-]+(?:/[\w-]+){0,3}")
+SOURCE_PATH_MAX = 200
+
+
+def webhook_path(source: WebhookSource) -> str:
+    """来源的投递路径(专用 webhook 端口上的 URL path)。"""
+    return "/hooks/" + "/".join(quote(part, safe="") for part in source.path.split("/"))
+
+
+def normalize_source_path(raw: str) -> str:
+    """去掉首尾斜杠与可选的 `/hooks/` 前缀后校验;不合法抛 ValueError。"""
+    path = str(raw or "").strip().strip("/")
+    path = path.removeprefix("hooks/")
+    if len(path) > SOURCE_PATH_MAX or not SOURCE_PATH_RE.fullmatch(path):
+        raise ValueError("投递路径由 1~4 段字母、数字、下划线、连字符组成,段之间用 / 分隔")
+    return path
+
+
+def source_subscribers(store: Store, source_id: str) -> list:
+    """订阅该来源的全部自动化脚本(跨项目),按项目与创建时间排序。"""
+    return [item for item in store.list_automations()
+            if item.webhook_source == source_id]
+
+
+def save_webhook_source(store: Store, *, id: str, name: Optional[str] = None,
+                        description: Optional[str] = None,
+                        path: Optional[str] = None,
+                        enabled: Optional[bool] = None,
+                        kind: Optional[str] = None,
+                        github: Optional[dict] = None,
+                        actor: str = "human") -> tuple[WebhookSource, bool]:
+    """新建或按字段合并更新来源;新建时生成密钥。返回 (source, 是否新建)。
+
+    kind 只在新建时指定(默认 webhook),之后不可改:两类来源的投递方式不同,
+    改类型等于换了一个来源。kind=github 的轮询配置经 github 传入并整份替换。
+    """
+    source_id = str(id or "").strip()
+    if not SOURCE_ID_RE.fullmatch(source_id):
+        raise ValueError("来源 id 只能包含字母、数字、下划线、连字符")
+    existing = store.get_webhook_source(source_id)
+    created = existing is None
+    wanted_kind = str(kind or "").strip() or (existing.kind if existing else "webhook")
+    if existing is not None and wanted_kind != existing.kind:
+        raise ValueError("来源类型创建后不能修改;请新建一个来源")
+    source = existing or WebhookSource(id=source_id, path=source_id, kind=wanted_kind,
+                                       secret=new_webhook_secret())
+    if source.kind == "github":
+        from .github_events import normalize_github_config   # 延迟导入,避免环形依赖
+        if github is not None or created:
+            source.github = normalize_github_config(store, github or {})
+    elif github:
+        raise ValueError("只有 GitHub 轮询来源可以带 github 配置")
+    if name is not None:
+        source.name = str(name).strip()
+    if not source.name:
+        source.name = source_id
+    if description is not None:
+        source.description = str(description)
+    if path is not None:
+        source.path = normalize_source_path(path) if str(path).strip() else source_id
+    if enabled is not None:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled 必须是布尔值")
+        source.enabled = enabled
+    owner = store.find_webhook_source_by_path(source.path)
+    if owner is not None and owner.id != source.id:
+        raise ValueError(f"投递路径 /hooks/{source.path} 已被来源 {owner.id} 使用")
+    store.put_webhook_source(source)
+    store.audit(actor, "webhook_source_saved",
+                detail=f"source={source.id} kind={source.kind} path={source.path} "
+                       f"enabled={source.enabled}")
+    return source, created
+
+
+def rotate_webhook_source_secret(store: Store, source: WebhookSource,
+                                 actor: str = "human") -> WebhookSource:
+    """换一个新密钥;外部系统要同步改成新值,旧密钥签名的投递随即被拒。"""
+    source.secret = new_webhook_secret()
+    store.put_webhook_source(source)
+    store.audit(actor, "webhook_source_secret_rotated", detail=f"source={source.id}")
+    return source
+
+
+def delete_webhook_source(store: Store, source_id: str,
+                          actor: str = "human") -> WebhookSource:
+    """删除来源;仍有脚本订阅时拒绝,避免脚本悄悄失去 webhook 触发。"""
+    source = store.get_webhook_source(source_id)
+    if source is None:
+        raise LookupError(f"webhook 来源不存在: {source_id}")
+    users = source_subscribers(store, source.id)
+    if users:
+        names = "、".join(item.id for item in users)
+        raise ValueError(f"仍有 {len(users)} 个自动化脚本使用该来源: {names};"
+                         "先在脚本里改选其他来源或取消 webhook 触发")
+    store.delete_webhook_source(source.id)
+    store.audit(actor, "webhook_source_deleted", detail=f"source={source.id}")
+    return source
 
 
 def _signature_bytes(value: str) -> Optional[bytes]:
@@ -162,8 +270,9 @@ def verify_webhook(secret: str, headers: dict[str, str], body: bytes,
     raise WebhookRejected(401, "; ".join(dict.fromkeys(failures)) or "missing signature")
 
 
-def webhook_event(headers: dict[str, str], body: bytes) -> dict:
-    """整理成交给脚本的事件:来源、事件名、投递 id、去掉密钥的请求头与正文。
+def webhook_event(headers: dict[str, str], body: bytes, source: str = "") -> dict:
+    """整理成交给脚本的事件:webhook 来源 id、发送平台、事件名、投递 id、去掉密钥的
+    请求头与正文。
 
     JSON 正文与 GitHub 表单格式(`payload=<json>`)解析进 payload;其他正文
     payload 为 null,原文放 body。JSON 声明了却解析失败按坏请求拒收。
@@ -189,7 +298,8 @@ def webhook_event(headers: dict[str, str], body: bytes) -> dict:
     except json.JSONDecodeError as exc:
         raise WebhookRejected(400, "invalid JSON body") from exc
     return {
-        "provider": provider, "event": event, "delivery": delivery,
+        "source": source, "provider": provider, "event": event, "delivery": delivery,
+        "transport": "webhook",
         "received_at": time.time(), "content_type": content_type,
         "headers": {key: value for key, value in headers.items()
                     if key not in SECRET_HEADERS},
@@ -198,40 +308,134 @@ def webhook_event(headers: dict[str, str], body: bytes) -> dict:
     }
 
 
-def accept_webhook(store: Store, service, project_id: str, short_id: str,
+def accept_webhook(store: Store, service, path: str,
                    headers: dict[str, str], body: bytes) -> tuple[int, dict]:
     """处理一次投递,返回 (HTTP 状态码, 响应 JSON);拒收抛 WebhookRejected。
 
-    headers 的键须已转成小写。脚本不存在、不属于该项目或没开 webhook 一律 404,
-    不区分原因。脚本正在运行时事件排队,结束后按顺序接着跑。
+    headers 的键须已转成小写。来源不存在或已停用一律 404,不区分原因。验签通过后
+    扇出给所有订阅该来源的脚本:空闲的立即运行,正在运行的排队;某个脚本排队已满
+    只丢弃给它的这一份(记审计),全部目标都满时回 503 让发送方稍后重试。
     """
-    from .automations import normalize_automation_id
-
-    try:
-        full_id = normalize_automation_id(project_id, short_id)
-    except ValueError as exc:
-        raise WebhookRejected(404, "not found") from exc
-    automation = store.get_automation(full_id)
-    if automation is None or automation.project_id != project_id \
-            or not automation.webhook:
+    source = (store.find_webhook_source_by_path(path)
+              if len(path) <= SOURCE_PATH_MAX and SOURCE_PATH_RE.fullmatch(path) else None)
+    # 轮询来源的投递由平台自己生成,不接受外部 POST
+    if source is None or not source.enabled or source.kind != "webhook":
         raise WebhookRejected(404, "not found")
     try:
-        mode = verify_webhook(automation.webhook_secret, headers, body)
+        mode = verify_webhook(source.secret, headers, body)
     except WebhookRejected as exc:
-        store.audit("platform", "automation_webhook_rejected",
-                    detail=f"project={project_id} automation={full_id} "
-                           f"reason={exc.message}")
+        store.audit("platform", "webhook_delivery_rejected",
+                    detail=f"source={source.id} reason={exc.message}")
         raise
-    event = webhook_event(headers, body)
+    event = webhook_event(headers, body, source=source.id)
     if event["provider"] == "github" and event["event"] == "ping":
+        # ping 不触发脚本,但留一条记录:人在 GitHub 上配好 webhook 后据此确认连通
+        record_delivery(store, source, event, auth=mode, outcomes=[])
         return 200, {"ok": True, "pong": True}
-    try:
-        run_id = service.trigger_webhook(automation, event)
-    except ValueError as exc:   # 排队已满
-        raise WebhookRejected(503, str(exc)) from exc
-    store.audit("platform", "automation_webhook_accepted",
-                detail=f"project={project_id} automation={full_id} auth={mode} "
+    result = fan_out_event(store, service, source, event, auth=mode)
+    if result["targets"] and result["dropped"] == result["targets"]:
+        raise WebhookRejected(503, "webhook queue full, retry later")
+    response = {"ok": True, "run_ids": result["run_ids"], "queued": result["queued"]}
+    if result["dropped"]:
+        response["dropped"] = result["dropped"]
+    return 202, response
+
+
+def fan_out_event(store: Store, service, source: WebhookSource, event: dict,
+                  auth: str, targets: Optional[list] = None) -> dict:
+    """把一份事件交给订阅该来源的脚本,返回 {targets, run_ids, queued, dropped}。
+
+    外部投递(accept_webhook)与平台轮询生成的投递(github_events.py)共用:空闲的
+    脚本立即运行,正在运行的排队,排队已满的只丢弃给它的这一份并记审计。auth 记
+    进审计,说明这份投递凭什么被接受(验签方式,或轮询来源的 poll)。targets 缺省
+    是该来源的全部订阅脚本;轮询来源按各脚本订阅的仓库与事件传入其中一部分。
+    """
+    if targets is None:
+        targets = source_subscribers(store, source.id)
+    run_ids: list[int] = []
+    queued = dropped = 0
+    outcomes = []          # 审计用的短文本
+    records = []           # 投递记录里的结构化结果
+    for automation in targets:
+        try:
+            run_id = service.trigger_webhook(automation, event)
+        except ValueError as exc:   # 该脚本排队已满
+            dropped += 1
+            outcomes.append(f"{automation.id}=dropped")
+            records.append({"automation": automation.id, "result": "dropped"})
+            store.audit("platform", "automation_webhook_dropped",
+                        detail=f"automation={automation.id} source={source.id} "
+                               f"delivery={event['delivery']} reason={exc}")
+            continue
+        if run_id is None:
+            queued += 1
+            outcomes.append(f"{automation.id}=queued")
+            records.append({"automation": automation.id, "result": "queued"})
+        else:
+            run_ids.append(run_id)
+            outcomes.append(f"{automation.id}=#{run_id}")
+            records.append({"automation": automation.id, "result": "run", "run_id": run_id})
+    store.audit("platform", "webhook_delivery_accepted",
+                detail=f"source={source.id} auth={auth} "
                        f"event={event['provider']}:{event['event']} "
-                       f"delivery={event['delivery']} run={run_id or 'queued'}")
-    return 202, ({"ok": True, "run_id": run_id} if run_id is not None
-                 else {"ok": True, "queued": True})
+                       f"delivery={event['delivery']} "
+                       f"targets={','.join(outcomes) or '(none)'}")
+    record_delivery(store, source, event, auth=auth, outcomes=records)
+    return {"targets": len(targets), "run_ids": run_ids, "queued": queued,
+            "dropped": dropped}
+
+
+def delivery_summary(event: dict) -> tuple[str, str]:
+    """从事件正文里取列表与过滤用的两项摘要:(动作, 仓库)。
+
+    动作取 payload.action(GitHub、GitCode、Gitea 的写法),没有时取 GitLab 的
+    object_attributes.action;仓库取 repository.full_name,没有时取 GitLab 的
+    project.path_with_namespace。取不到就是空串。
+    """
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return "", ""
+
+    def text(*path) -> str:
+        value = payload
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        return value if isinstance(value, str) else ""
+
+    return (text("action") or text("object_attributes", "action"),
+            text("repository", "full_name") or text("project", "path_with_namespace"))
+
+
+def record_delivery(store: Store, source: WebhookSource, event: dict, *, auth: str,
+                    outcomes: list) -> int:
+    """把来源收到的一份事件记进投递记录,返回记录 id。
+
+    通过验签的外部投递(含没有脚本订阅的、GitHub 的 ping)与轮询来源取到的事件
+    (含没有脚本要的)都记;被拒收的投递不记,它们的内容不可信,原因在审计里。
+    outcomes 是 [{automation, result: run|queued|dropped, run_id?}],空 = 没有
+    脚本接收。事件全文超过上限时去掉正文再存。
+    """
+    action, repository = delivery_summary(event)
+    data = json.dumps(event, ensure_ascii=False)
+    size = len(data.encode("utf-8"))
+    if size > DELIVERY_MAX_BYTES:
+        data = json.dumps({**event, "payload": None, "body": None,
+                           "payload_omitted": True}, ensure_ascii=False)
+    return store.add_webhook_delivery(
+        source.id, received_at=float(event.get("received_at") or time.time()),
+        provider=str(event.get("provider") or ""), event=str(event.get("event") or ""),
+        action=action, repository=repository, delivery=str(event.get("delivery") or ""),
+        transport=str(event.get("transport") or "webhook"), auth=auth,
+        outcomes=outcomes, data=data, size=size, keep=DELIVERY_KEEP_PER_SOURCE)
+
+
+def prune_deliveries(store: Store) -> None:
+    """清掉超出保留期的投递记录;由每小时的系统任务调用。"""
+    store.prune_webhook_deliveries(time.time() - DELIVERY_RETENTION_SECONDS)
+
+
+def public_delivery(row: dict) -> dict:
+    """列表里的一条投递摘要:时间、事件、动作、仓库、投递 id、大小与各脚本的结果。"""
+    return {key: row.get(key) for key in (
+        "id", "received_at", "provider", "event", "action", "repository",
+        "delivery", "transport", "auth", "size", "outcomes")}

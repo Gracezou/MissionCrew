@@ -36,6 +36,7 @@ Each resource type below has corresponding Agent Tool actions (see [Agent Tool A
 | File inside a skill | `/resources/<project>/skills/<skill-id>/<relative-path>` | Relative path within the skill directory | The corresponding file in the file tree |
 | Project document | `/resources/<project>/documents/<relative-path>` | Relative path within the document library | The corresponding versioned document page |
 | Project recycle bin | `/resources/<project>/recycle-bin` | Project ID | A unified list of all restorable project resources |
+| Project settings | `/resources/<project>/settings[/<section>]` | Project ID; optional section `info`, `notify`, `res`, `roles`, `credentials` | The project settings page, scrolled to the section when one is given (`settings/credentials` is the credentials form, used by the `credential.request` receipt) |
 | Automation | `/resources/<project>/automations/<automation-id>` | Short automation ID within the project | The corresponding automation detail page |
 
 For example:
@@ -46,6 +47,7 @@ For example:
 [Task board](/resources/acme-shop/dashboards/tasks)
 [Architecture discussion channel](/resources/acme-shop/channels/architecture-doc)
 [Project recycle bin](/resources/acme-shop/recycle-bin)
+[Project settings → Credentials](/resources/acme-shop/settings/credentials)
 ```
 
 ## Storage and behavior of each resource type
@@ -59,6 +61,9 @@ A channel name can use `/` for grouping: `backend/api` appears in the sidebar as
 Archived channels are outside agent visibility by default. Humans can still view the history when they open an archived channel; before an agent posts a new message to an archived channel, the platform reactivates that channel. The project's internal `general` channel is the reserved default channel, and its resource URL uses the short ID `general`.
 
 A human message without an explicit role mention requires an existing, enabled project orchestrator. If the orchestrator is disabled or missing, the message is rejected before storage with an explanation; the Web API returns 400. Explicitly mentioning another enabled role still works when the orchestrator is disabled. Projects without an orchestrator still require at least one role mention.
+Within one channel a role executes one turn at a time. Trigger messages that arrive for it while it is busy (a human mention, an orchestrator dispatch, an executor's report, a fired callback, and so on) each queue; when its turn comes, the platform merges all messages queued at that moment into one turn: the role sees every message in chronological order with its trigger type in the same turn input, and it runs once and replies once. The merged turn is carried by the run of one of those messages; the reply is attached to that message and continues its collaboration chain: when an executor's queued messages include tasks dispatched by the orchestrator, the latest of those is used and the result goes back to the orchestrator as usual; otherwise the latest message is used. The runs of the other messages end with status `merged` and still count toward the run budget of their own collaboration chains; the chat page shows "排队时已合并" (merged while queued) under those messages with a jump to the turn that actually ran, and the carrying run's card states how many messages it handled together. Merging happens only at the moment the role's turn comes: messages that arrive afterwards keep queueing for the next turn, and a queued run that was stopped before the merge is not included. Stopping the carrying run stops this turn's handling of all merged messages. The "task finished" notification follows the collaboration chain of the carrying run; a chain that ends with `merged` is not notified separately.
+
+Queued runs do not occupy execution slots; slots go only to turns that are actually executing. There are two limits on slots: the global limit is set by `mc serve --chat-workers` (or the environment variable `MISSIONCREW_CHAT_MAX_WORKERS`, default 16); in addition, each role can set a "concurrency limit" in the role editor (field `max_concurrency`) that caps how many channels it executes in at the same time, counted for the same role across the project's channels; empty or 0 means no limit. Once a role reaches its limit, messages that mention it in other channels queue even if global slots are free; other roles are not affected. When a slot frees up, waiting channels are dispatched in the order of each channel's earliest queued message. A queued run's process card carries a status line saying what it is waiting for: the previous turn in this channel has not finished, the role has reached its concurrency limit, or all global slots are taken. Reports from Runtime self-wakes (a background command finishing, a built-in timer, and so on) are started by the CLI itself and are not subject to either limit.
 
 A channel-level stop ends all `queued`, `running`, and `waiting_user` chat runs in that channel at once, releases pending interactions, terminates the corresponding runtime processes, and leaves a visible platform message and an audit record. The platform keeps the persisted native session/thread IDs, so later runs can restart the process and try to resume the context; file writes that have already completed are not rolled back. Even when the database has no active run, calling the stop API again cleans up orphan processes based on the runtime session saved for the channel.
 
@@ -268,7 +273,9 @@ Do not output absolute `.missioncrew` paths, platform data directory paths, or `
 
 ### Web
 
-The unified Markdown component recognizes same-origin resource URLs and hands them to the app router. The router restores the project, the resource type, and the specific item; paths of documents and of files inside skills are decoded segment by segment. When the user switches between channels, tasks, dashboards, guidelines, skills, documents, or the recycle bin within the app, the address bar updates to the canonical resource URL in sync.
+The unified Markdown component recognizes same-origin resource URLs and hands them to the app router. The router restores the project, the resource type, and the specific item; paths of documents and of files inside skills are decoded segment by segment. When the user switches between channels, tasks, dashboards, guidelines, skills, documents, the recycle bin, or project settings within the app, the address bar updates to the canonical resource URL in sync.
+
+Pages without a resource URL (Global settings `/<project>/settings`, Runtime status `/<project>/runtime-status`) only have a page address. Such an address written in Markdown, or the old project settings address `/<project>/proj`, also opens as a page when clicked; it is treated as a document library path only when its first segment is not an existing project.
 
 The server returns the single-page app entry for resource addresses, and the frontend verifies whether the resource exists using overview/API data. When a resource has been deleted or its identifier is invalid, the frontend does not try to read a local path with the same name; instead it returns to a valid page of that resource type or shows that the resource was not found.
 

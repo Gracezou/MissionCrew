@@ -39,6 +39,24 @@ _THINKING_LEVELS = {"fake/base": ["low", "high", "max"],
                     "fake/pro": ["on", "high"]}
 
 
+def thought(text):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "sessionId": "s-test",
+        "update": {"sessionUpdate": "agent_thought_chunk",
+                   "content": {"type": "text", "text": text}}}})
+
+
+def call(rid, method, params):
+    """反向请求客户端并读到对应应答(期间不会有其他客户端消息)。"""
+    send({"jsonrpc": "2.0", "id": rid, "method": method,
+          "params": {"sessionId": "s-test", **params}})
+    for line in sys.stdin:
+        resp = json.loads(line.strip())
+        if resp.get("id") == rid:
+            return resp.get("result") or {}
+    return {}
+
+
 def _config_options(model, thinking):
     model = model or "fake/base"
     return [{
@@ -121,6 +139,7 @@ def main():
     session_dirs = None
     prompt_count = 0
     pending_terminal = ""
+    report_count = 0
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -144,6 +163,26 @@ def main():
                   "params": {"sessionId": "s-test",
                              "terminalId": pending_terminal}})
             pending_terminal = ""
+            if shape.startswith("silent-wake"):
+                # 模拟 kimi:自发的一轮只向客户端发终端请求,不推送任何
+                # session/update,正文只留在它自己的会话记录里
+                terminal = call(905, "terminal/create", {
+                    "command": "true"})["terminalId"]
+                call(906, "terminal/wait_for_exit", {"terminalId": terminal})
+                call(908, "terminal/release", {"terminalId": terminal})
+                continue
+            if shape == "terminal-token":
+                # 模拟 Grok 自发的一轮里先思考、再起前台命令读令牌文件:
+                # 命令执行时平台必须已经签发令牌
+                thought("后台命令结束,读取令牌后汇报")
+                terminal = call(905, "terminal/create", {
+                    "command": "cat", "args": ["token.txt"]})["terminalId"]
+                call(906, "terminal/wait_for_exit", {"terminalId": terminal})
+                token = call(907, "terminal/output",
+                             {"terminalId": terminal})["output"].strip()
+                call(908, "terminal/release", {"terminalId": terminal})
+                chunk(f"自发汇报:令牌={token or '缺失'}")
+                continue
             chunk(f"自发汇报:后台命令完成 exit={exit_code}"
                   f" 输出={output.strip()}")
             continue
@@ -228,7 +267,22 @@ def main():
             if shape == "slow":
                 time.sleep(1)
             text = msg["params"]["prompt"][0]["text"]
-            if shape == "terminal":
+            if shape.startswith("silent-wake") and text.startswith(
+                    "MissionCrew wake report"):
+                # 平台补发的汇报 prompt。kimi 空闲时正常流式回复;还在自发
+                # turn 里时立刻应答空的 end_turn(busy 形态的第一次、mute
+                # 形态的每一次)
+                report_count += 1
+                busy = (shape == "silent-wake-mute"
+                        or (shape == "silent-wake-busy" and report_count == 1))
+                if not busy:
+                    thought("回顾自发的一轮")
+                    chunk(f"补发汇报:后台命令已完成(第 {report_count} 次请求)")
+                send({"jsonrpc": "2.0", "id": mid,
+                      "result": {"stopReason": "end_turn"}})
+                continue
+            if shape in ("terminal", "terminal-token") or shape.startswith(
+                    "silent-wake"):
                 # 模拟 Grok:后台命令交给客户端终端,turn 立即结束;终端退出
                 # 后(上方 mid==902 分支)在 turn 之外自发汇报
                 send({"jsonrpc": "2.0", "id": 901, "method": "terminal/create",

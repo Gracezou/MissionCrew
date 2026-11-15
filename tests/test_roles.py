@@ -108,6 +108,11 @@ def test_role_crud_api(client):
     assert roles["writer"]["description"] == "自由文本人格"
     assert roles["writer"]["enabled"] is True
     assert roles["writer"]["usage_linkage_enabled"] is False
+    assert roles["writer"]["max_concurrency"] == 0          # 默认不限
+    assert client.post("/api/roles", json={**body, "max_concurrency": 3}).status_code == 200
+    assert client.post("/api/roles", json={**body, "max_concurrency": -1}).status_code == 422
+    roles = {r["id"]: r for r in client.get("/api/roles").json()}
+    assert roles["writer"]["max_concurrency"] == 3
     assert client.delete("/api/roles/writer?project_id=webshop").status_code == 200
     assert "writer" not in {r["id"] for r in client.get("/api/roles").json()}
 
@@ -958,7 +963,9 @@ def test_automation_ui_uses_sidebar_and_full_detail_view(client):
     assert 'openFormDialog(automation ? `编辑脚本' not in automations
     assert '<textarea id="af-desc" class="automation-description-input"' in automations
     assert "crontab(五段;留空 = 不定时)" in automations
-    assert 'id="af-webhook"' in automations   # 定时与 webhook 两种触发可同时开启
+    # 定时与 webhook 两种触发可同时开启;webhook 选择全局来源,不在脚本里管密钥
+    assert 'id="af-webhook-source"' in automations
+    assert "/webhook/secret" not in automations
     assert 'class="automation-trigger-editor"' in automations
     assert automations.index('class="automation-trigger-editor"') > automations.index("<h3>配置</h3>")
     assert all(label in automations for label in
@@ -1684,6 +1691,7 @@ const context = {
   projObj: () => ({ orchestrator_role_id: "dev" }),
   traitMeta: { abilities: { coding: "代码执行", web_search: "联网检索" } },
   roleDisabledReason: () => "",
+  roleConcurrencyPill: () => "",
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(markdownJs, "utf8"), context);

@@ -20,11 +20,14 @@ from typing import Callable, Optional
 
 from .agent_tools import (AUTOMATION_ACTIONS, AgentActionService,
                           CONTROL_ID_RE, default_agent_tool_url)
+from .credentials import write_credential_context
+from .github import github_env
+from .github_events import (check_source_repo_limit, normalize_event_names,
+                            normalize_repos)
 from ..core.config import mc_home
 from ..core.cron import next_cron_time, validate_cron
 from ..core.models import Automation
 from ..core.store import Store
-from .webhooks import new_webhook_secret
 
 # 单次运行 stdout/stderr 各自的持久化上限;超出部分保留尾部(更接近失败现场)
 AUTOMATION_OUTPUT_LIMIT = 20000
@@ -56,12 +59,19 @@ def save_automation(store: Store, project_id: str, *, id: str,
                     script: Optional[str] = None,
                     cron: Optional[str] = None,
                     enabled: Optional[bool] = None,
-                    webhook: Optional[bool] = None,
+                    webhook_source: Optional[str] = None,
+                    github_repos: Optional[list] = None,
+                    github_events: Optional[list] = None,
                     actions: Optional[list] = None,
                     timeout_seconds: Optional[int] = None,
                     actor: str = "human",
                     created_by_role_id: str = "") -> tuple[Automation, bool]:
-    """新建或按字段合并更新自动化脚本;返回 (automation, 是否新建)。"""
+    """新建或按字段合并更新自动化脚本;返回 (automation, 是否新建)。
+
+    github_repos / github_events 只在订阅 GitHub 轮询来源时有意义:脚本声明要哪些
+    仓库的哪些事件,平台据此轮询并只把这些事件交给它。改订别的来源或取消 webhook
+    触发时两者自动清空。
+    """
     if store.get_project(project_id) is None:
         raise ValueError("项目不存在")
     full_id = normalize_automation_id(project_id, id)
@@ -92,13 +102,28 @@ def save_automation(store: Store, project_id: str, *, id: str,
         if not isinstance(enabled, bool):
             raise ValueError("enabled 必须是布尔值")
         automation.enabled = enabled
-    if webhook is not None:
-        if not isinstance(webhook, bool):
-            raise ValueError("webhook 必须是布尔值")
-        automation.webhook = webhook
-        # 首次开启时生成密钥;关闭后保留,重新开启时外部系统的配置仍然有效
-        if webhook and not automation.webhook_secret:
-            automation.webhook_secret = new_webhook_secret()
+    if webhook_source is not None:
+        if not isinstance(webhook_source, str):
+            raise ValueError("webhook_source 必须是来源 id 字符串")
+        source_id = webhook_source.strip()
+        # 只能订阅已有来源;来源由人在全局设置里创建(带地址与密钥)
+        if source_id and store.get_webhook_source(source_id) is None:
+            raise ValueError(f"webhook 来源不存在: {source_id}")
+        automation.webhook_source = source_id
+    if github_repos is not None:
+        automation.github_repos = normalize_repos(github_repos)
+    if github_events is not None:
+        automation.github_events = normalize_event_names(github_events)
+    source = (store.get_webhook_source(automation.webhook_source)
+              if automation.webhook_source else None)
+    if source is not None and source.kind == "github":
+        check_source_repo_limit(store, automation)
+    else:
+        # 这次明确给了仓库或事件,订阅的却不是 GitHub 轮询来源:多半是填错了来源
+        if github_repos or github_events:
+            raise ValueError("github_repos / github_events 只在 webhook_source 是 "
+                             "GitHub 轮询来源时有效")
+        automation.github_repos, automation.github_events = [], []
     if actions is not None:
         if (not isinstance(actions, list)
                 or not all(isinstance(item, str) for item in actions)):
@@ -117,18 +142,11 @@ def save_automation(store: Store, project_id: str, *, id: str,
     store.audit(actor, "automation_saved",
                 detail=f"project={project_id} automation={automation.id} "
                        f"cron={automation.cron or '(manual)'} "
-                       f"enabled={automation.enabled} webhook={automation.webhook}")
+                       f"enabled={automation.enabled} "
+                       f"webhook_source={automation.webhook_source or '(none)'}"
+                       + (f" github_repos={','.join(automation.github_repos)}"
+                          if automation.github_repos else ""))
     return automation, created
-
-
-def rotate_webhook_secret(store: Store, automation: Automation,
-                          actor: str = "human") -> Automation:
-    """换一个新密钥;外部系统要同步改成新值,旧密钥签名的投递随即被拒。"""
-    automation.webhook_secret = new_webhook_secret()
-    store.put_automation(automation)
-    store.audit(actor, "automation_webhook_secret_rotated",
-                detail=f"project={automation.project_id} automation={automation.id}")
-    return automation
 
 
 def delete_automation(store: Store, agent_tools: AgentActionService,
@@ -206,13 +224,22 @@ class AutomationService:
                 self._running.discard(automation.id)
             raise
 
+    def webhook_room(self, automation_id: str) -> int:
+        """该脚本的 webhook 排队还能再放几条。轮询来源据此控制一次交出多少事件:
+        排不下的留到下一轮再取,不像外部投递那样只能丢弃。"""
+        with self._guard:
+            return max(0, WEBHOOK_QUEUE_LIMIT - len(self._pending.get(automation_id, ())))
+
     def _launch(self, automation: Automation, trigger: str,
                 event: Optional[dict]) -> int:
         """建运行记录并提交执行;调用方已把脚本登记为运行中。"""
         detail = ""
         if event is not None:
+            # 例:"github-org: github issues <投递 id>";来源在前,区分共用来源的投递
             detail = " ".join(part for part in (
                 event.get("provider"), event.get("event"), event.get("delivery")) if part)
+            if event.get("source"):
+                detail = f"{event['source']}: {detail}".rstrip()
         run_id = self.store.start_automation_run(
             automation.id, automation.project_id, trigger, detail)
         self.store.touch_automation_run_state(automation.id, "running")
@@ -260,12 +287,16 @@ class AutomationService:
                 if event is None:
                     self._running.discard(automation_id)
                     return
-            # 排队期间脚本可能被改、关掉 webhook 或删除:按最新定义决定
+            # 排队期间脚本可能被改、改选其他来源或删除,来源也可能被停用:按最新定义决定
             automation = self.store.get_automation(automation_id)
+            source_id = str(event.get("source") or "")
+            source = self.store.get_webhook_source(source_id)
             if automation is None:
                 reason = "脚本已删除"
-            elif not automation.webhook:
-                reason = "webhook 已关闭"
+            elif automation.webhook_source != source_id:
+                reason = "脚本已不再订阅该 webhook 来源"
+            elif source is None or not source.enabled:
+                reason = "webhook 来源已删除或停用"
             else:
                 try:
                     self._launch(automation, "webhook", event)
@@ -299,6 +330,7 @@ class AutomationService:
         token_file.write_text(token + "\n", encoding="utf-8")
         token_file.chmod(0o600)
 
+        credentials_dir = write_credential_context(self.store, automation.project_id)
         env = dict(os.environ)
         env.update({
             "MISSIONCREW_AGENT_TOOL_URL": default_agent_tool_url(),
@@ -307,13 +339,19 @@ class AutomationService:
             "MISSIONCREW_PROJECT_ID": automation.project_id,
             "MISSIONCREW_AUTOMATION_ID": automation.id,
             "MISSIONCREW_TRIGGER": trigger,
+            # 与聊天角色读同一个项目凭据目录;输出落库前同样脱敏
+            "MISSIONCREW_CREDENTIALS_DIR": str(credentials_dir),
         })
-        for key in ("MISSIONCREW_WEBHOOK_EVENT_FILE", "MISSIONCREW_WEBHOOK_PROVIDER",
-                    "MISSIONCREW_WEBHOOK_EVENT", "MISSIONCREW_WEBHOOK_DELIVERY"):
+        # 项目有 GitHub 身份(GITHUB 环境的 TOKEN)时,脚本里的 gh 与 git 直接是这个身份
+        env.update(github_env(automation.project_id, credentials_dir))
+        for key in ("MISSIONCREW_WEBHOOK_EVENT_FILE", "MISSIONCREW_WEBHOOK_SOURCE",
+                    "MISSIONCREW_WEBHOOK_PROVIDER", "MISSIONCREW_WEBHOOK_EVENT",
+                    "MISSIONCREW_WEBHOOK_DELIVERY"):
             env.pop(key, None)
         if event is not None:
             env.update({
                 "MISSIONCREW_WEBHOOK_EVENT_FILE": str(event_file),
+                "MISSIONCREW_WEBHOOK_SOURCE": str(event.get("source") or ""),
                 "MISSIONCREW_WEBHOOK_PROVIDER": str(event.get("provider") or ""),
                 "MISSIONCREW_WEBHOOK_EVENT": str(event.get("event") or ""),
                 "MISSIONCREW_WEBHOOK_DELIVERY": str(event.get("delivery") or ""),

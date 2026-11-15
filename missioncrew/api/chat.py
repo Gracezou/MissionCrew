@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 
 from ..collab import channels as channel_ops
+from ..collab.callbacks import public_callback
 from ..collab.content_channels import (CONTENT_KIND_LABELS,
                                        content_channel as find_content_channel,
                                        ensure_content_channel)
@@ -21,6 +24,15 @@ from .schemas import (ChannelCreate, ChannelUpdate, ContentChannelInput, Message
                       RuntimeInteractionInput)
 
 LIST_SCOPES = {"active", "archived", "all"}
+# 通知增量的最长补报窗口:页面挂起/休眠很久后回来,只补最近这段,不把积压一次弹出
+COMPLETION_LOOKBACK_SECONDS = 3600
+COMPLETION_TEXT_MAX = 160
+
+
+def _notice_text(text: str) -> str:
+    """把 Markdown 回复压成通知里放得下的一行纯文本。"""
+    plain = " ".join(re.sub(r"`+|\*\*", "", text or "").split())
+    return plain if len(plain) <= COMPLETION_TEXT_MAX else plain[:COMPLETION_TEXT_MAX] + "…"
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -55,9 +67,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             channels = [c for c in channels
                         if c.archived == (scope == "archived")]
         active_run_counts = store.active_chat_run_counts()
+        callback_counts = store.pending_chat_callback_counts()
         return etag_json_response(request, {
             "channels": [{**channel_data(c),
-                          "active_run_count": active_run_counts.get(c.id, 0)}
+                          "active_run_count": active_run_counts.get(c.id, 0),
+                          "pending_callback_count": callback_counts.get(c.id, 0)}
                          for c in channels],
             "counts": counts,
         })
@@ -201,6 +215,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "channel": channel_data(channel),
             "messages": items,
             "active_runs": store.active_chat_runs(channel_id),
+            # 本频道角色登记、仍在等待的回调:频道头显示并可取消
+            "callbacks": [public_callback(row) for row in
+                          store.list_chat_callbacks(channel=channel_id, status="pending")],
             # 最近执行记录(含已结束):前端按 events_size 变化拉取过程事件
             "runs": store.chat_runs_for_channel(channel_id),
         }
@@ -210,6 +227,37 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             payload["has_earlier"] = bool(
                 earliest and store.recent_messages(channel_id, 1, before_id=earliest))
         return payload
+
+    @app.get("/api/chat/runs/completions")
+    def run_completions(since: float | None = None):
+        """浏览器"任务结束"通知的增量源:``(since, now]`` 内整条结束的协作链。
+
+        游标一律是服务端时间(响应的 ``now``),不受浏览器时钟偏差影响;首次调用
+        不带 since 只领游标,不把历史运行当成新通知。项目开关是浏览器本地偏好,
+        由前端过滤。
+        """
+        now = time.time()
+        if since is None:
+            return {"now": now, "completions": []}
+        completions = []
+        for chain in store.finished_chat_chains(
+                max(since, now - COMPLETION_LOOKBACK_SECONDS), now):
+            channel = store.get_channel(chain["channel"])
+            project = store.get_project(channel.project_id or "") if channel else None
+            if project is None:
+                continue
+            reply = store.last_chain_reply(channel.id, chain["root_id"])
+            completions.append({
+                **chain,
+                "error": _notice_text(chain["error"]),
+                "project_id": project.id, "project_name": project.name or project.id,
+                "channel_name": channel.name or channel.id,
+                "reply": ({"author": reply["author"],
+                           "content": _notice_text(reply["content"])}
+                          if reply else None),
+                "resource_url": channel_resource_url(project.id, channel.id),
+            })
+        return {"now": now, "completions": completions}
 
     @app.get("/api/chat/runs/{run_id}/events")
     def run_events(run_id: int):
@@ -283,6 +331,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"path": str(path)}
+
+    @app.post("/api/chat/callbacks/{callback_id}/cancel")
+    def cancel_callback(callback_id: int):
+        row = store.get_chat_callback(callback_id)
+        if row is None:
+            raise HTTPException(404, "回调不存在")
+        if not chat.callbacks.cancel(callback_id, "human", "用户在页面取消"):
+            raise HTTPException(409, f"回调 #{callback_id} 已结束")
+        return {"ok": True, "callback": public_callback(store.get_chat_callback(callback_id))}
 
     @app.delete("/api/chat/channels/{channel_id}")
     def delete_channel(channel_id: str):

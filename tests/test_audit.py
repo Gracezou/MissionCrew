@@ -88,6 +88,19 @@ def test_audit_keeps_credential_placeholders_intact(seeded):
     assert row["detail"] == "token=[credential:GITHUB.TOKEN]"
 
 
+def test_audit_redaction_masks_sensitive_values_inside_brackets():
+    from missioncrew.api.context import redact_audit_detail
+
+    details = ["[token=abc12345 x]", "[password: hunter22]",
+               "[api_key=sk-12345678]"]
+    redacted = [redact_audit_detail(item) for item in details]
+    assert all(secret not in text for secret, text in zip(
+        ("abc12345", "hunter22", "sk-12345678"), redacted))
+    assert all("[已隐藏]" in item for item in redacted)
+    assert redact_audit_detail("token=[credential:GITHUB.TOKEN]") == \
+        "token=[credential:GITHUB.TOKEN]"
+
+
 def test_task_detail_redacts_audit_but_cli_store_keeps_original(seeded):
     from missioncrew.core.models import Task
 

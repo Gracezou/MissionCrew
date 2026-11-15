@@ -23,9 +23,7 @@ function channelSidebarItem(channel, topic = "") {
   const workspaceBadge = workspace ? `<span class="channel-state" title="受管 worktree · ${esc(workspace.branch)} · ${
     workspace.merged ? "已合并" : `领先 ${Number(workspace.commits_ahead || 0)} 个提交`}${
     workspace.missing ? " · 目录缺失" : ""}">工作树</span>` : "";
-  const runMarker = channelMarkersHtml(
-    `data-channel-id="${esc(channel.id)}"`, channelRunningCount(channel));
-const runMarker = channelMarkersHtml(`data-channel-id="${esc(channel.id)}"`,
+  const runMarker = channelMarkersHtml(`data-channel-id="${esc(channel.id)}"`,
     channelRunningCount(channel), channelCallbackCount(channel));
   const actions = !editable && general ? "" : `<span class="channel-item-actions">
     <button class="channel-more" type="button" aria-label="频道操作" title="频道操作"

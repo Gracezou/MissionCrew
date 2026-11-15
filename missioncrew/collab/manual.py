@@ -554,8 +554,10 @@ An orchestrator's turn:
   `jq -e '.payload.number == 12'`. Any other exit code or running longer than 10 seconds
   counts as an error and the event is ignored. The script can only decide: it runs without an
   Agent Tool token, credentials or network, so do the actual work in the callback run, not in
-  the filter. Look at real events first with `webhook.history`; `callback.create` tries the
-  filter once and returns the outcome as `filter_check`, and `callback.list` shows how many
+  the filter. A filter is accepted only when bubblewrap is available; without it, register the
+  callback without a filter. Look at real events first with `webhook.history`;
+  `callback.create` tries the filter once and returns the outcome as `filter_check`, and
+  `callback.list` shows how many
   events were checked and the last filter error.
 - `note` is repeated in the callback message, so make it self-contained: the task, branch or
   document, and the next step. The callback run is a normal run with its own Agent Tool token;

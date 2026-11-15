@@ -710,7 +710,9 @@ ACTION_DEFINITIONS = {
                        "MISSIONCREW_WEBHOOK_EVENT_FILE, the same file an automation script "
                        "reads; exit 0 = match, 1 = ignore, anything else counts as an error "
                        "and is ignored. It can only decide: it has no Agent Tool token, no "
-                       "credentials and no network. Example: "
+                       "credentials and no network. It is accepted only when bubblewrap is "
+                       "available; without it callback.create rejects filters, while a callback "
+                       "without a filter remains available. Example: "
                        "jq -e '.payload.number == 12 and .payload.action == \"merged\"'"),
         },
     },

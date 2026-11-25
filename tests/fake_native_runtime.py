@@ -77,7 +77,7 @@ def run_codex() -> None:
                 send({"id": request_id,
                       "error": {"code": -32000, "message": "thread not found"}})
             else:
-                thread_id = str(requested)
+                thread_id = ("other-thread" if requested == "replaced-thread" else str(requested))
                 send({"id": request_id, "result": {"thread": {"id": thread_id}}})
         elif method == "model/list":
             send({"id": request_id, "result": {
@@ -222,6 +222,8 @@ def run_claude() -> None:
     if "--resume" in args:
         session_id = args[args.index("--resume") + 1]
     missing_session = session_id == "missing-session"
+    if session_id == "replaced-session":
+        session_id = "other-session"
     stale_replay = session_id == "stale-replay-session"
     init = {"type": "system", "subtype": "init", "session_id": session_id,
             "model": "claude-test", "cwd": os.getcwd()}

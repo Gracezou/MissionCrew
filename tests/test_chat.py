@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from missioncrew.api import create_app
 from missioncrew.collab.agent_tools import DispatchInactiveError
 from missioncrew.collab.chat import ChatEngine
 from missioncrew.collab.documents import library_for
+from missioncrew.collab.workspace import chat_workspace_dir
 from missioncrew.core.models import (Backend, Channel, DEFAULT_MAX_CHAIN_RUNS,
                                      Project, RunResult)
 from missioncrew.runtime import adapters, runtime_manager
@@ -1296,6 +1298,47 @@ def test_channel_history_file_is_complete_and_role_scoped(chat, seeded):
     refreshed = json.loads(lead_path.read_text(encoding="utf-8"))
     assert refreshed["message_count"] == 207
     assert refreshed["messages"][-1]["content"] == "补充一条历史记录"
+
+
+@pytest.mark.parametrize("orchestrator", ["lead", ""])
+def test_channel_history_uses_one_roster_for_all_views(chat, seeded, orchestrator):
+    channel = seeded.get_channel("general")
+    project = seeded.get_project(channel.project_id)
+    project.orchestrator_role_id = orchestrator
+    seeded.put_project(project)
+    hidden = seeded.get_role(project.id, "expert")
+    hidden.manual_only = True
+    seeded.put_role(hidden)
+    worker = seeded.get_role(project.id, "dev")
+    lead_dir = chat_workspace_dir(project.id, channel.id, "lead")
+    lead_dir.mkdir(parents=True)
+    seeded.add_message(channel.id, "expert", "agent", "已通知 @reviewer", ["reviewer"])
+    seeded.add_message(channel.id, "reviewer", "agent", "已告知 @expert", ["expert"])
+
+    def messages(path):
+        return json.loads(path.read_text(encoding="utf-8"))["messages"]
+
+    with patch.object(seeded, "list_roles", wraps=seeded.list_roles) as roster:
+        worker_path = chat._write_channel_history(channel, worker, project)
+        roster.assert_called_once_with(project.id)
+        worker_records = messages(worker_path)
+        assert worker_records[0]["author"]["id"] == "executor"
+        assert worker_records[1]["author"]["id"] == ("executor" if orchestrator else "reviewer")
+        assert worker_records[1]["content"] == "已告知 [other executor]"
+
+        roster.reset_mock()
+        canonical = chat._write_channel_history(channel)
+        roster.assert_called_once_with(project.id)
+        assert messages(worker_path) == worker_records
+        assert messages(lead_dir / "channel-history.json")[0]["author"]["id"] == "executor"
+        assert messages(canonical)[0]["author"]["id"] == "expert"
+        assert messages(canonical)[1]["content"] == "已告知 @expert"
+
+        roster.reset_mock()
+        unscoped = Channel(id="unscoped")
+        seeded.add_message(unscoped.id, "expert", "agent", "已通知 @reviewer", ["reviewer"])
+        assert messages(chat._write_channel_history(unscoped))[0]["author"]["id"] == "expert"
+        roster.assert_not_called()
 
 
 def test_lead_dispatcher_role_seeded(seeded):

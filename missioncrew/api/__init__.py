@@ -31,6 +31,8 @@ def create_app(webhook_host: Optional[str] = None,
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         from ..runtime import runtime_manager
+        # fork-divergence: 在接收请求或启动自动化前收口遗留 Run；续跑须另行确认。
+        ctx.store.reconcile_chat_runs()
         runtime_manager.set_usage_refresh_handler(
             ctx.role_usage_linkage.request_refresh)
         runtime_manager.start_idle_reaper()

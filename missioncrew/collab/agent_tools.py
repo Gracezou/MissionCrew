@@ -289,12 +289,15 @@ ACTION_DEFINITIONS = {
     "channel.runs.list": {
         "description": (
             "On demand, list queued/running/waiting_user role runs in a channel (the current "
-            "channel by default; pass channel for another project channel); run status is not "
-            "preloaded into the chat context"
+            "channel by default; pass channel for another project channel), or use "
+            "status=interrupted to inspect runs interrupted by a service restart"
         ),
         "orchestrator_only": True,
         "automation_allowed": False,
-        "arguments": {"channel": "short channel id within the project; defaults to the current channel"},
+        "arguments": {
+            "channel": "short channel id within the project; defaults to the current channel",
+            "status": "active (default) or interrupted",
+        },
     },
     "channel.run.stop": {
         "description": ("Stop the given active role run in the current channel; query it first "
@@ -302,6 +305,15 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": True,
         "automation_allowed": False,
         "arguments": {"run_id": "positive integer run id returned by channel.runs.list"},
+    },
+    "channel.run.recover": {
+        "description": (
+            "Explicitly continue an interrupted run in this project after reviewing its progress. "
+            "Repeated calls return the same continuation run."
+        ),
+        "orchestrator_only": True,
+        "automation_allowed": False,
+        "arguments": {"run_id": "positive integer interrupted run id from channel.runs.list"},
     },
     "channel.history": {
         "description": (
@@ -688,8 +700,9 @@ ACTION_ARGUMENTS = {
     "document.delete": {"path"},
     "document.history": {"path", "revision", "limit"},
     "message.publish": {"channel", "content", "mentions"},
-    "channel.runs.list": {"channel"},
+    "channel.runs.list": {"channel", "status"},
     "channel.run.stop": {"run_id"},
+    "channel.run.recover": {"run_id"},
     "channel.history": {"channel", "limit", "before_id"},
     "channel.list": {"scope"},
     "channel.create": {"id", "name", "purpose", "workdir"},
@@ -749,10 +762,12 @@ class AgentActionService:
     def __init__(self, store: Store, post_message: Callable[..., int],
                  stop_run: Callable[..., dict],
                  history_records: Optional[Callable[..., list[dict]]] = None,
-                 stop_channel_sessions: Optional[Callable[[str], int]] = None):
+                 stop_channel_sessions: Optional[Callable[[str], int]] = None,
+                 recover_run: Optional[Callable[..., dict]] = None):
         self.store = store
         self._post_message = post_message
         self._stop_run = stop_run
+        self._recover_run = recover_run
         # (channel, role_id, limit, before_id) -> 与 channel-history.json 同构的
         # 消息记录;由聊天引擎提供,保证脱敏口径与工作区历史文件一致
         self._history_records = history_records
@@ -784,7 +799,8 @@ class AgentActionService:
         is_orchestrator = project.controls_platform(role_id)
         return [
             name for name, definition in ACTION_DEFINITIONS.items()
-            if is_orchestrator or not definition["orchestrator_only"]
+            if (is_orchestrator or not definition["orchestrator_only"])
+            and (name != "channel.run.recover" or project.can_dispatch(role_id))
         ]
 
     def ensure_token_file(self, project: Project, channel: Channel, role_id: str,
@@ -1097,6 +1113,8 @@ class AgentActionService:
                 return
             receipt_context["channel"] = target
             receipt_context["message_id"] = int(result.get("message_id") or 0)
+        elif action == "channel.run.recover" and not result["created"]:
+            return
         elif action not in CONVERSATION_RECEIPT_ACTIONS:
             return
         summary = str(result.get("summary") or f"已完成 {action}")
@@ -1174,6 +1192,7 @@ class AgentActionService:
             "message.publish": self._publish_message,
             "channel.runs.list": self._list_channel_runs,
             "channel.run.stop": self._stop_channel_run,
+            "channel.run.recover": self._recover_channel_run,
             "channel.history": self._channel_history,
             "channel.list": self._list_channels,
             "channel.create": self._create_channel,
@@ -1272,17 +1291,24 @@ class AgentActionService:
 
     def _list_channel_runs(self, project: Project, identity: AgentIdentity,
                            arguments: dict, context: AgentRunContext) -> dict:
-        """只在显式调用时返回频道的活动 Run 快照;默认当前频道,可指定项目内
-        其他频道以核对派发是否已开工。停止仍只对当前频道的运行开放。"""
+        """按频道显式查询活动或中断 Run，默认保持活动运行快照的格式。"""
         self._require_chat_identity(identity)
         channel = self._project_channel(
             project, arguments.get("channel", ""), identity.channel_id)
         is_current_channel = channel.id == identity.channel_id
         runs = []
-        for row in self.store.active_chat_runs(channel.id):
+        status = arguments.get("status", "active")
+        if status not in ("active", "interrupted"):
+            raise AgentToolError("invalid_arguments", "status 必须是 active 或 interrupted")
+        interrupted = status == "interrupted"
+        rows = (self.store.interrupted_chat_runs(channel.id) if interrupted else
+                self.store.active_chat_runs(channel.id))
+        for row in rows:
             role = self.store.get_role(project.id, str(row["role_id"]))
+            if interrupted and role and role.manual_only and role.id != identity.role_id:
+                continue
             run_id = int(row["id"])
-            runs.append({
+            item = {
                 "run_id": run_id,
                 "role_id": str(row["role_id"]),
                 "role_name": role.name if role is not None else "",
@@ -1292,11 +1318,16 @@ class AgentActionService:
                 "effort": str(row.get("effort") or ""),
                 "created_at": float(row["created_at"]),
                 "is_current_run": run_id == context.run_id,
-                "stoppable": is_current_channel and run_id != context.run_id,
-            })
+                "stoppable": not interrupted and is_current_channel and run_id != context.run_id,
+            }
+            if interrupted:
+                item["recovery_run_id"] = row["recovery_run_id"]
+                item["trigger_message_id"] = row["trigger_message_id"]
+            runs.append(item)
         where = "当前 Channel" if is_current_channel else f"频道 #{channel.name}"
+        label = "中断" if interrupted else "活动"
         return {
-            "summary": f"{where}有 {len(runs)} 个活动角色运行",
+            "summary": f"{where}有 {len(runs)} 个{label}角色运行",
             "channel_id": channel.id,
             "is_current_channel": is_current_channel,
             "runs": runs,
@@ -1362,6 +1393,27 @@ class AgentActionService:
             f"已停止当前 Channel 中 @{result['role_id']} 的运行 {run_id}")
         result["run_id"] = run_id
         return result
+
+    def _recover_channel_run(self, project: Project, identity: AgentIdentity,
+                             arguments: dict, context: AgentRunContext) -> dict:
+        self._require_chat_identity(identity)
+        run_id = arguments.get("run_id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+            raise AgentToolError("invalid_arguments", "run_id 必须是正整数")
+        target = self.store.get_chat_run(run_id)
+        channel = self.store.get_channel(target["channel"]) if target else None
+        if (not target or not channel or channel.project_id != project.id
+                or (self._is_manual_only(project, target["role_id"])
+                    and not project.can_dispatch(target["role_id"]))):
+            raise AgentToolError("run_not_found", "本项目中不存在可见的指定 Run", 404)
+        if self._recover_run is None:
+            raise AgentToolError("unsupported_action", "当前部署不支持恢复运行", 501)
+        try:
+            result = self._recover_run(run_id, actor=identity.actor, origin_run_id=context.run_id)
+        except ValueError as exc:
+            raise AgentToolError("recovery_unavailable", str(exc), 409) from exc
+        verb = "已创建" if result["created"] else "已有"
+        return {**result, "summary": f"运行 {run_id} {verb}关联恢复运行 {result['run_id']}"}
 
     def _create_task(self, project: Project, identity: AgentIdentity,
                      arguments: dict, _context: AgentRunContext) -> dict:

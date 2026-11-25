@@ -255,6 +255,9 @@ class _CodexSession:
                     {"threadId": resume_id, **self._thread_params(config)},
                     timeout=30,
                 )
+                if (config.require_session_resume
+                        and (result.get("thread") or {}).get("id") != resume_id):
+                    raise RuntimeProtocolError("thread/resume 未返回指定的 thread")
             except Exception as exc:
                 adapters._clear_session(config)
                 self.thread_id = ""
@@ -278,7 +281,8 @@ class _CodexSession:
         with self._run_lock:
             if config.cancellation_requested():
                 return RunResult(False, "执行已停止")
-            adapters._refresh_session(config)
+            if failure := adapters._refresh_session(config, self.thread_id):
+                return failure
             if self.thread_id and not config.session_id:
                 # 持久记录已被显式清理，不继续使用仅存在内存中的旧 thread。
                 self.close()

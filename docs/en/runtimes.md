@@ -88,6 +88,14 @@ The "使用历史" (Usage History) section further down the page comes from a se
 
 `ExecutionConfig`, `RuntimeInstance`, and `runtime_usage` all carry both `project_id` and `role_id`. The global runtime overview therefore aggregates the project and role that current instances belong to, and the instance and history tables show both fields directly; for non-project calls both may be empty.
 
+### Continuing a chat run after a service restart
+
+At startup the service checks who owns each active chat run. A `queued`, `running` or `waiting_user` run left by an exited process becomes `interrupted`. Outstanding questions and approvals close with the run. The original trigger, events and files already written remain available. Startup reconciliation does not start an agent.
+
+Humans can open an interrupted run card in its channel to inspect the original trigger, the last event and whether a saved native session is available. After checking completed work, they can confirm recovery. The preview uses `GET /api/chat/runs/{run_id}/recovery` and confirmation uses `POST /api/chat/runs/{run_id}/recover`. The project orchestrator can perform the same operation with Agent Tool. The old run keeps its interrupted status. The new run starts in the original channel and references the old run through `recovered_from_run_id`. Repeated or concurrent confirmations return the same continuation ID. An archived channel, a cleared context boundary after the run, or a disabled role prevents creation of a continuation. [Agent Tool permissions and usage](agent-tool-api.md)
+
+A continuation receives a new instruction to inspect channel history and the work already on disk before proceeding with what remains. When a compatible native session handle is available, the runtime attempts to resume it. A rejected resume appears as a failure on the new run. Without a compatible handle, the new session uses recent channel history and the recovery instruction. The original trigger remains available for reference. The platform does not replay it or reuse pending approvals.
+
 ## Integration Technology
 
 ### Per-Runtime Session Reuse Matrix

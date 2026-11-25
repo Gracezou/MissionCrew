@@ -666,6 +666,52 @@ def test_acp_without_load_capability_starts_recovery_session(tmp_path):
         acp.close_sessions()
 
 
+@pytest.mark.parametrize("shape,error", [
+    ("noload", "不支持 session/load"), ("load_replay_error", "load failed after partial replay"),
+    ("ok", "返回了不同的会话 id"),
+])
+def test_acp_explicit_resume_never_opens_a_replacement_or_prompts(tmp_path, monkeypatch, shape, error):
+    saved = {"id": "interrupted-session", "context": "v1"}
+    methods = []
+    original = acp._AcpClient.request
+
+    def request(self, method, *args, **kwargs):
+        methods.append(method)
+        response = original(self, method, *args, **kwargs)
+        if shape == "ok" and method == "session/load":
+            response["sessionId"] = "a-different-session"
+        return response
+
+    monkeypatch.setattr(acp._AcpClient, "request", request)
+    config = _chat_cfg(tmp_path, saved)
+    config.require_session_resume = True
+    try:
+        result = _adapter("kimi", shape).run(config)
+        assert not result.success and error in result.summary
+        assert "session/new" not in methods
+        assert "session/prompt" not in methods
+        assert saved["id"] == "interrupted-session"
+    finally:
+        acp.close_sessions()
+
+
+def test_acp_explicit_resume_checks_the_live_session(tmp_path):
+    saved = {}
+    adapter = _adapter("kimi")
+    try:
+        assert adapter.run(_chat_cfg(tmp_path, saved)).success
+        config = _chat_cfg(tmp_path, {"id": "other-session"})
+        config.require_session_resume = True
+        result = adapter.run(config)
+        assert not result.success and "不一致" in result.summary
+        config = _chat_cfg(tmp_path, saved)
+        config.require_session_resume = True
+        result = adapter.run(config)
+        assert result.success and "轮次=2;new=1;load=0" in result.output
+    finally:
+        acp.close_sessions()
+
+
 def test_client_terminal_methods_roundtrip(tmp_path):
     """terminal/* 全流程:创建、等待退出、读输出、释放、未知 id 报错。"""
     client = acp._AcpClient(["cat"], str(tmp_path), {}, timeout=5)

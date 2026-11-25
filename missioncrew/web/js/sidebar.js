@@ -770,6 +770,7 @@ async function pollMessages() {
     if ("has_earlier" in d) chanHasEarlier = Boolean(d.has_earlier);
     appendMessages(d.messages);
     syncRuns(d.runs || []);
+    syncEarlierInterruptedRuns(document.getElementById("msgs"), chan, d.earlier_interrupted_before);
     updateChatRunControls(d.active_runs || []);
     if (setChannelRunningCount(chan, (d.active_runs || []).length))
       refreshChannelRunningMarkers();

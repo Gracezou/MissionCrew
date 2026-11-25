@@ -4,10 +4,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
+from uuid import uuid4
 
 from .models import (Automation, Backend, Board, BoardDataSource, Channel,
                      Project, Resource, Role, Task, new_id, normalize_labels,
@@ -61,7 +64,9 @@ CREATE TABLE IF NOT EXISTS chat_runs (
   model TEXT DEFAULT '', effort TEXT DEFAULT '',
   trigger_message_id INTEGER NOT NULL, root_id INTEGER NOT NULL,
   depth INTEGER DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued',
-  error TEXT DEFAULT '', created_at REAL NOT NULL, finished_at REAL
+  error TEXT DEFAULT '', created_at REAL NOT NULL, finished_at REAL,
+  owner_pid INTEGER NOT NULL DEFAULT 0, owner_instance TEXT NOT NULL DEFAULT '',
+  recovered_from_run_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_key TEXT PRIMARY KEY,
@@ -121,6 +126,55 @@ CREATE INDEX IF NOT EXISTS idx_runtime_usage_started
 """
 
 
+_PROCESS_INSTANCE = uuid4().hex
+# 所有者标识只供启动对账使用，不随频道轮询和 Agent Tool 响应返回。
+_RUN_FIELDS = (
+    "r.id,r.channel,r.role_id,r.backend_id,r.model,r.effort,r.trigger_message_id,"
+    "r.root_id,r.depth,r.status,r.error,r.created_at,r.finished_at,r.recovered_from_run_id"
+)
+_RECOVERY_RUN_ID = (
+    "(SELECT child.id FROM chat_runs child WHERE child.recovered_from_run_id=r.id)"
+)
+
+
+def _process_state(pid: int) -> tuple[str, str]:
+    """一次读取 POSIX 进程状态和启动时间；受限环境仍可用 PID 判活。"""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="], capture_output=True,
+            text=True, timeout=2, env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
+        fields = result.stdout.strip().split(maxsplit=1)
+        if result.returncode == 0 and len(fields) == 2:
+            return fields[0], fields[1]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "", ""
+
+
+@lru_cache(maxsize=1)
+def _current_owner_instance(pid: int) -> str:
+    _, started = _process_state(pid)
+    return f"{started}|{_PROCESS_INSTANCE}"
+
+
+def _chat_owner_is_alive(pid: int, instance: str) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return instance == _current_owner_instance(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # 可能无权发信号；有权限读取启动时间时仍可检查 PID 重用。
+    state, current_start = _process_state(pid)
+    if state.startswith("Z"):  # 尚未被父进程 wait 的僵尸仍可收到 kill(pid, 0)。
+        return False
+    original_start = instance.partition("|")[0]
+    return not original_start or not current_start or current_start == original_start
+
+
 class Store:
     """线程安全:聊天引擎在后台线程池中并发读写,所有访问都过同一把锁。"""
 
@@ -132,8 +186,10 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")  # 多个进程打开旧库时串行检查和补列。
+            self._migrate_chat_runs()
         self._migrate_backend_commands()
-        self._migrate_chat_runs()
         self._migrate_automation_runs()
         self._migrate_chat_messages()
         self._migrate_runtime_usage()
@@ -145,13 +201,24 @@ class Store:
         self._conn.commit()
 
     def _migrate_chat_runs(self) -> None:
-        """旧数据库补齐 chat_runs 的执行组合列(运行卡片展示模型与推理力度)。"""
+        """旧运行保留原状态；仅服务启动时收口没有存活所有者的活动记录。"""
         columns = {row["name"] for row in self._conn.execute(
             "PRAGMA table_info(chat_runs)").fetchall()}
-        for name in ("model", "effort"):
+        for name, declaration in (
+            ("model", "TEXT DEFAULT ''"), ("effort", "TEXT DEFAULT ''"),
+            ("owner_pid", "INTEGER NOT NULL DEFAULT 0"),
+            ("owner_instance", "TEXT NOT NULL DEFAULT ''"),
+            ("recovered_from_run_id", "INTEGER"),
+        ):
             if name not in columns:
                 self._conn.execute(
-                    f"ALTER TABLE chat_runs ADD COLUMN {name} TEXT DEFAULT ''")
+                    f"ALTER TABLE chat_runs ADD COLUMN {name} {declaration}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_run_recovery "
+            "ON chat_runs(recovered_from_run_id) WHERE recovered_from_run_id IS NOT NULL")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interrupted_chat_runs ON chat_runs(channel,id) "
+            "WHERE status='interrupted'")
 
     def _migrate_automation_runs(self) -> None:
         """旧数据库补齐 automation_runs.trigger_detail(webhook 事件名与投递 id)。"""
@@ -366,7 +433,7 @@ class Store:
             "  SELECT r2.id FROM chat_runs r2 "
             "  WHERE r2.trigger_message_id=m.reply_to AND r2.role_id=m.author "
             "  ORDER BY r2.id DESC LIMIT 1"
-            ") WHERE m.author_type='agent' AND ("
+            ") WHERE m.author_type='agent' AND m.kind IS NOT 'run_recovery' AND ("
             "  m.runtime_id='' OR m.model='' OR m.effort='' OR LENGTH(m.content)=4000"
             ") ORDER BY m.id"
         ).fetchall()
@@ -1255,27 +1322,124 @@ class Store:
     # ---- 聊天:执行记录 ----
     def add_chat_run(self, channel: str, role_id: str, trigger_message_id: int,
                      root_id: int, depth: int) -> int:
+        pid = os.getpid()
         return self._execute(
             "INSERT INTO chat_runs(channel, role_id, trigger_message_id, root_id, depth, "
-            "status, created_at) VALUES(?,?,?,?,?,'queued',?)",
-            (channel, role_id, trigger_message_id, root_id, depth, time.time()),
+            "owner_pid, owner_instance, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (channel, role_id, trigger_message_id, root_id, depth,
+             pid, _current_owner_instance(pid), time.time()),
         )
+
+    def reconcile_chat_runs(self) -> int:
+        """仅由服务启动调用。旧 Run 收为中断，失效的待答事件与令牌同时收口。"""
+        active = "status IN ('queued','running','waiting_user')"
+        owners = self._query(
+            f"SELECT DISTINCT owner_pid,owner_instance FROM chat_runs WHERE {active}")
+        changed = 0
+        for owner in owners:
+            pid, instance = owner["owner_pid"], owner["owner_instance"]
+            if _chat_owner_is_alive(pid, instance):
+                continue
+            with self._lock, self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                runs = self._conn.execute(
+                    "SELECT r.id,r.channel,r.status,json_extract(c.data,'$.project_id') AS project_id "
+                    f"FROM chat_runs r LEFT JOIN channels c ON c.id=r.channel WHERE {active} "
+                    "AND owner_pid=? AND owner_instance=?", (pid, instance)).fetchall()
+                now = time.time()
+                for run in runs:
+                    run_id = run["id"]
+                    self._conn.execute(
+                        "UPDATE chat_runs SET status='interrupted',error=?,finished_at=? WHERE id=?",
+                        ("服务重启时原执行进程已结束，本次运行已中断。", now, run_id))
+                    self._conn.execute(
+                        "UPDATE run_events SET content=json_set(content,'$.status','interrupted',"
+                        "'$.resolved_at',?) WHERE run_id=? AND kind IN "
+                        "('permission_request','user_input_request') AND json_valid(content) "
+                        "AND json_extract(content,'$.status')='pending'", (now, run_id))
+                    self._conn.execute(
+                        "UPDATE agent_tokens SET revoked_at=? WHERE run_id=? AND revoked_at IS NULL",
+                        (now, run_id))
+                    self._conn.execute(
+                        "INSERT INTO audit(ts,actor,action,detail) "
+                        "VALUES(?,'platform','chat_run_interrupted',?)",
+                        (now, f"project={run['project_id'] or ''} channel={run['channel']} run={run_id} "
+                              f"previous_status={run['status']}"))
+                changed += len(runs)
+        return changed
+
+    def create_chat_run_recovery(
+            self, source_run_id: int, actor: str, *, root_id: Optional[int] = None,
+            depth: int = 0, max_chain_runs: Optional[int] = None,
+            origin_run_id: Optional[int] = None) -> tuple[int, bool]:
+        """一次事务建立确认消息和关联 Run；重复确认返回首次创建的 Run。"""
+        pid = os.getpid()
+        instance = _current_owner_instance(pid)
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            source = self._conn.execute(
+                "SELECT * FROM chat_runs WHERE id=?", (source_run_id,)).fetchone()
+            if source is None:
+                raise KeyError(source_run_id)
+            if source["status"] != "interrupted":
+                raise ValueError("只能显式续跑已中断的运行")
+            existing = self._conn.execute(
+                "SELECT id FROM chat_runs WHERE recovered_from_run_id=?",
+                (source_run_id,)).fetchone()
+            if existing is not None:
+                return existing["id"], False
+            if origin_run_id is not None and not self.chat_run_is_active(origin_run_id):
+                raise ValueError("发起续跑的主控运行已经结束")
+            channel, role_id = source["channel"], source["role_id"]
+            current = self.get_channel(channel)
+            if current is None or current.archived:
+                raise ValueError("运行所属频道不存在或已归档")
+            if source["trigger_message_id"] <= current.context_start_message_id:
+                raise ValueError("频道已清除这次运行的上下文，请重新发起任务")
+            if (root_id is not None and max_chain_runs is not None
+                    and self.count_chain_runs(root_id) >= max_chain_runs):
+                raise ValueError("本条协作链执行数已达上限，无法续跑")
+            now = time.time()
+            content = (f"显式续跑 Run #{source_run_id}：请先核对已完成的工作，"
+                       "仅继续尚未完成且可以确认的部分。操作结果不明时先报告。")
+            author_type = "agent" if actor.startswith("role:") else "human"
+            message = self._conn.execute(
+                "INSERT INTO messages(channel,author,author_type,content,mentions,kind,"
+                "reply_to,root_id,depth,created_at) VALUES(?,?,?,?,?,'run_recovery',?,?,?,?)",
+                (channel, actor.removeprefix("role:"), author_type, content,
+                 json.dumps([role_id], ensure_ascii=False),
+                 source["trigger_message_id"], root_id, depth, now))
+            message_id = message.lastrowid
+            if root_id is None:
+                root_id = message_id
+                self._conn.execute(
+                    "UPDATE messages SET root_id=? WHERE id=?", (root_id, message_id))
+            recovery = self._conn.execute(
+                "INSERT INTO chat_runs(channel,role_id,trigger_message_id,root_id,depth,"
+                "created_at,owner_pid,owner_instance,recovered_from_run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                (channel, role_id, message_id, root_id, depth, now, pid, instance, source_run_id))
+            self._conn.execute(
+                "INSERT INTO audit(ts,actor,action,detail) "
+                "VALUES(?,?,'chat_run_recovery_created',?)",
+                (now, actor, f"project={current.project_id or ''} channel={channel} "
+                             f"run={recovery.lastrowid} source_run={source_run_id}"))
+            return int(recovery.lastrowid), True
 
     def update_chat_run(self, run_id: int, status: str, backend_id: str = "",
                         error: str = "", model: str = "",
                         effort: str = "") -> bool:
-        """更新未被用户停止的运行，避免迟到结果覆盖 ``stopped`` 终态。
+        """更新运行，保留已停止或中断的终态。
 
         model/effort 只在传入非空时覆盖:转入 running 时盖章执行组合,
         终态更新不回传就保留原值。
         """
-        finished = time.time() if status in ("done", "failed", "stopped") else None
+        finished = time.time() if status in ("done", "failed", "stopped", "interrupted") else None
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE chat_runs SET status=?, backend_id=?, error=?, finished_at=?, "
                 "model=CASE WHEN ?='' THEN model ELSE ? END, "
                 "effort=CASE WHEN ?='' THEN effort ELSE ? END "
-                "WHERE id=? AND status!='stopped'",
+                "WHERE id=? AND status NOT IN ('stopped','interrupted')",
                 (status, backend_id, error, finished,
                  model, model, effort, effort, run_id),
             )
@@ -1312,14 +1476,41 @@ class Store:
         return bool(rows)
 
     def get_chat_run(self, run_id: int) -> Optional[dict]:
-        rows = self._query("SELECT * FROM chat_runs WHERE id=?", (run_id,))
+        rows = self._query(f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id "
+                           "FROM chat_runs r WHERE r.id=?", (run_id,))
         return dict(rows[0]) if rows else None
+
+    def get_chat_run_recovery(self, run_id: int) -> Optional[dict]:
+        rows = self._query(f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id "
+                           "FROM chat_runs r WHERE r.recovered_from_run_id=?", (run_id,))
+        return dict(rows[0]) if rows else None
+
+    def interrupted_chat_runs(self, channel: str, *, pending_only: bool = False,
+                              after_message_id: int = 0, before_run_id: Optional[int] = None,
+                              limit: Optional[int] = None) -> list[dict]:
+        """默认按时间正序；分页时从最新 Run 向前取，使用上一页末尾的 Run id。"""
+        pending = f"AND {_RECOVERY_RUN_ID} IS NULL " if pending_only else ""
+        sql = (
+            f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id FROM chat_runs r "
+            "WHERE r.channel=? AND r.status='interrupted' AND r.trigger_message_id>? "
+            + pending)
+        params = (channel, after_message_id)
+        if before_run_id is not None:
+            sql += "AND r.id<? "
+            params += (before_run_id,)
+        if limit is None:
+            sql += "ORDER BY r.id"
+        else:
+            sql += "ORDER BY r.id DESC LIMIT ?"
+            params += (max(0, limit),)
+        return [dict(row) for row in self._query(sql, params)]
 
     def stop_active_chat_runs(self, channel: str) -> list[dict]:
         """原子地把频道内全部活动运行改为终态，并返回停止前的快照。"""
-        with self._lock:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             rows = self._conn.execute(
-                "SELECT * FROM chat_runs WHERE channel=? "
+                f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE channel=? "
                 "AND status IN ('queued','running','waiting_user') ORDER BY id",
                 (channel,),
             ).fetchall()
@@ -1331,14 +1522,14 @@ class Store:
                 "WHERE channel=? AND status IN ('queued','running','waiting_user')",
                 (now, channel),
             )
-            self._conn.commit()
             return [dict(row) for row in rows]
 
     def stop_chat_run(self, run_id: int) -> Optional[dict]:
         """原子地停止单个活动运行，返回停止前的快照;已结束返回 None。"""
-        with self._lock:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
-                "SELECT * FROM chat_runs WHERE id=? "
+                f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE id=? "
                 "AND status IN ('queued','running','waiting_user')",
                 (run_id,),
             ).fetchone()
@@ -1348,12 +1539,11 @@ class Store:
                 "UPDATE chat_runs SET status='stopped', error='', finished_at=? "
                 "WHERE id=?", (time.time(), run_id),
             )
-            self._conn.commit()
             return dict(row)
 
     def active_chat_runs(self, channel: str) -> list[dict]:
         return [dict(r) for r in self._query(
-            "SELECT * FROM chat_runs WHERE channel=? "
+            f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE channel=? "
             "AND status IN ('queued','running','waiting_user') "
             "ORDER BY id", (channel,))]
 
@@ -1371,7 +1561,7 @@ class Store:
     def chat_runs_for_trigger(self, message_id: int) -> list[dict]:
         """由某条消息直接触发的运行,用于回报派发实际启动情况。"""
         rows = self._query(
-            "SELECT * FROM chat_runs WHERE trigger_message_id=?", (message_id,))
+            f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE trigger_message_id=?", (message_id,))
         return [dict(row) for row in rows]
 
     # ---- 聊天:Runtime 持久会话 ----
@@ -1440,6 +1630,30 @@ class Store:
                 "DELETE FROM chat_sessions WHERE channel=?", (channel,))
             self._conn.commit()
             return cursor.rowcount
+
+    def clear_channel_chat_context(self, channel_id: str) -> tuple[Channel, int, int]:
+        """与恢复互斥提交上下文边界、分隔消息和会话删除。"""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                raise ValueError(f"频道不存在: {channel_id}")
+            if self.active_chat_runs(channel_id):
+                raise ValueError("频道仍有 Agent 正在运行，请先停止或等待本轮结束后再清除上下文")
+            cleared = self._conn.execute(
+                "DELETE FROM chat_sessions WHERE channel=?", (channel_id,)).rowcount
+            marker = self._conn.execute(
+                "INSERT INTO messages(channel,author,author_type,content,kind,created_at) "
+                "VALUES(?,'platform','platform',?,'context_boundary',?)",
+                (channel_id, "上下文已清除 · 后续消息将启动全新的 Runtime 会话", time.time()))
+            marker_id = marker.lastrowid
+            assert marker_id is not None
+            self._conn.execute("UPDATE messages SET root_id=? WHERE id=?", (marker_id, marker_id))
+            self._conn.execute(
+                "UPDATE channels SET data=json_set(data,'$.context_start_message_id',?) WHERE id=?",
+                (marker_id, channel_id))
+            channel.context_start_message_id = marker_id
+            return channel, marker_id, cleared
 
     # ---- 聊天:执行过程事件(实时运行输出) ----
     # 同类连续事件合并进同一行(追加文本),避免逐 chunk/逐行插入把表撑爆;
@@ -1577,7 +1791,8 @@ class Store:
         过程输出是否有增量、要不要重新拉取事件。
         """
         rows = self._query(
-            "SELECT r.*, (SELECT COALESCE(SUM(LENGTH(e.content)), 0) "
+            f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id, "
+            "(SELECT COALESCE(SUM(LENGTH(e.content)), 0) "
             "FROM run_events e WHERE e.run_id = r.id) AS events_size "
             "FROM chat_runs r WHERE r.channel=? ORDER BY r.id DESC LIMIT ?",
             (channel, limit))

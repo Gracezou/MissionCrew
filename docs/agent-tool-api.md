@@ -69,6 +69,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 | `document.delete` | 禁止 | 允许 |
 | `message.publish` | 允许（`mentions` 只能是主控，或在其他频道提及自己） | 允许 |
 | `channel.runs.list` / `channel.run.stop` / `channel.history` | 禁止 | 允许 |
+| `channel.run.recover` | 禁止 | 允许（须具备派发权限） |
 | `channel.create` | 允许 | 允许 |
 | `workspace.create` / `workspace.finish` / `workspace.remove` | 禁止 | 允许 |
 | `channel.update` / `channel.archive` / `channel.restore` | 禁止 | 允许 |
@@ -79,7 +80,7 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 | `automation.list` / `automation.save` / `automation.run` / `automation.delete` | 禁止 | 允许 |
 | `recycle.list` / `recycle.restore` / `recycle.purge` | 禁止 | 允许 |
 
-项目未选择主控（无主控模式）时没有「普通角色」一列：每个角色都按「项目主控」列授权，但角色之间不能派发——`message.publish` 的 `mentions` 只能是在其他频道的自己（提及其他角色返回 `permission_denied`，`actions` 列出的该动作说明会写明这一点）；除了在其他频道启动自己，角色只由人类点名启动，结果只留在频道。派发权限由 `Project.can_dispatch`（能否派发任意角色，只有主控为真）与 `Project.can_mention`（能否提及某个角色）判定。
+项目未选择主控（无主控模式）时没有「普通角色」一列：管理动作按「项目主控」列授权，`channel.run.recover` 仅供有主控的项目使用，但角色之间不能派发——`message.publish` 的 `mentions` 只能是在其他频道的自己（提及其他角色返回 `permission_denied`，`actions` 列出的该动作说明会写明这一点）；除了在其他频道启动自己，角色只由人类点名启动，结果只留在频道。派发权限由 `Project.can_dispatch`（能否派发任意角色，只有主控为真）与 `Project.can_mention`（能否提及某个角色）判定。
 
 项目设置中的「允许创建受管 Git worktree」默认开启；关闭后 `workspace.create` 返回 `disabled`，已有受管频道仍可 finish/remove。
 
@@ -91,11 +92,13 @@ CLI 共四个子命令：`actions`、`call <action> --arguments '<JSON>'`（参�
 
 `channel.runs.list` 与只读动作 `channel.history` 都接受可选的 `channel`（项目内频道短 id，默认当前 Channel），用于跨频道核对：主控在 #general 把任务派到专用频道后被停止、再次被唤起时，`message.publish` 发出的消息只存在于目标频道，源频道只有一条派发回执，此时用 `channel.runs.list` 看目标频道是否有活动运行、用 `channel.history` 读目标频道最近消息，就能判断执行到哪一步，避免重复开工。`channel.history` 返回 `limit`（默认 20，最多 200）条最新记录，`before_id` 向前翻页，记录格式与工作区 `channel-history.json` 一致（含 `agent_tool` 回执与 `agent_stop` 等平台消息），并附频道消息总数 `message_count`。跨频道查询到的运行 `stoppable` 恒为 false，`channel.run.stop` 仍只接受当前 Channel 的 `run_id`。
 
+`channel.runs.list` 默认查询活动运行。传 `status=interrupted` 可查看指定频道因服务重启而中断的运行，结果含原触发消息 ID 和已创建的恢复运行 ID（`recovery_run_id`）。查看已完成的工作后，项目主控可调用 `channel.run.recover`，以原运行的 `run_id` 在原频道显式续跑一次。重复调用返回同一 `run_id` 和 `created=false`。该动作只对项目主控开放，跨频道调用仍受项目边界和角色的「仅人工点名」限制。人类可直接使用中断运行卡片上的恢复操作。
+
 成功执行写操作后，平台会在发起调用的 Channel 会话中追加一条 `agent_tool` 类型的平台回执，显示调用角色、动作名和动作摘要。失败调用和 `channel.list`、`recycle.list`、各类 `*.list` 等只读调用不生成回执。`message.publish` 发到当前 Channel 时消息本身就是痕迹，不再插入回执；发到其他 Channel 时在发起调用的 Channel 插入回执，内容带目标频道链接与已派发名单（与工具返回的 `summary` 相同），`context.agent_tool` 额外记录目标 `channel` 与 `message_id`，这样主控被停止后再唤起也能从自己频道的历史看出已经派发。
 
 ### 自动化脚本身份（`kind=automation`）
 
-除逐 Run 绑定的角色令牌外，还有一类**自动化脚本令牌**：`automation.save` 定义的项目脚本经 cron、webhook 投递或手动触发时，平台为该次运行签发一次性令牌（`kind=automation`，不绑定 Run），写入脚本工作目录的 `.agent-tool-token` 并在运行结束后立即撤销。脚本身份的可用动作以脚本自身的 `actions` 白名单为事实源（默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`），与主控权限位无关；白名单不包含 `channel.runs.list`、`channel.run.stop`、`channel.history`、`automation.run`（避免脚本互相触发）、`role.list` 和 `role.save`（只接受角色身份），`automation.save` 传入这些动作会返回 `invalid_arguments`。审计 actor 记为 `automation:<项目id>:<脚本短id>`，可与角色触发区分。
+除逐 Run 绑定的角色令牌外，还有一类**自动化脚本令牌**：`automation.save` 定义的项目脚本经 cron、webhook 投递或手动触发时，平台为该次运行签发一次性令牌（`kind=automation`，不绑定 Run），写入脚本工作目录的 `.agent-tool-token` 并在运行结束后立即撤销。脚本身份的可用动作以脚本自身的 `actions` 白名单为事实源（默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`），与主控权限位无关；白名单不包含 `channel.runs.list`、`channel.run.stop`、`channel.run.recover`、`channel.history`、`automation.run`（避免脚本互相触发）、`role.list` 和 `role.save`（只接受角色身份），`automation.save` 传入这些动作会返回 `invalid_arguments`。审计 actor 记为 `automation:<项目id>:<脚本短id>`，可与角色触发区分。
 
 脚本身份的 `message.publish` 以 `author_type=automation` 发布：不传 `mentions` 时只发消息、不触发任何角色；显式提及单个角色时直接派发该角色（结果不自动交回主控），提及多个角色时与人类消息一致收敛为只启动主控。任何身份调用 `task.create` 时，若项目配置的 Task 自动处理规则命中 label，都会按规则的处理要求和处理角色立即派发（状态已是 `已完成` 的任务除外），结果附带 `auto_dispatch`（`rule_query`、`sent`）；脚本同步外部 Task 是最常见的场景。规则只能由人在任务看板列头的 ⚡ 配置，没有对应的 Agent Tool 动作，详见 [automation.md](automation.md)。
 

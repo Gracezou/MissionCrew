@@ -203,6 +203,9 @@ An orchestrator's turn:
   defaults to 20, at most 200; `before_id` pages backwards), for confirming whether a channel was
   dispatched and how far its executor got when resuming interrupted work; `channel.run.stop` can
   still only stop runs in the current channel.
+- After a service restart, inspect interrupted runs with `channel.runs.list` and
+  `status=interrupted`. Check what the role already did before choosing to continue. Pass the
+  interrupted `run_id` to `channel.run.recover` to start its linked continuation.
 - When a human picks several roles in one trigger message, the platform starts only the orchestrator; the trigger message JSON's `mentions` and
   `mention_spans` keep the full list, and the orchestrator decides on parallel or sequential order or different assignees, then dispatches each.
 - Your output this turn (the final reply) is automatically published by the platform as the

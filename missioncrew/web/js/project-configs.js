@@ -590,6 +590,7 @@ function renderConfigChatThread(context, channelId, target) {
     thread.lastRenderedId = surface.lastMsgId;
   }
   syncRuns(thread.runs, { pane: root, runCards: thread.runCards });
+  syncEarlierInterruptedRuns(root, channelId, thread.earlierInterruptedBefore);
   root.classList.toggle("has-messages", Boolean(thread.entries.length));
   if (!thread.entries.length) {
     const hint = thread.loaded ? "此频道还没有消息。" : "正在加载频道记录…";
@@ -913,6 +914,7 @@ async function pollConfigChat() {
     }
     if (agentReplied) thread.notice = "";
     thread.runs = data.runs || [];
+    thread.earlierInterruptedBefore = data.earlier_interrupted_before;
     thread.activeRuns = data.active_runs || [];
     thread.running = thread.activeRuns.some(run =>
       ["queued", "running", "waiting_user"].includes(run.status));

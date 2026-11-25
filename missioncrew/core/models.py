@@ -1092,6 +1092,8 @@ class ExecutionConfig:
     # 同一鉴权/审计路径。真实 CLI Runtime 走子进程 + HTTP,不用该回调;
     # MockAdapter 用它执行 message.publish 等显式命令(如模拟主控派发)。
     agent_action: Optional[Callable[[str, dict], dict]] = None
+    # 显式续跑若已有兼容句柄，恢复失败要交回调用方，不能静默改用新会话。
+    require_session_resume: bool = False
 
     def __post_init__(self):
         # 兼容旧的 allowed_dirs 构造入口；新代码只需提供统一策略。

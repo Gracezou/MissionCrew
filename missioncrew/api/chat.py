@@ -21,6 +21,7 @@ from .schemas import (ChannelCreate, ChannelUpdate, ContentChannelInput, Message
                       RuntimeInteractionInput)
 
 LIST_SCOPES = {"active", "archived", "all"}
+RECENT_RUN_LIMIT = 30
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -197,12 +198,21 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                         span["end"] = len(normalize_document_resource_urls(
                             original[:end], project.id, [document_root]))
                     item["content"] = normalized
+        runs = store.chat_runs_for_channel(channel_id, limit=RECENT_RUN_LIMIT)
+        earlier_interrupted_before = None
+        if len(runs) == RECENT_RUN_LIMIT and not channel.archived:
+            first_run_id = runs[0]["id"]
+            if store.interrupted_chat_runs(
+                    channel_id, pending_only=True, after_message_id=channel.context_start_message_id,
+                    before_run_id=first_run_id, limit=1):
+                earlier_interrupted_before = first_run_id
         payload = {
             "channel": channel_data(channel),
             "messages": items,
             "active_runs": store.active_chat_runs(channel_id),
             # 最近执行记录(含已结束):前端按 events_size 变化拉取过程事件
-            "runs": store.chat_runs_for_channel(channel_id),
+            "runs": runs,
+            "earlier_interrupted_before": earlier_interrupted_before,
         }
         if paging:
             # 告知前端窗口之前是否还有更早历史,决定是否继续向上翻页
@@ -212,10 +222,61 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return payload
 
     @app.get("/api/chat/runs/{run_id}/events")
-    def run_events(run_id: int):
+    def run_events(run_id: int, include_live_output: bool = True):
         # live_output 是不受事件窗口限制的完整 text 输出,供实时输出框使用
         return {"events": store.run_events(run_id),
-                "live_output": store.run_live_output(run_id)}
+                "live_output": store.run_live_output(run_id) if include_live_output else None}
+
+    @app.get("/api/chat/{channel_id}/interrupted-runs")
+    def earlier_interrupted_runs(channel_id: str, before: int):
+        channel = must_channel(channel_id)
+        runs = [] if channel.archived else store.interrupted_chat_runs(
+            channel_id, pending_only=True, after_message_id=channel.context_start_message_id,
+            before_run_id=before, limit=RECENT_RUN_LIMIT + 1)
+        page = runs[:RECENT_RUN_LIMIT]
+        return {"runs": [{"id": r["id"], "role_id": r["role_id"]} for r in page],
+                "next_before": page[-1]["id"] if len(runs) > len(page) else None}
+
+    @app.get("/api/chat/runs/{run_id}/recovery")
+    def run_recovery_info(run_id: int):
+        run = store.get_chat_run(run_id)
+        if run is None:
+            raise HTTPException(404, "运行不存在")
+        if run["status"] != "interrupted":
+            raise HTTPException(409, "只有中断的运行可以续跑")
+        channel = must_channel(run["channel"])
+        trigger = store.get_message(run["trigger_message_id"])
+        if trigger and trigger["channel"] != channel.id:
+            trigger = None
+        recent = store.run_events(run_id, limit=1)
+        child = store.get_chat_run_recovery(run_id)
+
+        # 仅在预览中截取摘要；触发消息和过程事件仍可从频道查看原文。
+        def excerpt(value: str) -> str:
+            return value[:600] + "…" if len(value) > 600 else value
+
+        return {
+            "run_id": run_id, "role_id": run["role_id"], "reason": excerpt(run["error"]),
+            "trigger": ({"id": trigger["id"], "author": trigger["author"],
+                         "content": excerpt(trigger["content"])}
+                        if trigger else None),
+            "last_event": ({**recent[0], "content": excerpt(recent[0]["content"])}
+                           if recent else None),
+            "session_available": chat.recovery_session_available(run, channel),
+            "unavailable_reason": chat.recovery_unavailable_reason(run, channel),
+            "recovery_run": ({"id": child["id"], "status": child["status"],
+                              "error": excerpt(child["error"])}
+                             if child else None),
+        }
+
+    @app.post("/api/chat/runs/{run_id}/recover")
+    def recover_chat_run(run_id: int):
+        if store.get_chat_run(run_id) is None:
+            raise HTTPException(404, "运行不存在")
+        try:
+            return chat.recover_run(run_id, actor="human")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/chat/runs/{run_id}/interactions/{request_id}")
     def respond_runtime_interaction(run_id: int, request_id: str,
@@ -245,19 +306,19 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/chat/{channel_id}/clear-context")
     def clear_context(channel_id: str):
+        must_channel(channel_id)
         try:
             return chat.clear_context(channel_id)
         except ValueError as exc:
-            message = str(exc)
-            raise HTTPException(
-                409 if "正在运行" in message else 404, message) from exc
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/chat/{channel_id}/stop")
     def stop_channel_agents(channel_id: str):
+        must_channel(channel_id)
         try:
             return chat.stop_channel_agents(channel_id)
         except ValueError as exc:
-            raise HTTPException(404, str(exc)) from exc
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/chat/runs/{run_id}/stop")
     def stop_chat_run(run_id: int):

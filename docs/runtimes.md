@@ -87,6 +87,14 @@ Codex 使用公开的 app-server 账户接口；Antigravity 的 CLI /usage 提�
 
 `ExecutionConfig`、`RuntimeInstance` 与 `runtime_usage` 同时携带 `project_id` 和 `role_id`。因此全局后端概览会聚合当前实例所属的项目和角色，实例表与历史表也直接显示这两个字段；非项目调用两者可以为空。
 
+### 服务重启后续跑聊天 Run
+
+服务启动时核对聊天 Run 的所有者。前一进程遗留的 `queued`、`running`、`waiting_user` 运行会收口为 `interrupted`，待答的提问和审批也随之结束。原触发消息、过程事件和已经写入的文件都保留。此次对账不会启动 Agent。
+
+人类从频道的中断运行卡片查看原触发消息、最后事件和已保存的原生会话是否可用，核实已经完成的工作后再确认续跑。预览使用 `GET /api/chat/runs/{run_id}/recovery`，确认使用 `POST /api/chat/runs/{run_id}/recover`。主控可在 Agent Tool 中完成同一操作。旧 Run 保留中断状态，原频道中新增的 Run 用 `recovered_from_run_id` 指向它。对同一 Run 重复或并发确认都会取得同一个续跑 ID。频道已归档、已清除该次上下文或角色已停用时，平台拒绝创建续跑。[Agent Tool 权限与用法](agent-tool-api.md)
+
+续跑会收到新的指令，先核对频道历史和已落盘的工作，再继续剩余部分。存在兼容的原生会话句柄时先续接该会话；如果 Runtime 拒绝续接，失败原因显示在新的 Run 中。没有兼容句柄时，新会话使用最近的频道历史和恢复指令。原来的触发消息留作参考，不会自动重放，原运行的待答审批也不会沿用。
+
 ## 接入技术
 
 ### 逐 Runtime 会话复用矩阵

@@ -1,4 +1,5 @@
 """打印模式 Runtime 的原生会话参数翻译。"""
+import sys
 import threading
 import time
 
@@ -60,6 +61,25 @@ def test_session_input_modes_cover_update_reinject_and_lean():
     assert mode == "recovery" and full == "公共\n最近对话\n当前任务"
 
 
+def test_explicit_resume_keeps_the_selected_session_when_a_queued_turn_starts():
+    cfg = _cfg(session_id="selected")
+    cfg.require_session_resume = True
+    cfg.load_session = lambda: ("latest", "v1", False)
+    failure = adapters._refresh_session(cfg)
+    assert not failure.success and "已变更" in failure.summary
+    assert cfg.session_id == "selected"
+
+    cfg.load_session = lambda: ("selected", "v1", False)
+    failure = adapters._refresh_session(cfg, live_session_id="another")
+    assert not failure.success and "已切换" in failure.summary
+    assert adapters._refresh_session(cfg, live_session_id="selected") is None
+
+    cfg.require_session_resume = False
+    cfg.load_session = lambda: ("latest", "v1", False)
+    assert adapters._refresh_session(cfg) is None
+    assert cfg.session_id == "latest"
+
+
 def test_captured_and_directory_session_arguments(tmp_path):
     opencode, structured = adapters._apply_cli_session_args(
         "opencode", ["opencode", "run", "任务"], "ses_123456", True)
@@ -67,6 +87,19 @@ def test_captured_and_directory_session_arguments(tmp_path):
         "--format", "json", "--thinking", "--session", "ses_123456", "任务"]
     assert adapters._extract_session_id(
         '{"type":"start","sessionID":"ses_123456"}') == "ses_123456"
+
+
+def test_print_cli_explicit_resume_rejects_a_different_reported_session(tmp_path):
+    cfg = _cfg(session_id="selected")
+    cfg.workdir = str(tmp_path)
+    cfg.require_session_resume = True
+    adapter = adapters.CliAdapter("cursor", [
+        sys.executable, "-c", """print('{"type":"result","sessionId":"other","result":"wrong"}')""",
+        "{prompt}"])
+    result = adapter.run(cfg)
+    assert not result.success and "不同的原生会话" in result.summary
+    assert adapters._extract_session_id(
+        '{"type":"tool_use","input":{"sessionId":"tool-argument"}}', envelope_only=True) == ""
 
 
 def test_every_default_print_runtime_has_a_session_strategy():

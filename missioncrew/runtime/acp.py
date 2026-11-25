@@ -853,9 +853,10 @@ def _new_or_load_session(client: _AcpClient, workdir: str,
                          requested_session_id: str,
                          initialize_result: dict,
                          load_meta: Optional[dict] = None,
-                         additional_dirs: Optional[list[str]] = None
+                         additional_dirs: Optional[list[str]] = None,
+                         require_session_resume: bool = False
                          ) -> tuple[str, bool]:
-    """返回 (会话 id, 是否成功恢复)。不支持/无法 load 时创建新会话。
+    """返回 (会话 id, 是否成功恢复)。普通轮次若无法 load，可新建会话。
 
     顺带记下应答里的推理力度配置项 id(client.thought_level_option),供
     每轮 prompt 前按 effort 切换档位。
@@ -884,11 +885,17 @@ def _new_or_load_session(client: _AcpClient, workdir: str,
                 params["_meta"] = dict(load_meta)
             result = client.request("session/load", params)
             client.thought_level_option = _thought_level_option(result)[0]
-            return (result.get("sessionId") or result.get("session_id")
-                    or requested_session_id), True
+            loaded_id = result.get("sessionId") or result.get("session_id") or requested_session_id
+            if require_session_resume and loaded_id != requested_session_id:
+                raise AcpError("session/load 返回了不同的会话 id")
+            return loaded_id, True
         except AcpError as exc:
+            if require_session_resume:
+                raise AcpError(f"ACP 原会话恢复失败，未发送续跑请求: {exc}") from exc
             client.emit("status", f"ACP 原会话恢复失败，将用最近对话新建会话: {exc}\n")
     elif requested_session_id:
+        if require_session_resume:
+            raise AcpError("ACP Runtime 不支持 session/load，无法恢复原会话")
         client.emit("status", "ACP Runtime 未声明 session/load，将用最近对话新建会话。\n")
 
     result = client.request("session/new", {"cwd": workdir, "mcpServers": [],
@@ -1066,7 +1073,8 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                trigger_message_id: int = 0,
                effort: str = "",
                additional_dirs: Optional[list[str]] = None,
-               parse_usage: Optional[Callable[[dict], dict]] = None
+               parse_usage: Optional[Callable[[dict], dict]] = None,
+               require_session_resume: bool = False
                ) -> tuple[bool, str]:
     """完成一轮 ACP prompt，并按 channel×role 复用长驻原生会话。
 
@@ -1100,6 +1108,8 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                 live.signature != signature or live.client.proc.poll() is not None):
             _drop_live_session(session_key, live)
             live = None
+        if require_session_resume and live is not None and live.session_id != session_id:
+            return False, "ACP 当前会话与指定的原会话不一致，未发送续跑请求"
 
         try:
             recovered = live is not None
@@ -1112,7 +1122,7 @@ def run_prompt(cmd: list[str], prompt: str, workdir: str, env: dict,
                     initialize_result = _initialize(client)
                     runtime_session_id, recovered = _new_or_load_session(
                         client, workdir, session_id, initialize_result,
-                        load_session_meta, additional_dirs)
+                        load_session_meta, additional_dirs, require_session_resume)
                 except Exception:
                     client.close()
                     raise

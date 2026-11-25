@@ -1,8 +1,11 @@
 """运行过程事件:适配器实时上报 -> 落库 -> 聊天接口内联展示。"""
+import shutil
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from missioncrew.api import create_app
@@ -473,3 +476,96 @@ def test_chat_ui_shows_execution_combo_and_folds_long_replies(seeded):
     assert ".mention.legal-mention" in css and "cursor: default" in css
     assert ".re-backend-agent" in css and ".rba-status.completed" in css
     assert '<span class="via">agent</span>' not in js
+
+
+def test_terminal_cards_load_logs_on_demand_across_status_changes():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required to run the browser card renderer")
+    script = Path(__file__).parents[1] / "missioncrew/web/js/run-events.js"
+    js = r"""
+const assert = require("node:assert/strict");
+global.setInterval = () => {};
+global.esc = String;
+global.roleColor = {};
+require("node:vm").runInThisContext(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const anchor = {after() {}};
+const surface = {runCards: new Map(), pane: {
+  querySelector: s => s.startsWith("[data-msg-id=") ? anchor : null
+}};
+global.document = {createElement() {
+  const summary = {addEventListener(name, cb) { this[name] = cb; }};
+  const body = {querySelectorAll: () => []};
+  return {dataset: {}, addEventListener: summary.addEventListener, summary, body,
+    querySelector(s) { return s === "summary" ? summary : body; }};
+}};
+const requests = [];
+global.fetch = url => new Promise(resolve => requests.push({url, resolve}));
+const urls = () => requests.map(r => r.url);
+const run = (id, status, events_size = 8) => ({id, role_id: "dev", trigger_message_id: id, status, events_size});
+const sync = (id, status) => {
+  syncRuns([run(id, status)], surface);
+  return surface.runCards.get(id).el;
+};
+function toggle(el, open) {
+  el.summary.click();
+  el.open = open;
+  el.toggle();
+}
+async function finish(ok) {
+  requests.shift().resolve({ok, json: async () => ({events: []})});
+  await new Promise(resolve => setImmediate(resolve));
+}
+const terminalUrl = id => `/api/chat/runs/${id}/events?include_live_output=false`;
+(async () => {
+  // 每种终态首屏零请求；展开只读事件，重复轮询及重新展开都复用成功结果。
+  const statuses = ["done", "failed", "stopped", "interrupted"];
+  syncRuns(Array.from({length: 30}, (_, i) => run(i + 10, statuses[i % 4], i % 2)), surface);
+  assert.deepEqual(urls(), []);
+  for (const [index, status] of statuses.entries()) {
+    const id = index + 1, el = sync(id, status);
+    assert.deepEqual(urls(), []);
+    toggle(el, true);
+    sync(id, status);
+    assert.deepEqual(urls(), [terminalUrl(id)]);
+    await finish(true);
+    toggle(el, false);
+    toggle(el, true);
+    assert.deepEqual(urls(), []);
+  }
+  // 活动请求未返回就收到终态：卡头先更新，迟到的旧结果不会重绘或触发终态预取。
+  const el = sync(5, "running");
+  assert.deepEqual(urls(), ["/api/chat/runs/5/events"]);
+  sync(5, "done");
+  sync(5, "running");  // 更早发出的频道轮询迟到
+  assert.ok(!el.open && el.summary.innerHTML.includes("已完成"));
+  await finish(true);
+  assert.deepEqual(urls(), []);
+  assert.equal(el.body.innerHTML, "");
+  // 用户手动保持展开，活动请求结束时补拉最新终态；失败在下一次轮询重试。
+  const pinned = sync(6, "waiting_user");
+  toggle(pinned, false);
+  toggle(pinned, true);
+  sync(6, "stopped");
+  assert.ok(pinned.open && pinned.summary.innerHTML.includes("已停止"));
+  assert.deepEqual(urls(), ["/api/chat/runs/6/events"]);
+  await finish(true);
+  assert.deepEqual(urls(), [terminalUrl(6)]);
+  await finish(false);
+  assert.deepEqual(urls(), []);
+  sync(6, "stopped");
+  assert.deepEqual(urls(), [terminalUrl(6)]);
+  await finish(true);
+  assert.ok(pinned.body.innerHTML.includes("暂无过程输出"));
+  sync(6, "stopped");
+  assert.deepEqual(urls(), []);
+  // 已经显示过的活动日志也要在终态时清空，避免再次展开时出现失效的交互。
+  const previouslyLive = sync(7, "running");
+  await finish(true);
+  assert.ok(previouslyLive.body.innerHTML.includes("暂无过程输出"));
+  sync(7, "failed");
+  assert.equal(previouslyLive.body.innerHTML, "");
+  assert.deepEqual(urls(), []);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    subprocess.run([node, "-e", js, str(script)], check=True)

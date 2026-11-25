@@ -158,9 +158,12 @@ def test_resumed_turn_ignores_stale_conversation_error(runtime):
 
 
 @pytest.mark.parametrize("scenario", ["missing", "mismatch"])
-def test_missing_conversation_fails_without_silent_retry(runtime, tmp_path, scenario):
+@pytest.mark.parametrize("strict", [False, True])
+def test_missing_conversation_fails_without_silent_retry(runtime, tmp_path, scenario, strict):
     provider, config, saved, _ = runtime
     saved.update(id="old-conversation", context="v1")
+    config.session_id = saved["id"]
+    config.require_session_resume = strict
     config.env["SCENARIO"] = scenario
     assert not provider.start(config).success
     assert saved["id"] == ""

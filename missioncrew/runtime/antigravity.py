@@ -156,7 +156,8 @@ class AntigravityRuntimeProvider(RuntimeProvider):
     def start(self, config: ExecutionConfig) -> RunResult:
         if config.session_key:
             with adapters._named_session_lock(config.session_key):
-                adapters._refresh_session(config)
+                if failure := adapters._refresh_session(config):
+                    return failure
                 return self._run(config)
         return self._run(config)
 

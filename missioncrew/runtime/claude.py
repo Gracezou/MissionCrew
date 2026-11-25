@@ -398,7 +398,8 @@ class _ClaudeSession:
                     self._turn_condition.wait(0.1)
                 if config.cancellation_requested():
                     return RunResult(False, "执行已停止")
-                adapters._refresh_session(config)
+                if failure := adapters._refresh_session(config, self.session_id):
+                    return failure
                 if self.session_id and not config.session_id:
                     self.close()
                     self.session_id = ""
@@ -524,6 +525,17 @@ class _ClaudeSession:
                 safe_emit(self._emit(), "stdout", raw)
                 continue
             message_type = message.get("type")
+            config = self._active_config
+            if (config and config.require_session_resume and process is self.process
+                    and message_type == "system" and message.get("subtype") == "init"
+                    and message.get("session_id") != config.session_id):
+                self.session_id = ""
+                adapters._clear_session(config)
+                self._result = {"subtype": "error_during_execution", "is_error": True,
+                                "error": "Claude 未恢复指定的原会话"}
+                self._result_ready.set()
+                adapters._kill_process_group(process)
+                break
             if message_type == "control_request":
                 threading.Thread(
                     target=self._handle_control_request,

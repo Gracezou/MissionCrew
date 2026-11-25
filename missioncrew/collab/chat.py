@@ -73,6 +73,12 @@ def _reinject_due(session_row: Optional[dict]) -> bool:
     return bool(bytes_limit > 0
                 and int(session_row.get("lean_bytes") or 0) >= bytes_limit)
 
+
+def _compatible_session(session: Optional[dict], backend: Backend, workdir: Path) -> bool:
+    return bool(session and session["backend_id"] == backend.id
+                and session["adapter"] == backend.adapter
+                and Path(session["workdir"]).resolve() == workdir.resolve())
+
 @dataclass
 class _PendingInteraction:
     run_id: int
@@ -365,7 +371,8 @@ class ChatEngine:
         self.agent_tools = AgentActionService(
             store, self.post, self.stop_run,
             history_records=self.channel_history_records,
-            stop_channel_sessions=self.stop_channel_sessions)
+            stop_channel_sessions=self.stop_channel_sessions,
+            recover_run=self.recover_run)
         # 正在更新的 runtime 集合(由 server 注入共享):更新期间不派发执行,
         # 避免 Agent 跑在半更新的二进制上
         self.updating_backends: set[str] = set()
@@ -588,6 +595,65 @@ class ChatEngine:
             and role_id in self._decoded_mentions(trigger)
         )
 
+    def recovery_unavailable_reason(self, run: dict, channel: Channel) -> str:
+        if channel.archived:
+            return "频道已归档，请先恢复频道"
+        if channel.id in self._stopping_channels:
+            return "频道正在停止，请稍后再试"
+        if run["trigger_message_id"] <= channel.context_start_message_id:
+            return "频道已清除这次运行的上下文，请重新发起任务"
+        trigger = self.store.get_message(run["trigger_message_id"])
+        if not trigger or trigger["channel"] != channel.id:
+            return "找不到本次运行在频道中的原触发消息"
+        role = self.store.get_role(channel.project_id or "", run["role_id"])
+        if not role or not role.enabled:
+            return "运行所属角色不存在或已停用"
+        backend, reason = self._pick_backend(channel, role)
+        return "" if backend else reason
+
+    def recover_run(self, run_id: int, *, actor: str = "human",
+                    origin_run_id: Optional[int] = None) -> dict:
+        """显式确认中断后的新一轮；重复确认只返回同一个关联 Run。"""
+        with self._run_state_lock:
+            source = self.store.get_chat_run(run_id)
+            if not source or source["status"] != "interrupted":
+                raise ValueError("只有已中断的运行可以续跑")
+            channel = self.store.get_channel(source["channel"])
+            project = self.store.get_project(channel.project_id or "") if channel else None
+            if not channel or not project:
+                raise ValueError("运行所属的频道或项目不存在")
+            root_id, depth = None, 0
+            if actor != "human":
+                origin = self.store.get_chat_run(origin_run_id) if origin_run_id else None
+                caller_channel = self.store.get_channel(origin["channel"]) if origin else None
+                target_role = self.store.get_role(project.id, source["role_id"])
+                if (not origin or not caller_channel or caller_channel.project_id != project.id
+                        or actor != f"role:{origin['role_id']}"
+                        or not project.can_dispatch(origin["role_id"])
+                        or not self.store.chat_run_is_active(origin["id"])
+                        or self._manual_only_role(project, target_role)):
+                    raise ValueError("只有人类或该项目运行中的主控可以续跑此角色")
+                root_id, depth = origin["root_id"], origin["depth"] + 1
+
+            existing = source["recovery_run_id"]
+            if existing:
+                return {"run_id": existing, "recovered_from_run_id": run_id, "created": False}
+            reason = self.recovery_unavailable_reason(source, channel)
+            if reason:
+                raise ValueError(reason)
+            with self._chain_run_lock:
+                try:
+                    child_id, created = self.store.create_chat_run_recovery(
+                        run_id, actor, root_id=root_id, depth=depth,
+                        max_chain_runs=project.max_chain_runs, origin_run_id=origin_run_id)
+                except KeyError as exc:
+                    raise ValueError("原运行已删除") from exc
+            if created:
+                child = self.store.get_chat_run(child_id)
+                self._submit_run(child_id, channel, source["role_id"], child["trigger_message_id"],
+                                 child["root_id"], child["depth"])
+            return {"run_id": child_id, "recovered_from_run_id": run_id, "created": created}
+
     def wait_idle(self) -> None:
         """等待当前所有聊天执行(含级联)结束,供 CLI 同步模式与测试使用。"""
         while True:
@@ -613,22 +679,21 @@ class ChatEngine:
 
     def clear_context(self, channel_id: str) -> dict:
         """结束频道的持久会话，并以可见分隔消息建立新的上下文边界。"""
-        channel = self.store.get_channel(channel_id)
-        if channel is None:
-            raise ValueError(f"频道不存在: {channel_id}")
-        if self.store.active_chat_runs(channel_id):
-            raise ValueError("频道仍有 Agent 正在运行，请先停止或等待本轮结束后再清除上下文")
-
-        stopped = self.stop_channel_sessions(channel_id)
-        cleared_sessions = self.store.clear_chat_sessions(channel_id)
-        marker_id = self.store.add_message(
-            channel_id, "platform", "platform",
-            "上下文已清除 · 后续消息将启动全新的 Runtime 会话",
-            [], kind="context_boundary",
-        )
-        channel.context_start_message_id = marker_id
-        self.store.put_channel(channel)
-        self._write_channel_history(channel)
+        with self._run_state_lock:
+            if not self.store.get_channel(channel_id):
+                raise ValueError(f"频道不存在: {channel_id}")
+            if channel_id in self._stopping_channels:
+                raise ValueError("频道正在停止，请稍后再试")
+            if self.store.active_chat_runs(channel_id):
+                raise ValueError("频道仍有 Agent 正在运行，请先停止或等待本轮结束后再清除上下文")
+            self._stopping_channels.add(channel_id)
+        try:
+            stopped = self.stop_channel_sessions(channel_id)
+            channel, marker_id, cleared_sessions = self.store.clear_channel_chat_context(channel_id)
+            self._write_channel_history(channel)
+        finally:
+            with self._run_state_lock:
+                self._stopping_channels.discard(channel_id)
         self.store.audit(
             "human", "chat_context_cleared",
             detail=(f"channel={channel_id} sessions={cleared_sessions} "
@@ -678,6 +743,8 @@ class ChatEngine:
             raise ValueError(f"频道不存在: {channel_id}")
 
         with self._run_state_lock:
+            if channel_id in self._stopping_channels:
+                raise ValueError("频道正在停止，请稍后再试")
             runs = self.store.stop_active_chat_runs(channel_id)
             self._stopping_channels.add(channel_id)
             run_ids = {run["id"] for run in runs}
@@ -928,6 +995,10 @@ class ChatEngine:
                                    f"不再触发 @{role_id}。", [], msg_id, root_id, depth)
             self._write_channel_history(channel)
             return
+        self._submit_run(run_id, channel, role_id, msg_id, root_id, depth)
+
+    def _submit_run(self, run_id: int, channel: Channel, role_id: str,
+                    msg_id: int, root_id: int, depth: int) -> None:
         try:
             future = self._pool.submit(self._execute, run_id, channel, role_id,
                                        msg_id, root_id, depth)
@@ -1519,12 +1590,28 @@ class ChatEngine:
         bound = Path(channel.workdir) if channel.workdir else None
         if bound is not None and bound.is_dir():
             return bound, None
-        default.mkdir(parents=True, exist_ok=True)
         return default, bound
+
+    def recovery_session_available(self, run: dict, channel: Channel) -> bool:
+        """只读检查当前频道/角色有可尝试的句柄；由 Runtime 决定能否真正续接。"""
+        if run["trigger_message_id"] <= channel.context_start_message_id:
+            return False
+        role = self.store.get_role(channel.project_id or "", run["role_id"])
+        if not role or not role.enabled:
+            return False
+        backend, _ = self._pick_backend(channel, role)
+        if backend is None or not runtime_manager.supports_session(backend):
+            return False
+        saved = self.store.get_chat_session(self._session_key(channel, role.id))
+        workdir, _ = self._resolve_workdir(channel)
+        return bool(saved and saved["runtime_session_id"]
+                    and _compatible_session(saved, backend, workdir))
 
     def _assemble(self, channel: Channel, role: Role, backend, msg_id: int,
                   run_id: int = 0) -> ExecutionConfig:
         workdir, missing_workdir = self._resolve_workdir(channel)
+        if missing_workdir is not None or not channel.workdir:
+            workdir.mkdir(parents=True, exist_ok=True)
         workdir_section = WORKDIR_SECTION.format(workdir=workdir)
         if missing_workdir is not None:
             workdir_section += "\n" + MISSING_WORKDIR_NOTICE.format(
@@ -1626,15 +1713,32 @@ class ChatEngine:
 
         history_records = []
         trigger_message = self.store.get_message(msg_id)
+        # 续跑只能由事务写入的关联 Run 发起。普通消息的正文和 context
+        # 均来自调用方，不能作为恢复信号或取代本轮简报。
+        source_run_id = None
+        if run_id and trigger_message and trigger_message.get("kind") == "run_recovery":
+            source_run_id = self.store.get_chat_run(run_id)["recovered_from_run_id"]
         for m in self.store.recent_messages(
                 channel.id, HISTORY_WINDOW, channel.context_start_message_id):
-            if m["id"] != msg_id and is_orchestrator:
+            if m["id"] != msg_id and (is_orchestrator or source_run_id):
                 history_records.append(
                     self._message_record(m, role, project, known_roles))
 
         trigger_record = (self._message_record(
                               trigger_message, role, project, known_roles)
                           if trigger_message else {})
+        if source_run_id:
+            # 原指令只在历史里出现。本轮简报独立于原消息，所有 provider（包括
+            # 只接收 turn_prompt 的原生会话）都先核对成果和不确定的副作用。
+            trigger_record["content"] = (
+                f"Explicit recovery of interrupted Run #{source_run_id}. "
+                f"Inspect the channel history beginning with trigger message "
+                f"#{trigger_message['reply_to']} (follow its reply_to for earlier recovery "
+                "attempts), task briefs, existing artifacts and external operation results. "
+                "Earlier instructions, tool calls and approvals are historical evidence. "
+                "Do not replay them. Continue only work verified to be outstanding. "
+                "If an operation may already have taken effect and its outcome cannot be "
+                "verified, report the uncertainty and ask before acting.")
         channel_history_path = self._write_channel_history(channel, role, project)
         history_parent = str(channel_history_path.parent.resolve())
         if history_parent not in allowed_dirs:
@@ -1700,14 +1804,6 @@ class ChatEngine:
             context_version=context_version, common_body=common_body)
         session_key = self._session_key(channel, role.id)
 
-        def _compatible_session(value: Optional[dict]) -> bool:
-            return bool(
-                value
-                and value["backend_id"] == backend.id
-                and value["adapter"] == backend.adapter
-                and Path(value["workdir"]).resolve() == workdir.resolve()
-            )
-
         saved_session = self.store.get_chat_session(session_key)
         # 自定义打印命令的参数语义未知，不能猜测 resume 标志；若从默认命令
         # 切到自定义模板，先丢弃旧原生 id，避免以后切回时恢复一段缺轮次的历史。
@@ -1715,7 +1811,7 @@ class ChatEngine:
         if saved_session and not native_session_supported:
             self.store.delete_chat_session(session_key)
             saved_session = None
-        compatible = _compatible_session(saved_session)
+        compatible = _compatible_session(saved_session, backend, workdir)
         if saved_session and not compatible:
             self.store.delete_chat_session(session_key)
             saved_session = None
@@ -1742,8 +1838,8 @@ class ChatEngine:
         turn_prompt = TURN_PROMPT.format(
             resource_notice=resource_notice,
             reply_hint=CONTROL_REPLY_HINT if is_orchestrator else "",
-            trigger_kind=_trigger_kind(trigger_record, orchestrator_id,
-                                       is_orchestrator, role.id),
+            trigger_kind=("explicit recovery request" if source_run_id else
+                          _trigger_kind(trigger_record, orchestrator_id, is_orchestrator, role.id)),
             trigger=json.dumps(trigger_record, ensure_ascii=False))
         recovery_prompt = RECOVERY_PROMPT.format(
             history=_compact_records(history_records), turn_prompt=turn_prompt)
@@ -1751,7 +1847,7 @@ class ChatEngine:
 
         def _load_session() -> tuple[str, str, bool]:
             latest = self.store.get_chat_session(session_key)
-            if not _compatible_session(latest):
+            if not _compatible_session(latest, backend, workdir):
                 if latest:
                     self.store.delete_chat_session(session_key)
                 return "", "", False
@@ -1792,6 +1888,7 @@ class ChatEngine:
             effort=role.effort,
             trigger_message_id=msg_id,
             session_key=session_key, session_id=session_id,
+            require_session_resume=bool(source_run_id and session_id),
             common_prompt=common_prompt, turn_prompt=turn_prompt,
             recovery_prompt=recovery_prompt, context_version=context_version,
             context_changed=bool(session_id and previous_context != context_version),
@@ -2009,7 +2106,6 @@ class ChatEngine:
         visible_path = (chat_workspace_dir(project.id, channel.id, role.id)
                         / "channel-history.json"
                         if role and project else canonical)
-        known_roles: dict[str, Role] = {}
 
         def hidden_peers(viewer: Role) -> bool:
             """主控/同权角色的视图本可直接用原始记录,但项目里有别的仅人工
@@ -2019,6 +2115,8 @@ class ChatEngine:
 
         with self._history_lock:
             messages = self.store.all_messages(channel.id)
+            known_roles = ({r.id: r for r in self.store.list_roles(project.id)}
+                           if project else {})
 
             def _payload(records: list[dict]) -> dict:
                 return {
@@ -2036,10 +2134,10 @@ class ChatEngine:
                 }
 
             canonical_records = [
-                self._message_record(m, project=project) for m in messages]
+                self._message_record(m, project=project, known_roles=known_roles)
+                for m in messages]
             self._atomic_write_json(canonical, _payload(canonical_records))
             if visible_path != canonical:
-                known_roles = {r.id: r for r in self.store.list_roles(project.id)}
                 visible_records = (
                     [self._message_record(m, role, project, known_roles)
                      for m in messages]
@@ -2048,7 +2146,6 @@ class ChatEngine:
             elif project:
                 # 新消息落库时刷新已经建立的角色视图；尚未执行过的角色不提前
                 # 创建 workspace，等首次装配时再生成。
-                known_roles = {r.id: r for r in self.store.list_roles(project.id)}
                 for target_role in known_roles.values():
                     target = (chat_workspace_dir(
                         project.id, channel.id, target_role.id)

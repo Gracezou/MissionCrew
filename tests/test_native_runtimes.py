@@ -394,13 +394,32 @@ def test_claude_waits_for_background_agent_and_keeps_turn_policy_alive(
         provider.shutdown()
 
 
-def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path):
+@pytest.mark.parametrize("adapter,provider_cls,saved_id", [
+    ("codex", CodexRuntimeProvider, "replaced-thread"),
+    ("claude_code", ClaudeRuntimeProvider, "replaced-session"),
+])
+def test_explicit_resume_rejects_a_replacement_native_session(tmp_path, adapter, provider_cls, saved_id):
+    provider = provider_cls(_Fallback(), _fake_command(adapter))
+    saved = {"id": saved_id, "context": "v1"}
+    config = _config(tmp_path, adapter, "SECOND", saved, [])
+    config.require_session_resume = True
+    try:
+        result = provider.start(config)
+        assert not result.success and "指定" in result.summary
+        assert saved["id"] == ""
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path, strict):
     fallback = _Fallback()
     provider = CodexRuntimeProvider(fallback, _fake_command("codex"))
     saved = {"id": "missing-thread", "context": "v1"}
     try:
-        result = provider.start(_config(
-            tmp_path, "codex", "SECOND", saved, []))
+        config = _config(tmp_path, "codex", "SECOND", saved, [])
+        config.require_session_resume = strict
+        result = provider.start(config)
         assert not result.success
         assert "无法恢复" in result.summary and "未创建新会话" in result.summary
         assert saved["id"] == ""
@@ -409,13 +428,15 @@ def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path
         provider.shutdown()
 
 
-def test_claude_resume_failure_is_explicit_and_does_not_start_new_session(tmp_path):
+@pytest.mark.parametrize("strict", [False, True])
+def test_claude_resume_failure_is_explicit_and_does_not_start_new_session(tmp_path, strict):
     fallback = _Fallback()
     provider = ClaudeRuntimeProvider(fallback, _fake_command("claude_code"))
     saved = {"id": "missing-session", "context": "v1"}
     try:
-        result = provider.start(_config(
-            tmp_path, "claude_code", "SECOND", saved, []))
+        config = _config(tmp_path, "claude_code", "SECOND", saved, [])
+        config.require_session_resume = strict
+        result = provider.start(config)
         assert not result.success
         assert "无法恢复" in result.summary and "未创建新会话" in result.summary
         assert saved["id"] == ""

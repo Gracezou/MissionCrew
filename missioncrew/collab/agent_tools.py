@@ -148,6 +148,13 @@ class AgentRunContext:
     depth: int
 
 
+# 这些参数在动作清单中共用一条说明，调用时使用各自的字段名。
+_TASK_UPDATE_FIELDS = ("title", "summary", "body", "status", "labels", "channel_ids",
+                       "url", "meta", "external_id", "external_updated_at")
+_DOCUMENT_CONTENT_FIELDS = ("content", "content_base64")
+_TASK_UPDATE_LABEL = "/".join(_TASK_UPDATE_FIELDS)
+_DOCUMENT_CONTENT_LABEL = " or ".join(_DOCUMENT_CONTENT_FIELDS)
+
 # 动作说明只给 Agent 看(actions 命令与 /api/agent/v1/actions),与 Prompt 一样用英文;
 # 状态示例里的 待处理/处理中 等是项目真实的标签取值,保持原样
 ACTION_DEFINITIONS = {
@@ -219,8 +226,7 @@ ACTION_DEFINITIONS = {
             "snapshot_updated_at": ("the task's updated_at as last read (tasks/ snapshot or a "
                                     "previous result); on version_conflict, error.details.task "
                                     "is the current task"),
-            "title/summary/body/status/labels/channel_ids/url/meta/external_id/"
-            "external_updated_at": (
+            _TASK_UPDATE_LABEL: (
                 "fields to update; labels replaces the whole label list; channel_ids [] "
                 "unbinds all; external_id \"\" removes the sync key; external_updated_at "
                 "null clears it (same rules as task.create)"),
@@ -262,7 +268,7 @@ ACTION_DEFINITIONS = {
         "orchestrator_only": False,
         "arguments": {
             "path": "path in the document library",
-            "content or content_base64": "file content",
+            _DOCUMENT_CONTENT_LABEL: "file content",
             "overwrite": "whether to explicitly overwrite an existing target; default false",
             "message": "optional version message",
         },
@@ -830,82 +836,17 @@ EXECUTOR_CHANNEL_CREATE = {
 }
 
 ACTION_ARGUMENTS = {
-    "role.list": set(),
-    "role.save": {
-        "scope", "id", "runtime_id", "project_id", "enabled", "model", "effort",
-        "usage_linkage_enabled", "manual_only", "name", "description",
-        "capabilities", "preference", "color", "sort_order", "max_concurrency",
-    },
-    "task.create": {
-        "title", "summary", "body", "labels", "channel_ids", "status", "source",
-        "url", "meta", "external_id", "external_updated_at",
-    },
-    "task.update": {
-        "id", "snapshot_updated_at", "title", "summary", "body", "status",
-        "labels", "properties", "channel_ids", "url", "meta", "external_id",
-        "external_updated_at",
-    },
-    "task.brief": {"id", "content", "status"},
-    "task.delete": {"id"},
-    "task.archive": {"id"},
-    "task.restore": {"id"},
-    "document.publish": {
-        "path", "content", "content_base64", "overwrite", "message",
-    },
-    "document.rename": {"source", "target"},
-    "document.delete": {"path"},
-    "document.history": {"path", "revision", "limit"},
-    "message.publish": {"channel", "content", "mentions"},
-    "channel.runs.list": {"channel", "status"},
-    "channel.run.stop": {"run_id"},
-    "channel.run.recover": {"run_id"},
-    "channel.history": {"channel", "limit", "before_id"},
-    "channel.list": {"scope"},
-    "channel.create": {"id", "name", "purpose", "workdir"},
-    "workspace.create": {"repo_path", "name", "base", "branch", "channel_id",
-                          "channel_name", "purpose", "task_id", "allow_dirty"},
-    "workspace.finish": {"channel"},
-    "workspace.remove": {"channel"},
-    "channel.update": {"id", "name", "purpose", "workdir"},
-    "channel.archive": {"id"},
-    "channel.restore": {"id"},
-    "dashboard.save": {"id", "name", "description", "layout", "mode",
-                       "kind", "source", "filters", "group_by"},
-    "dashboard.delete": {"id"},
-    "dashboard.list": {"id"},
-    "board_source.save": {"id", "name", "description", "columns", "cards",
-                          "mode"},
-    "board_source.delete": {"id"},
-    "board_source.list": set(),
-    "guideline.save": {"markdown", "enabled", "original_name"},
-    "guideline.delete": {"name"},
-    "guideline.list": {"name"},
-    "guideline.history": {"name", "revision", "limit"},
-    "skill.save": {
-        "id", "markdown", "enabled", "name", "description", "instructions",
-    },
-    "skill.delete": {"id"},
-    "skill.list": {"id"},
-    "skill.history": {"id", "revision", "file", "limit"},
-    "automation.save": {
-        "id", "name", "description", "script", "cron", "enabled", "webhook_source",
-        "github_repos", "github_events",
-        "actions", "timeout_seconds",
-    },
-    "automation.delete": {"id"},
-    "automation.list": {"id", "runs", "before_id"},
-    "webhook.history": {"source", "id", "event", "action", "repository", "limit",
-                        "before_id"},
-    "automation.run": {"id"},
-    "credential.request": {"name", "description", "variables"},
-    "callback.create": {"note", "delay_seconds", "at", "channel", "task",
-                        "webhook_source", "event", "action", "repository", "filter"},
-    "callback.list": set(),
-    "callback.cancel": {"id"},
-    "recycle.list": set(),
-    "recycle.restore": {"id"},
-    "recycle.purge": {"id"},
+    action: set(definition["arguments"]) for action, definition in ACTION_DEFINITIONS.items()
 }
+for action, label, fields in (
+    ("task.update", _TASK_UPDATE_LABEL, _TASK_UPDATE_FIELDS),
+    ("document.publish", _DOCUMENT_CONTENT_LABEL, _DOCUMENT_CONTENT_FIELDS),
+):
+    ACTION_ARGUMENTS[action].remove(label)
+    ACTION_ARGUMENTS[action].update(fields)
+# 保留旧调用可用、动作清单中不展示的字段。
+ACTION_ARGUMENTS["dashboard.save"].add("mode")
+ACTION_ARGUMENTS["skill.save"].update(("name", "description", "instructions"))
 
 # 成功的写操作要在发起调用的会话中留下可见回执。停止动作本身已经生成聊天
 # 消息;查询动作是只读操作,这些动作都不额外插入回执。message.publish 单独

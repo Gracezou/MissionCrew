@@ -45,6 +45,40 @@ def _receipts(store, action):
             if m["kind"] == "agent_tool" and f"`{action}`" in m["content"]]
 
 
+def test_grouped_argument_labels_are_help_text_only(seeded):
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    for action, label in (
+        ("task.update", "title/summary/body/status/labels/channel_ids/url/meta/"
+                        "external_id/external_updated_at"),
+        ("document.publish", "content or content_base64"),
+    ):
+        assert label in actions[action]["arguments"]
+        with pytest.raises(AgentToolError) as invalid:
+            _call(chat, identity, run_id, action, {label: "payload"})
+        assert invalid.value.code == "invalid_arguments"
+        assert f"未知参数: {label}" in invalid.value.message
+
+
+def test_unlisted_save_arguments_remain_scoped_to_their_actions(seeded):
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    assert "mode" not in actions["dashboard.save"]["arguments"]
+    skill_fields = {"name": "Review", "description": "Review changes",
+                    "instructions": "Inspect the diff."}
+    assert skill_fields.keys().isdisjoint(actions["skill.save"]["arguments"])
+
+    with pytest.raises(AgentToolError) as missing:
+        _call(chat, identity, run_id, "dashboard.save", {"id": "missing", "mode": "update"})
+    assert missing.value.code == "not_found"
+    skill = _call(chat, identity, run_id, "skill.save", {"id": "review", **skill_fields})["skill"]
+    assert {key: skill[key] for key in skill_fields} == skill_fields
+    with pytest.raises(AgentToolError, match="未知参数: mode"):
+        _call(chat, identity, run_id, "skill.save", {"id": "review", "mode": "update"})
+
+
 def test_channel_update_changes_fields_within_project_repos(seeded, tmp_path):
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)

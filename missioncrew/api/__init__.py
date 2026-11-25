@@ -13,9 +13,10 @@ from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .. import __version__
-from . import (agent_tools, automations, backends, boards, chat, documents,
-               guidelines, project_imports, projects, recycle_bin, resources,
-               roles, spa, system, tasks, uploads)
+from . import (agent_tools, automations, backends, boards, chat, credentials,
+               documents, github, guidelines, project_imports, projects, recycle_bin, resources, roles,
+               spa, system, tasks, uploads, webhook_sources)
+from ..collab.credentials import refresh_credential_contexts
 from .context import ApiContext
 
 
@@ -36,8 +37,13 @@ def create_app(webhook_host: Optional[str] = None,
         runtime_manager.set_usage_refresh_handler(
             ctx.role_usage_linkage.request_refresh)
         runtime_manager.start_idle_reaper()
+        # 凭据目录与 gh 配置按库里的环境重写一遍:升级迁移(单值凭据改成环境)改的是库,
+        # 各项目目录里还是旧文件,不等到下一次派发才更新
+        refresh_credential_contexts(ctx.store, "")
         ctx.role_usage_linkage.start()
         ctx.automation_scheduler.start()
+        ctx.github_poller.start()
+        ctx.chat.callbacks.start()
         if ctx.webhook_listener:
             ctx.webhook_listener.start()
         try:
@@ -46,7 +52,10 @@ def create_app(webhook_host: Optional[str] = None,
             runtime_manager.set_usage_refresh_handler(None)
             if ctx.webhook_listener:
                 ctx.webhook_listener.stop()
+            # 先停轮询再停调度:调度器 stop 会关掉脚本执行池,轮询不能再往里投事件
+            ctx.github_poller.stop()
             ctx.automation_scheduler.stop()
+            ctx.chat.callbacks.stop()
             ctx.role_usage_linkage.stop()
             # 先等聊天执行池收尾再关 runtime:工作线程可能仍在驱动 Agent,
             # 且它按调用时的环境变量写频道历史,不能活过应用生命周期
@@ -58,7 +67,7 @@ def create_app(webhook_host: Optional[str] = None,
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     for module in (system, chat, agent_tools, roles, projects, resources, guidelines,
                    project_imports, documents, boards, recycle_bin, backends, tasks,
-                   automations, uploads):
+                   automations, webhook_sources, credentials, github, uploads):
         module.register(app, ctx)
     spa.register(app, ctx)   # catch-all 兜底,必须最后
     return app

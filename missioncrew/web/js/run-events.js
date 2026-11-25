@@ -29,6 +29,13 @@ function runStatusLabel(status) {
 const isLiveRun = run => ["queued", "running", "waiting_user"].includes(run.status);
 
 function runSummary(run) {
+  // 排队时并入另一次运行的记录:自己没有执行过程,只说明去向并可跳到那次运行
+  if (run.status === "merged")
+    return `<span class="rc-dot merged">●</span>
+      <b style="color:${roleColor[run.role_id] || "var(--muted)"}">@${esc(run.role_id)}</b>
+      <span class="muted">排队时已合并,与其他消息在同一轮处理</span>
+      ${run.merged_into ? `<button class="rc-jump" data-run-id="${run.merged_into}"
+        onclick="jumpToRunCard(event, this)">查看那一轮</button>` : ""}`;
   const st = runStatusLabel(run.status);
   const live = isLiveRun(run);
   const secs = run.finished_at ? ` · ${Math.max(1, Math.round(run.finished_at - run.created_at))}s` : "";
@@ -39,7 +46,7 @@ function runSummary(run) {
   ].filter(Boolean).join(" · ");
   return `<span class="rc-dot ${live ? "live" : run.status}">●</span>
     <b style="color:${roleColor[run.role_id] || "var(--muted)"}">@${esc(run.role_id)}</b>
-    <span class="muted">${combo} · ${esc(st)}${secs}${run.recovered_from_run_id ? ` · 续跑自 #${Number(run.recovered_from_run_id)}` : ""}</span>
+    <span class="muted">${combo} · ${esc(st)}${secs}${run.merged_count ? ` · 合并处理 ${Number(run.merged_count) + 1} 条消息` : ""}${run.recovered_from_run_id ? ` · 续跑自 #${Number(run.recovered_from_run_id)}` : ""}</span>
     ${run.error ? `<span class="rc-err" title="${esc(run.error)}">${esc(run.error.slice(0, 120))}</span>` : ""}
     ${run.status === "interrupted" ? `<button type="button" class="rc-recover" data-run-id="${run.id}"
       onclick="reviewChatRunRecovery(event, this)">${run.recovery_run_id ? `查看续跑 #${Number(run.recovery_run_id)}` : "查看恢复"}</button>` : ""}
@@ -120,6 +127,18 @@ function syncEarlierInterruptedRuns(pane, channelId, before) {
     if (group.open && !more.disabled && list.firstElementChild === more) more.click();
   };
   pane.prepend(group);
+}
+
+// 从并入记录跳到实际执行的那次运行;卡片不在已加载的消息范围内时给出提示
+function jumpToRunCard(event, button) {
+  event.preventDefault();
+  const pane = button.closest(".run-card")?.parentElement;
+  const target = pane?.querySelector(`.run-card[data-run-id="${button.dataset.runId}"]`);
+  if (!target) { toast("那次运行不在当前已加载的消息里", "info"); return; }
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.remove("rc-flash");
+  void target.offsetWidth;   // 重新触发高亮动画
+  target.classList.add("rc-flash");
 }
 
 async function stopChatRun(event, runId) {
@@ -552,7 +571,7 @@ async function renderRunEvents(run, card, pane) {
 async function refreshRunEvents(card, pane) {
   const run = card.run;
   const key = card.eventsKey;
-  if (card.fetching || card.loadedKey === key) return;
+  if (run.status === "merged" || card.fetching || card.loadedKey === key) return;
   if (isLiveRun(run) ? !run.events_size : !card.el.open) return;
   card.fetching = true;
   const ok = await renderRunEvents(run, card, pane);
@@ -623,11 +642,16 @@ function syncRuns(runs, surface = null) {
     if (!live)
       pane.querySelector(`.run-live-output[data-run-id="${run.id}"]`)?.remove();
     card.eventsKey = `${run.status}:${run.events_size}`;
-    const summaryKey = `${card.eventsKey}:${run.recovery_run_id || ""}`;
+    const summaryKey = `${card.eventsKey}:${run.recovery_run_id || ""}:${run.merged_count || 0}`;
     if (card.summaryKey !== summaryKey) {
       card.summaryKey = summaryKey;
       card.el.querySelector("summary").innerHTML = runSummary(run);
       if (!card.userToggled) card.el.open = live;   // 运行中自动展开,结束自动收起
+      if (run.status === "merged") {
+        // 并入的运行没有过程事件,不必请求
+        card.el.querySelector(".rc-events").innerHTML = `<div class="re re-status">这条消息到达时 @${
+          esc(run.role_id)} 还在处理上一轮;轮到它时,排队的几条消息合并成了一轮,过程与回复都在那一轮里。</div>`;
+      }
     }
     void refreshRunEvents(card, pane);
   }

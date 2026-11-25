@@ -33,8 +33,8 @@ def test_human_reviews_and_explicitly_recovers_once(seeded, tmp_path, monkeypatc
     seeded.put_chat_session("general::dev", "general", "dev", backend.id,
                             backend.adapter, str(tmp_path), "native-thread", "v1")
     submitted = []
-    monkeypatch.setattr(ChatEngine, "_submit_run",
-                        lambda self, run_id, *args: submitted.append(run_id))
+    monkeypatch.setattr(ChatEngine, "_schedule",
+                        lambda self, channel, role_id, run_id: submitted.append(run_id))
     url = f"/api/chat/runs/{source}"
     info = client.get(f"{url}/recovery").json()
     assert info["trigger"] == {"id": msg_id, "author": "human", "content": "检查构建产物"}

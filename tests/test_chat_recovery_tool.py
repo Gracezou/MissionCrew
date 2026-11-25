@@ -33,7 +33,7 @@ def test_project_orchestrator_discovers_and_recovers_a_run_once(seeded, tmp_path
     assert snapshot["runs"][0]["recovery_run_id"] is None
 
     submitted = []
-    monkeypatch.setattr(chat, "_execute", lambda run_id, *args, **kwargs: submitted.append(run_id))
+    monkeypatch.setattr(chat, "_schedule", lambda channel, role_id, run_id: submitted.append(run_id))
     try:
         first = chat.agent_tools.execute(
             identity, "channel.run.recover", {"run_id": target}, None, "initial")

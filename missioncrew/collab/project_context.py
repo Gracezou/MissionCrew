@@ -7,6 +7,8 @@ import re
 import tempfile
 import threading
 
+from .credentials import credential_context_dir
+from .github import github_cli_dir
 from .documents import DocumentLibrary, document_resource_url
 from .platform_docs import platform_docs_dir
 from .resource_urls import (guideline_resource_url, missioncrew_project_url,
@@ -97,6 +99,10 @@ def project_allowed_dirs(project: Project, library: DocumentLibrary,
                     else [str(guideline_context_dir(project)),
                           str(skill_context_dir(project))])
     context_dirs.append(str(project_skill_library_dir(project.id)))
+    if workspace_dir is not None:
+        context_dirs.append(str(credential_context_dir(project.id)))   # 工作区 credentials/ 的链接目标
+        # 项目有 GitHub 身份时 gh 从这里读登录状态(GH_CONFIG_DIR);没有时目录不存在,下面自动跳过
+        context_dirs.append(str(github_cli_dir(project.id)))
     if workspace_dir is not None:
         context_dirs.append(str(platform_docs_dir()))   # 工作区 platform-docs/ 的链接目标
     for raw in [*project.repo_paths(), str(library.root), *context_dirs]:
@@ -209,13 +215,25 @@ def render_project_context(project: Project, library: DocumentLibrary,
         "rerun the same command unchanged; the platform handles it under its approval policy and keeps "
         "a record. Do not conclude that the environment is read-only and give up; only if the request "
         "is denied, stop and report as described above.\n"
+        # 多角色(与人类)可能同时改同一个仓:改代码一律进自己的 worktree,互不踩 checkout
+        "- Code changes go in your own git worktree: several roles and humans may work in the same "
+        "repository at the same time, so never edit files in a shared checkout directly. Before "
+        "changing files in a git repository, create a worktree on a new branch (`git worktree add "
+        "-b <branch> <path>`) and make all edits, builds and commits there; follow the repository's "
+        "own worktree convention if it has one, otherwise place it at "
+        "`<repository>/.worktrees/<name>` so it stays inside the authorized directories. If the "
+        "working directory is already a worktree created for this task, keep working in it. Reading "
+        "code and running checks that change no files need no worktree. State the worktree path and "
+        "branch in your final reply; committing, merging back and cleanup follow the brief and the "
+        "project guidelines (details in section 3 of the manual).\n"
         "- Linking: a final reply that references project documents must write them as "
         "`[title](" + documents_url + "/path)`; never output internal read/write directories, the "
         "real `.missioncrew` path or `file://` links. URLs of other resources: channel "
         f"`{project_url}/channels/<channel id>`, task `{project_url}/tasks/<task id>`, "
         f"dashboard `{project_url}/dashboards/<dashboard id>` (the built-in task board id is "
         f"`tasks`), guideline `{project_url}/guidelines/<name>`, skill `{project_url}/skills/<id>`, "
-        f"recycle bin `{project_url}/recycle-bin`; these URLs are web identifiers, not file paths.\n"
+        f"recycle bin `{project_url}/recycle-bin`, project settings `{project_url}/settings`; "
+        "these URLs are web identifiers, not file paths.\n"
         "- Workspace files stay out of business repositories: the `.missioncrew` workspace lives "
         "outside the business repositories, and its files never enter business source code or "
         "commits. Write collaboration drafts, reports and verification records from ordinary chats "

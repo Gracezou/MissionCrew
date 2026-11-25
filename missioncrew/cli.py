@@ -140,7 +140,7 @@ def serve(host: Optional[str] = None, port: int = DEFAULT_SERVE_PORT,
     typer.echo(f"MissionCrew 看板: http://{host}:{port}")
     if webhook_port:
         typer.echo(f"Webhook 入口: http://{webhook_host}:{webhook_port}"
-                   "/hooks/<项目>/<脚本>")
+                   "/hooks/<来源路径>")
     uvicorn.run(create_app(webhook_host=webhook_host, webhook_port=webhook_port),
                 host=host, port=port, log_level="warning")
 
@@ -363,6 +363,8 @@ def role_list(project: Optional[str] = typer.Option(None, "-p", "--project")):
         state = " 状态=启用" if r.enabled else " 状态=停用"
         if r.manual_only:
             state += " 仅人工点名"
+        if r.max_concurrency:
+            state += f" 并发上限={r.max_concurrency}"
         traits = f" 偏好={r.preference}" if r.preference else ""
         caps = f" 能力=[{','.join(r.capabilities)}]" if r.capabilities else ""
         typer.echo(
@@ -390,6 +392,8 @@ def role_add(file: Path = typer.Option(..., help="角色定义 YAML(单个或列
         if r.manual_only and project_config.orchestrator_role_id == r.id:
             raise typer.BadParameter(
                 f"主控角色 @{r.id} 不能设为仅人工点名；请先为项目选择其他主控")
+        if not isinstance(r.max_concurrency, int) or r.max_concurrency < 0:
+            raise typer.BadParameter(f"@{r.id} 的 max_concurrency 必须是非负整数(0 = 不限)")
         backend = store.get_backend(r.runtime_id)
         if backend is None:
             raise typer.BadParameter(f"@{r.id} 缺少有效的 runtime_id")

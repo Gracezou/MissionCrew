@@ -9,15 +9,15 @@
 
 ## 自动化脚本
 
-- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建；主控改脚本前用 `automation.list`（带 `id`）读取当前全文，改完可用 `automation.run` 立即试跑。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 不定时）、`enabled`（只管定时触发）、`webhook`（是否接受 webhook 投递，可与 cron 同时开启，见下文「Webhook 触发」）、`actions`、`timeout_seconds`。手动触发始终可用。
+- **创建**：Web 侧栏「自动化」的 ＋，或让主控在聊天里用 `automation.save` 建；主控改脚本前用 `automation.list`（带 `id`）读取当前全文，改完可用 `automation.run` 立即试跑。字段：`id`、`name`、`description`、`script`（带 shebang 时按可执行文件运行，否则交给 bash）、`cron`（五段 crontab，空 = 不定时）、`enabled`（只管定时触发）、`webhook_source`（订阅的全局 webhook 来源 id，空 = 不接受 webhook；可与 cron 同时使用，见下文「Webhook 触发」）、`github_repos` 与 `github_events`（仅当订阅的是 GitHub 轮询来源：要哪些仓库的哪些事件，见下文「GitHub 轮询来源」）、`actions`、`timeout_seconds`。手动触发始终可用。
 - **调度**：所有 cron 触发都走统一定时入口；同一脚本同时只运行一次，上一次还没跑完时定时与手动触发直接跳过，webhook 投递排队；停机期间错过的定时触发不补跑。
 - **权限**：脚本身份的可用动作以自身 `actions` 白名单为事实源，默认 `task.create`、`task.update`、`task.brief`、`message.publish`、`document.publish`、`dashboard.save`、`board_source.save`；审计 actor 记为 `automation:<项目>:<脚本>`。
-- **运行记录**：自动化详情页可查看每次运行的触发方式（定时 / Webhook / 手动，webhook 另记来源、事件名与投递 id）、退出码与 stdout/stderr。退出码非零记为失败。运行记录保留 7 天，不限条数；每个脚本最近一次的记录始终保留。主控用 `automation.list` 带 `id` 读取最近几次运行（输出只回传末尾），需要更早的记录时用 `before_id` 向前翻页，据此排查失败的脚本。
+- **运行记录**：自动化详情页可查看每次运行的触发方式（定时 / Webhook / 手动，webhook 另记 webhook 来源、发送平台、事件名与投递 id）、退出码与 stdout/stderr。退出码非零记为失败。运行记录保留 7 天，不限条数；每个脚本最近一次的记录始终保留。主控用 `automation.list` 带 `id` 读取最近几次运行（输出只回传末尾），需要更早的记录时用 `before_id` 向前翻页，据此排查失败的脚本。
 
 ### 运行环境
 
 - **工作目录**：`<数据目录>/automations/<项目 id>/<脚本短 id>/`，跨次运行保留，可以存放状态文件（例如上次同步的时间）。每次运行前平台把脚本正文写成该目录下的 `script`，不要用这个文件名保存别的内容。
-- **环境变量**：脚本继承 MissionCrew 服务进程的环境，`PATH` 以及 `gh`、`gitcode` 等 CLI 的登录状态都来自启动服务的用户；平台另外注入：
+- **环境变量**：脚本继承 MissionCrew 服务进程的环境，`PATH` 以及 `gh`、`gitcode` 等 CLI 的登录状态都来自启动服务的用户；项目有 GitHub 身份（`GITHUB` 环境的 `TOKEN`）时，脚本里的 `gh` 与 git 改用这个身份，不用自己传 token（机制见 [harness 工作区边界](agent-harness-workspace.md) 的「GitHub 身份」）。平台另外注入：
 
   | 变量 | 含义 |
   | --- | --- |
@@ -26,9 +26,11 @@
   | `MISSIONCREW_AGENT_TOKEN_FILE` | 本次运行的一次性令牌文件（工作目录下的 `.agent-tool-token`）；CLI 自行读取，脚本不需要读取，也不要打印 |
   | `MISSIONCREW_PROJECT_ID` | 项目 id |
   | `MISSIONCREW_AUTOMATION_ID` | 脚本 id，格式 `<项目 id>:<脚本短 id>` |
+  | `MISSIONCREW_CREDENTIALS_DIR` | 项目可用凭据的目录（全局环境加本项目环境，同名时项目的整份覆盖全局），每个环境一个子目录、每个变量一个文件；在需要的命令里内联读取，如 `NPM_TOKEN="$(cat "$MISSIONCREW_CREDENTIALS_DIR/NPM/TOKEN")" npm publish`，secret 不要打印。stdout/stderr 落库前同样会把 secret 原文替换成 `[credential:<环境>.<变量>]` |
   | `MISSIONCREW_TRIGGER` | 本次运行的触发来源：`cron`、`webhook` 或 `manual`（人在页面点「立即运行」或主控 `automation.run`） |
   | `MISSIONCREW_WEBHOOK_EVENT_FILE` | 仅 webhook 触发：本次事件文件的路径，格式见下文「Webhook 触发」 |
-  | `MISSIONCREW_WEBHOOK_PROVIDER` / `MISSIONCREW_WEBHOOK_EVENT` / `MISSIONCREW_WEBHOOK_DELIVERY` | 仅 webhook 触发：来源（`github`、`gitcode`、`gitlab` 或空）、事件名（如 `issues`、`Issue Hook`）与投递 id，便于脚本直接按事件分支 |
+  | `MISSIONCREW_WEBHOOK_SOURCE` | 仅 webhook 触发：收到这次投递的 webhook 来源 id |
+  | `MISSIONCREW_WEBHOOK_PROVIDER` / `MISSIONCREW_WEBHOOK_EVENT` / `MISSIONCREW_WEBHOOK_DELIVERY` | 仅 webhook 触发：发送平台（`github`、`gitcode`、`gitlab` 或空）、事件名（如 `issues`、`Issue Hook`）与投递 id，便于脚本直接按事件分支 |
 
 - **令牌与超时**：令牌在运行结束时立即撤销，超时被终止时同样撤销；运行超过 `timeout_seconds` 的脚本会被终止并记为超时。
 - **调用平台动作**：
@@ -45,11 +47,16 @@
 
 ## Webhook 触发
 
-开启 `webhook` 的脚本可以由外部系统（GitHub、GitCode、GitLab 或自建服务）推送事件触发，事件一到就运行，不必等下一次定时；同一个脚本可以同时保留 cron 做定期兜底。
+外部系统（GitHub、GitCode、GitLab 或自建服务）推送的事件经 **webhook 来源** 触发脚本，事件一到就运行，不必等下一次定时；同一个脚本可以同时保留 cron 做定期兜底。没有 GitHub 访问得到的公网地址，或没有权限在仓库上配置 webhook 时，见下文「GitHub 轮询来源」：平台改用 token 主动查询事件，脚本的写法不变。
 
-- **专用端口**：`mc serve` 另起一个只接收 webhook 的端口，默认 `8322`（`--webhook-port` 或环境变量 `MISSIONCREW_WEBHOOK_PORT` 修改，`0` 关闭），监听地址默认与 `--host` 相同，可用 `--webhook-host` 或 `MISSIONCREW_WEBHOOK_HOST` 单独指定。这个端口上只有 `POST /hooks/<项目 id>/<脚本短 id>` 一条路由：其他路径一律 404、其他方法 405，不提供页面、API 或静态文件。主服务没有身份验证，需要让外部系统访问时只转发 webhook 端口（端口转发、隧道或反向代理），不要暴露主服务端口。端口被占用时主服务照常启动，自动化详情页的「Webhook」区显示未监听的原因。
-- **地址与密钥**：开启后在自动化详情页的「Webhook」区查看投递地址与密钥，可以复制或重新生成（重新生成后旧密钥立即失效，外部系统要同步修改）。密钥在首次开启时生成，关闭 webhook 后保留。它只在这个页面显示，总览数据和 Agent Tool 的结果里都没有：主控用 `automation.save` 开启 webhook 后，应把投递路径告诉人，由人到页面取密钥去配置外部系统。
-- **验签**：每次投递至少带下表中的一种凭据，并且用本脚本的密钥验得过，否则返回 401。带了多种时任一种验过即可：经转发服务送来的请求常常原样保留上游平台的签名头（例如 GitHub 的 `X-Hub-Signature-256`，它是用上游平台的密钥签的），这种验不过的签名不会导致拒收，只要同一请求里还有一种凭据验得过。
+webhook 来源是平台全局的投递入口，只定义投递地址、密钥和启停，不属于某个项目。外部系统按来源配置一次；各项目的脚本选择来源来订阅它，同一个来源可以被多个脚本（包括不同项目的脚本）共用，例如一个 GitHub 组织级 webhook 同时驱动 Issue 同步和 PR 审查两个脚本。
+
+- **专用端口**：`mc serve` 另起一个只接收 webhook 的端口，默认 `8322`（`--webhook-port` 或环境变量 `MISSIONCREW_WEBHOOK_PORT` 修改，`0` 关闭），监听地址默认与 `--host` 相同，可用 `--webhook-host` 或 `MISSIONCREW_WEBHOOK_HOST` 单独指定。这个端口上只有 `POST /hooks/<来源投递路径>` 一条路由：其他路径一律 404、其他方法 405，不提供页面、API 或静态文件。主服务没有身份验证，需要让外部系统访问时只转发 webhook 端口（端口转发、隧道或反向代理），不要暴露主服务端口。端口被占用时主服务照常启动，全局设置的「Webhook 来源」区与自动化详情页的「Webhook」区显示未监听的原因。
+- **创建来源**：在「全局设置 → Webhook 来源」新建，字段为来源 id、名称、描述、投递路径和是否接受投递。投递路径是投递地址中 `/hooks/` 之后的部分，留空时与来源 id 相同，也可以写成多段（最多 4 段，每段只含字母、数字、下划线、连字符），全局唯一；修改路径后外部系统要同步改地址。停用来源后投递一律返回 404，订阅它的脚本保持订阅关系。仍被脚本订阅的来源不能删除，先在脚本里改选其他来源或取消 webhook 触发。来源只由人在页面上维护，Agent Tool 没有对应动作。
+- **密钥**：创建来源时自动生成，在来源的编辑框里查看、复制或重新生成（重新生成后旧密钥立即失效，所有向这个来源投递的外部系统都要同步修改）。密钥只在这个编辑框显示，总览数据、自动化列表和 Agent Tool 的结果里都没有。
+- **订阅**：在脚本编辑页的「Webhook 来源」下拉框选择来源，或由主控用 `automation.save` 传 `webhook_source`（来源 id，空字符串取消 webhook 触发）。主控用 `automation.list` 查看可选来源；没有合适的来源时，应请人到全局设置新建，再按人给的来源 id 订阅。来源收到的每次投递都会触发所有订阅它的脚本，每个脚本拿到同一份事件。
+- **旧版迁移**：早先直接在脚本上开启的 webhook 已自动迁成同名来源（来源 id 冲突时加项目前缀），沿用原投递地址 `/hooks/<项目 id>/<脚本短 id>` 与原密钥，外部系统不用改。
+- **验签**：每次投递至少带下表中的一种凭据，并且用该来源的密钥验得过，否则返回 401。带了多种时任一种验过即可：经转发服务送来的请求常常原样保留上游平台的签名头（例如 GitHub 的 `X-Hub-Signature-256`，它是用上游平台的密钥签的），这种验不过的签名不会导致拒收，只要同一请求里还有一种凭据验得过。
 
   | 方式 | 请求头 | 适用 |
   | --- | --- | --- |
@@ -60,12 +67,13 @@
 
   Standard Webhooks 签名的内容是 `<webhook-id>.<webhook-timestamp>.<原始正文>`，时间戳与平台时间相差超过 5 分钟即拒收（防重放）。新生成的密钥是规范格式 `whsec_<base64>`，规范的签名库可以直接使用，签名时用 base64 解码后的字节；早先生成的非 `whsec_` 密钥用原文字节（签名库的 raw 格式）。GitHub 风格签名与密码方式始终把整串密钥当作原文。
 
-- **请求与响应**：正文支持 JSON 与 GitHub 的表单格式（`payload=<json>`），上限 25 MiB（超出返回 413），声明为 JSON 却解析失败返回 400。接受后立即返回 `202 {"ok": true, "run_id": <运行记录 id>}`，脚本在后台运行；GitHub 的 `ping` 事件由平台直接回 `200 {"ok": true, "pong": true}`，不运行脚本。脚本不存在、不属于该项目或没开 webhook 时一律 404，不区分原因。
-- **排队**：脚本正在运行时到达的投递按到达顺序排队，返回 `202 {"ok": true, "queued": true}`；每个脚本最多排 20 条，满了返回 503。本次运行结束后接着跑下一条，排到时以脚本最新定义为准：这期间关掉 webhook 或删除脚本，排队的事件会被丢弃并记审计。队列只在内存里，服务重启时丢失，所以需要不漏事件的同步要靠 cron 定期全量兜底。
+- **请求与响应**：正文支持 JSON 与 GitHub 的表单格式（`payload=<json>`），上限 25 MiB（超出返回 413），声明为 JSON 却解析失败返回 400。接受后立即返回 `202 {"ok": true, "run_ids": [<运行记录 id>...], "queued": <排队数>}`，脚本在后台运行；还没有脚本订阅该来源时 `run_ids` 为空，不运行任何脚本。GitHub 的 `ping` 事件由平台直接回 `200 {"ok": true, "pong": true}`，不运行脚本。来源不存在或已停用时一律 404，不区分原因。
+- **排队**：按脚本分别排队。投递到达时正在运行的脚本把这份事件按到达顺序排队，计入响应的 `queued`；每个脚本最多排 20 条。某个脚本排满时只丢弃给它的这一份（记审计），响应带 `dropped` 计数，其他脚本照常运行；所有订阅的脚本都排满时返回 503，让发送方稍后重试。本次运行结束后接着跑下一条，排到时以最新定义为准：这期间脚本被删除、改选其他来源或取消 webhook，或来源被停用、删除，排队的事件会被丢弃并记审计。队列只在内存里，服务重启时丢失，所以需要不漏事件的同步要靠 cron 定期全量兜底。
 - **事件文件**：webhook 触发的运行里，事件写在工作目录下的 `.webhook-event.json`（路径即 `MISSIONCREW_WEBHOOK_EVENT_FILE`），运行结束即删除：
 
   ```json
   {
+    "source": "github-org",
     "provider": "github",
     "event": "issues",
     "delivery": "<投递 id>",
@@ -77,10 +85,12 @@
   }
   ```
 
-  `provider` 按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串，这时 `delivery` 取 Standard Webhooks 的 `webhook-id`；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
-- **过滤交给脚本**：平台不按事件类型、仓库或动作过滤，脚本读事件后对不关心的投递直接 `exit 0`。这样的运行也会留一条记录，便于排查到过哪些事件。
+  `source` 是收到投递的 webhook 来源 id；`provider` 是发送平台，按事件名头识别（`X-GitHub-Event`、`X-GitCode-Event`、`X-Gitlab-Event`），都没有时为空串，这时 `delivery` 取 Standard Webhooks 的 `webhook-id`；`headers` 是键为小写的请求头，已去掉携带密钥的 `Authorization`、`X-GitCode-Token`、`X-Gitlab-Token`；`payload` 是解析后的 JSON，正文不是 JSON 时为 `null`，原文放在 `body`。
+- **投递记录**：每个来源收到的事件都留有记录，保留 7 天、每个来源最多 1000 条。通过验签的投递都会记，包括还没有脚本订阅时收到的和 GitHub 的 `ping`；被拒收（验签失败）的投递不记，原因在审计里。每条记录有收到时间、发送平台、事件名、动作（`payload.action`，GitLab 取 `object_attributes.action`）、仓库（`payload.repository.full_name`，GitLab 取 `project.path_with_namespace`）、投递 id、验证方式，以及交给了哪些脚本和结果（运行记录 id、已排队或因排队已满被丢弃；空表示没有脚本接收）。事件全文也一并保存，与脚本读到的事件文件相同；超过 256 KB 的只保存请求头和摘要，全文里出现的已保存凭据同样会被替换成 `[credential:<名称>]`。人在「全局设置 → Webhook 来源」每行的「记录」里查看，可以按事件、动作、仓库筛选，点一行看全文；自动化详情页的「Webhook」区也有同一个入口。主控用 `webhook.history` 查询同一份记录（参数 `source`，可选 `event`、`action`、`repository`、`limit`、`before_id`；带 `id` 返回那一条的事件全文 `event_file`），写脚本的过滤条件前先看来源实际送来过哪些事件，脚本没有按预期运行时也据此排查。
+- **一次性订阅**：除了让自动化脚本长期订阅来源，聊天角色还可以用 `callback.create` 的 `webhook_source` 只等一个事件：登记之后来源收到的第一个匹配事件（按事件名、动作、仓库和可选的过滤脚本判断）让该角色回到登记的频道继续工作，到超时时间没等到也会回来。过滤脚本仅在当前环境有可用沙箱时接受；没有沙箱时不能使用过滤脚本，但可以登记不带过滤脚本的回调。适合「我的 PR 合并后接着做下一步」这类等待，不必为此建一个长期运行的脚本。参数与过滤脚本的约定见 [Agent Tool API](agent-tool-api.md)。
+- **过滤交给脚本**：平台不按事件类型、仓库或动作过滤，共用来源的每个脚本都会收到该来源的全部投递，脚本读事件后对不关心的投递直接 `exit 0`。这样的运行也会留一条记录，便于排查到过哪些事件。
 
-示例：Issue 打开、关闭或重新打开时立即同步，其余事件忽略；cron 每 30 分钟兜底一次。注意 `board_source.save` 是整体同步，webhook 触发时也要拉全量再保存，不能只拿事件里那一条 Issue 去保存，否则其他任务会被删除。
+示例：`acme/webshop` 的 Issue 打开、关闭或重新打开时立即同步，其余事件（包括同一来源送来的其他仓库事件）忽略；cron 每 30 分钟兜底一次。注意 `board_source.save` 是整体同步，webhook 触发时也要拉全量再保存，不能只拿事件里那一条 Issue 去保存，否则其他任务会被删除。
 
 ```bash
 #!/usr/bin/env bash
@@ -88,6 +98,8 @@ set -euo pipefail
 
 if [ "$MISSIONCREW_TRIGGER" = webhook ]; then
   [ "$MISSIONCREW_WEBHOOK_EVENT" = issues ] || { echo "忽略事件 $MISSIONCREW_WEBHOOK_EVENT"; exit 0; }
+  repo=$(jq -r '.payload.repository.full_name // ""' "$MISSIONCREW_WEBHOOK_EVENT_FILE")
+  [ "$repo" = acme/webshop ] || { echo "忽略仓库 $repo"; exit 0; }
   action=$(jq -r '.payload.action' "$MISSIONCREW_WEBHOOK_EVENT_FILE")
   case "$action" in
     opened|closed|reopened) ;;
@@ -96,6 +108,78 @@ if [ "$MISSIONCREW_TRIGGER" = webhook ]; then
 fi
 
 # 定时、手动与命中的 webhook 走同一段全量同步，写法见下文「闭环示例」
+```
+
+## GitHub 轮询来源
+
+外部 webhook 需要一个 GitHub 访问得到的公网地址，还要有仓库或组织的管理权限去配置。手里只有一个个人访问令牌（PAT）时，改用 **GitHub 轮询来源**：它是 webhook 来源的另一种类型（`kind: github`），投递不是外部系统送来的，而是平台用 GitHub 身份（`GITHUB` 环境的 `TOKEN`）定时向 GitHub 查询新事件后自己生成的。订阅方式、扇出、排队和脚本拿到的事件形状都与外部 webhook 相同，同一个脚本可以不加区分地处理两类来源。
+
+平台对 GitHub **只读**：只调用查询接口，不在仓库或组织上注册 webhook，不把通知标为已读，不改 GitHub 上的任何设置。
+
+分工是「人建入口，脚本订阅仓库」：
+
+- **来源由人创建，不绑定仓库**。先保存 GitHub token，即 `GITHUB` 环境的 `TOKEN`（见 [harness 工作区边界](agent-harness-workspace.md) 的「GitHub 身份」），再到「全局设置 → Webhook 来源 → ＋ 新建 GitHub 轮询来源」填写：
+
+  | 字段 | 含义 |
+  | --- | --- |
+  | 使用的 token（`project_id`） | 全局 `GITHUB` 环境里的 `TOKEN`，或某个项目生效的那个（项目自己有 `GITHUB` 环境时用它的，没有时沿用全局的） |
+  | 轮询间隔（`interval_seconds`） | 多久向 GitHub 查询一次，60 ~ 86400 秒，默认 60；对这个来源下的所有仓库和通知统一生效 |
+  | 账号通知（`notifications`） | 开启后增加一条通知流，内容是 token 所属账号的通知收件箱 |
+  | 通知只要直接参与的（`participating`） | 通知流只含账号直接参与或被 @ 的通知 |
+
+  来源类型创建后不能修改。它和其他来源一样只由人在页面上维护，一个身份建一个来源即可。
+- **仓库由订阅它的脚本各自声明**。脚本除了用 `webhook_source` 选这个来源，还要用 `github_repos` 列出要哪些仓库（`owner/repo`，一个脚本最多 50 个），并可以用 `github_events` 只要其中某些事件名（空表示全部，来源开启通知时包括 `notification`）。在脚本编辑页选中 GitHub 轮询来源后会出现这两栏；主控用 `automation.save` 传同名参数，所以 **Agent 可以自己订阅新仓库**，不需要人改来源。平台轮询的是该来源下全部脚本的仓库并集（合计最多 200 个），每个仓库的事件只交给订阅了它的脚本；没有脚本订阅的仓库不查询（角色用 `callback.create` 一次性等待的仓库除外，等待期间同样会查询）。
+- **订阅立即生效**：脚本新加的仓库在保存后十秒内建立基线，从那一刻起的新事件才会投递，不必等到下一次轮询时间；这次补查只针对新仓库，不会让其他仓库超出轮询间隔。仓库写错或 token 无权访问时保存仍然成功，原因显示在来源状态里，主控在 `automation.list` 里该脚本的 `github_errors` 中也能看到。
+- **两种事件流**：
+
+  | | 仓库事件流 | 通知流 |
+  | --- | --- | --- |
+  | GitHub 接口 | `GET /repos/<owner>/<repo>/events` | `GET /notifications` |
+  | 能看到什么 | 脚本订阅的仓库里发生的事，与账号是否参与无关 | 账号的收件箱：被 @、被指派、被请求评审，自己创建或参与的 Issue/PR 有新动静，关注（watch）的仓库有动态 |
+  | 交给谁 | 订阅了该仓库、且事件名没被 `github_events` 排除的脚本 | 来源下事件名没排除 `notification` 的全部脚本 |
+  | 可用的 token | classic 与 fine-grained PAT 都可以；私有仓库需要 token 对它有读权限 | 只有 classic PAT，并且带 `notifications` 或 `repo` scope；fine-grained PAT 不能用 |
+  | 事件名（`MISSIONCREW_WEBHOOK_EVENT`） | 与 webhook 相同：`issues`、`issue_comment`、`pull_request`、`pull_request_review`、`pull_request_review_comment`、`push`、`create`、`delete`、`release`、`commit_comment`、`discussion`、`fork`、`watch`、`member`、`public`、`gollum` | `notification` |
+  | 发生了什么 | `payload.action` 是动作 | `payload.reason` 是收到通知的原因，具体内容要再查询 |
+
+- **仓库事件的正文**：`payload` 是 GitHub 事件接口给出的事件正文，平台另外补上 webhook 正文里常用来过滤的 `repository`（`full_name`、`name`、`html_url` 等）、`sender`（触发者，含 `login`）和 `organization`，原始事件的 id、类型和发生时间放在 `payload.github_event`。它与 webhook 正文相近但不完全相同：
+  - Issue 新增是 `issues` 加 `action: opened`；关闭、重新打开、打标签、指派分别是 `closed`、`reopened`、`labeled`、`assigned`。`payload.issue` 是完整的 Issue 对象。
+  - PR 新增是 `pull_request` 加 `action: opened`。**合并是 `action: merged`**（webhook 里是 `closed` 加 `pull_request.merged: true`），未合并就关闭是 `closed`。`payload.pull_request` 只有 `number`、`url`、`head`、`base`，没有标题和正文，需要时用 `gh api "$(jq -r .payload.pull_request.url "$MISSIONCREW_WEBHOOK_EVENT_FILE")"` 获取。
+  - `push` 只有 `ref`、`head`、`before`，没有提交列表。
+- **通知的正文**：`payload.reason` 是原因（`mention`、`team_mention`、`assign`、`review_requested`、`author`、`comment`、`state_change`、`subscribed`、`ci_activity` 等）；`payload.subject` 是通知指向的对象，含 `title`、`type`（`Issue`、`PullRequest`、`Release` 等）、对象的 API 地址 `url` 和最新评论的 API 地址 `latest_comment_url`；`payload.repository` 是所在仓库；`payload.notification` 是通知自身的 `id`、`updated_at`、`last_read_at`。同一个对象每有新动静就再投递一次。平台查询时包含已读通知，人在网页上先读掉也不会漏；平台不会把通知标为已读。
+- **与外部 webhook 的差别**：
+  - 一条事件流第一次轮询只记录基线，此前已有的事件不投递。
+  - 轮询进度保存在数据库里，服务重启后接着获取停机期间的事件。仓库事件接口只保留每个仓库最近 300 条事件，停机很久而仓库又很活跃时，更早的事件取不回来。
+  - 订阅脚本的排队放不下时，这条流剩下的事件留到下一轮再取，不会丢弃；这时来源状态显示「有事件待投」。同一仓库被多个脚本订阅时，其中一个排满会让这个仓库的后续事件一起等待，以保持先后顺序。
+  - 没有脚本订阅的仓库不查询，期间的事件不会留给后来的订阅者；退订后重新订阅从新的基线开始。
+  - 事件文件里 `transport` 为 `poll`（外部投递是 `webhook`）；`delivery` 是 `poll-<GitHub 事件 id>` 或 `poll-notification-<通知 id>-<更新时间>`，同一个事件不会重复投递。脚本环境里 `MISSIONCREW_TRIGGER` 仍是 `webhook`，`MISSIONCREW_WEBHOOK_PROVIDER` 是 `github`。
+- **延迟与额度**：轮询间隔在来源上配置，默认 60 秒，这也是 GitHub 要求的下限（响应头 `X-Poll-Interval`，GitHub 要求更长时平台以它为准）。仓库事件接口本身不是实时的：实测事件通常在发生后一分钟内可以查到，GitHub 文档说明繁忙时可能延迟到数小时；通知接口没有这层延迟。需要秒级响应时使用外部 webhook。每个被订阅的仓库每轮一次请求，没有新事件时 GitHub 返回 304，不消耗调用额度（每个 token 每小时 5000 次）；触发限流时平台按 GitHub 给出的时间推迟下一次查询。
+- **状态与排错**：来源列表和编辑框显示轮询间隔、已被订阅的仓库、最近一次查询时间、累计投递数和出错原因，「立即检查」马上查询一次。常见原因：`GITHUB` 环境里没有 `TOKEN`；token 失效（401）；仓库不存在或 token 无权访问（404，无权访问的私有仓库 GitHub 也返回 404）；通知流使用了 fine-grained PAT。一条流出错不影响其他流；出错原因变化时记一条审计（`github_poll_failed`）。
+- **平台不做的事**：不替你在 GitHub 上注册 webhook，也不做「逐个列表对比状态」这类更细的监控。轮询来源给不出的信息（事件接口省略的字段、更权威的 Issue/PR 状态、更短的检查周期），由脚本或 Agent 自己用 `gh api` 查询并对比：写一个 cron 脚本，把上次看到的结果存在脚本工作目录里，本次查询后自行比较。脚本里的 `gh` 已经是项目的 GitHub 身份。
+
+示例：`acme/webshop` 有新 Issue 时在频道里交给 dev 处理，PR 合并时告知主控。脚本订阅来源 `github`，`github_repos` 为 `["acme/webshop"]`，`github_events` 为 `["issues", "pull_request"]`，再按动作过滤（脚本的 `actions` 要包含 `message.publish`，默认就有）：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+[ "$MISSIONCREW_TRIGGER" = webhook ] || exit 0
+action=$(jq -r '.payload.action // ""' "$MISSIONCREW_WEBHOOK_EVENT_FILE")
+case "$MISSIONCREW_WEBHOOK_EVENT.$action" in
+  issues.opened)
+    jq -c '{channel: "general", mentions: ["dev"],
+            content: ("新 Issue #\(.payload.issue.number) \(.payload.issue.title)\n\(.payload.issue.html_url)\n请分析并给出处理建议")}' \
+      "$MISSIONCREW_WEBHOOK_EVENT_FILE" \
+      | "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call message.publish --arguments-file -
+    ;;
+  pull_request.merged)
+    # 事件里的 PR 只有编号和地址，标题用 gh 获取（脚本里的 gh 已经是项目的 GitHub 身份）
+    title=$(gh api "$(jq -r '.payload.pull_request.url' "$MISSIONCREW_WEBHOOK_EVENT_FILE")" --jq .title)
+    jq -c --arg title "$title" '{channel: "general", mentions: ["lead"],
+            content: ("PR #\(.payload.number) 已合并：\($title)")}' "$MISSIONCREW_WEBHOOK_EVENT_FILE" \
+      | "$MISSIONCREW_AGENT_TOOL_PYTHON" -m missioncrew.agent_tool call message.publish --arguments-file -
+    ;;
+  *) echo "忽略 $MISSIONCREW_WEBHOOK_EVENT.$action" ;;
+esac
 ```
 
 ## 外部列表同步成任务（数据源）
@@ -178,7 +262,7 @@ fi
 
 ## 闭环示例：自动处理 GitCode/GitHub Issue
 
-1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本（想让 Issue 一变化就同步，再开启 webhook 并按上文过滤事件），用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
+1. **同步脚本**：建一个 cron `*/30 * * * *` 的自动化脚本（想让 Issue 一变化就同步，再让它订阅接收该仓库事件的 webhook 来源，并按上文过滤事件），用 `gitcode`/`gh` CLI 拉取仓库 Issue 列表，整理成 cards 后调用 `board_source.save`。Issue 编号作卡片 id，Issue 标签与指派人写成 `labels`（如 `bug`、`owner: xxx`），链接写 `url`。只给已关闭的 Issue 带 `status: 已完成`，打开的 Issue 不带 `status`，这样 Agent 回写的处理进度会一直保留。
 
    ```bash
    #!/usr/bin/env bash

@@ -453,7 +453,6 @@ class Project:
     max_chain_runs: int = DEFAULT_MAX_CHAIN_RUNS  # 单条人类消息最多触发的 Agent 执行数
     guidelines: list[GuidelineDocument] = field(default_factory=list)
     skills: list[ProjectSkill] = field(default_factory=list)
-    resources: list[str] = field(default_factory=list)  # 可申请的受控资源 id
     required_env: Optional[str] = None                  # 执行环境要求,如 linux/gpu
     task_auto_rules: list[TaskAutoRule] = field(default_factory=list)
     # 内置任务看板的自定义筛选列 [{title,query,color}],默认排在四个锁定状态列之后;
@@ -547,6 +546,8 @@ class Project:
         d["skills"] = [ProjectSkill.from_dict(v) for v in d.get("skills", [])]
         d.setdefault("orchestrator_role_id", "lead")
         d.setdefault("max_chain_runs", DEFAULT_MAX_CHAIN_RUNS)
+        # 旧阶段式受控资源 id 列表:从未接入执行链,已由凭据(Credential)取代
+        d.pop("resources", None)
         # 旧版标签看板字段:label 字符串列表,__post_init__ 会转成筛选列
         legacy_boards = d.pop("task_label_boards", None)
         if legacy_boards and not d.get("task_board_filters"):
@@ -579,25 +580,94 @@ class Project:
             self.has_orchestrator and target_id == self.orchestrator_role_id)
 
 
-@dataclass
-class Resource:
-    """受控资源:Agent 拿到的是任务级、限时、可审计的能力,不是裸凭据。"""
+# 环境名是 Agent 读取的目录名,变量名是其中的文件名;两者同一套命名规则
+CREDENTIAL_NAME_RE = _re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
-    id: str
-    kind: str                    # db | api | deploy | logs ...
-    description: str = ""
-    env: str = ""                # 注入到执行环境的变量名
-    secret_ref: str = ""         # 在 secrets.yaml 中的键,值不落任何 Prompt
-    security_level: int = 0
-    stages: list[str] = field(default_factory=list)  # 允许使用的阶段,空=全部
-    ttl_seconds: int = 3600
+
+# GitHub 身份:环境 GITHUB 的 secret 变量 TOKEN(个人访问令牌)
+GITHUB_ENVIRONMENT = "GITHUB"
+GITHUB_TOKEN_VARIABLE = "TOKEN"
+# 旧版单值凭据迁成环境时,原来的值放进这个变量;旧版的 GitHub 身份是名为
+# GITHUB_TOKEN 的单值凭据,迁成上面的 GITHUB / TOKEN
+LEGACY_VALUE_VARIABLE = "VALUE"
+LEGACY_GITHUB_TOKEN = "GITHUB_TOKEN"
+
+
+def credential_fingerprint(value: str) -> str:
+    """值的末 4 位,供人在页面上辨认是哪一份;太短的值不给,免得等于露出大半。"""
+    return f"…{value[-4:]}" if len(value) >= 12 else ""
+
+
+@dataclass
+class CredentialVariable:
+    """环境里的一个变量。secret 变量的值只存在 credentials 表的 value 列,本对象的
+    value 恒为空;普通变量的值就放在这里,页面与 Agent 都能直接看到。"""
+
+    name: str
+    secret: bool = True
+    has_value: bool = False
+    fingerprint: str = ""          # 仅 secret:值的末 4 位
+    value: str = ""                # 仅普通变量
+
+    def __post_init__(self):
+        if not CREDENTIAL_NAME_RE.fullmatch(self.name or ""):
+            raise ValueError(
+                "变量名只能使用大写字母、数字和下划线,以字母开头,最长 64 个字符")
+        self.secret = bool(self.secret)
+        if self.secret:
+            self.value = ""
+        else:
+            self.fingerprint = ""
+
+
+@dataclass
+class Credential:
+    """人类保存给 Agent 使用的凭据,以环境为单位:一个环境是一组配套使用的变量
+    (地址 + 用户名 + 密码,或只有一个 token),每个变量各自标记是否 secret。
+
+    secret 变量的值存在 credentials 表的独立列里,不进入本对象的任何序列化,因此
+    总览、Agent Tool 结果、回收站与审计都不可能顺带带出它。project_id 为空是全局
+    环境,对所有项目可见;项目环境只属于本项目,与全局同名时整份覆盖全局。
+    """
+
+    name: str
+    project_id: str = ""
+    description: str = ""          # 用途说明,Agent 据此判断该用哪一个
+    has_value: bool = False        # False = 还有变量没有值(Agent 登记、待人填写)
+    requested_by: str = ""         # 登记待填写变量的角色,如 role:dev;人保存后清空
+    created_at: float = field(default_factory=now)
+    updated_at: float = field(default_factory=now)
+    variables: list[CredentialVariable] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not CREDENTIAL_NAME_RE.fullmatch(self.name or ""):
+            raise ValueError(
+                "环境名只能使用大写字母、数字和下划线,以字母开头,最长 64 个字符")
+        self.variables = [item if isinstance(item, CredentialVariable)
+                          else CredentialVariable(**item) for item in self.variables]
+
+    def variable(self, name: str) -> Optional["CredentialVariable"]:
+        return next((item for item in self.variables if item.name == name), None)
+
+    @property
+    def id(self) -> str:
+        return credential_id(self.project_id, self.name)
+
+    @property
+    def scope(self) -> str:
+        return "project" if self.project_id else "global"
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Resource":
+    def from_dict(cls, d: dict) -> "Credential":
         return cls(**d)
+
+
+def credential_id(project_id: str, name: str) -> str:
+    """存储主键:全局环境就是名字,项目环境是 `<项目>:<名字>`(同频道 id 的约定)。"""
+    return f"{project_id}:{name}" if project_id else name
 
 
 @dataclass
@@ -746,6 +816,8 @@ class Role:
     preference: str = ""                   # 工作偏好:自由文本(如"前端"/"后端,偏好 React")
     color: str = ""                        # 看板/聊天中的标识色
     sort_order: int = 0                    # 项目内显示顺序(设置页/侧栏/名册),小的在前
+    max_concurrency: int = 0               # 同时执行的轮数上限(同项目跨频道计数);0 = 不限,
+                                           # 只受全局执行位约束;超出的运行排队,不占执行位
 
     def ability_labels(self) -> list[str]:
         return [ROLE_ABILITIES.get(c, c) for c in self.capabilities]
@@ -947,9 +1019,14 @@ class Automation:
     description: str = ""
     script: str = ""
     cron: str = ""                 # 五段 crontab;空 = 不定时
-    enabled: bool = True           # 只管定时触发;webhook 由 webhook 字段单独开关
-    webhook: bool = False          # 接受专用 webhook 端口上的投递触发(可与 cron 并用)
-    webhook_secret: str = ""       # 验签密钥;只在人类页面显示,不进总览与 Agent 输出
+    enabled: bool = True           # 只管定时触发;webhook 由 webhook_source 单独决定
+    # 订阅的全局 webhook 来源 id;空 = 不接受 webhook 触发(可与 cron 并用)
+    webhook_source: str = ""
+    # 仅当订阅的是 GitHub 轮询来源:本脚本要哪些仓库(owner/repo)的事件,以及只要
+    # 哪些事件名(空 = 全部,含来源开启的账号通知 notification)。来源本身不绑定
+    # 仓库,平台轮询的是全部订阅脚本的仓库并集,事件只交给订阅了该仓库的脚本
+    github_repos: list[str] = field(default_factory=list)
+    github_events: list[str] = field(default_factory=list)
     actions: list[str] = field(
         default_factory=lambda: list(AUTOMATION_DEFAULT_ACTIONS))
     timeout_seconds: int = AUTOMATION_DEFAULT_TIMEOUT
@@ -969,17 +1046,57 @@ class Automation:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def public_dict(self) -> dict:
-        """对外展示用:去掉 webhook 密钥,其余字段同 to_dict。"""
-        data = self.to_dict()
-        data.pop("webhook_secret", None)
-        return data
-
     @classmethod
     def from_dict(cls, d: dict) -> "Automation":
         d = dict(d)
         d["actions"] = [str(item) for item in d.get("actions", [])
                         if isinstance(item, str)]
+        for key in ("github_repos", "github_events"):
+            d[key] = [str(item) for item in d.get(key) or [] if isinstance(item, str)]
+        return cls(**d)
+
+
+WEBHOOK_SOURCE_KINDS = ("webhook", "github")
+
+
+@dataclass
+class WebhookSource:
+    """全局 webhook 来源:一个投递入口,订阅它的自动化脚本收到它的每一次投递。
+
+    投递从哪来由 kind 决定:`webhook` 是外部系统 POST 到投递地址(地址 + 验签
+    密钥),按来源在外部系统配置一次;`github` 是平台用 GitHub token 定时查询
+    通知与仓库事件,把新事件整理成同样形状的投递(用哪份 token、多久查一次、
+    是否含账号通知在 github 字段,见 collab/github_events.py),不需要公网地址。
+    各项目的自动化脚本用 webhook_source 订阅来源,由脚本自己过滤事件;GitHub
+    来源不绑定仓库,要哪些仓库由订阅它的脚本各自声明(Automation.github_repos)。
+    """
+
+    id: str
+    name: str = ""
+    description: str = ""
+    path: str = ""                 # 投递地址中 /hooks/ 之后的部分,全局唯一;默认同 id
+    secret: str = ""               # 验签密钥;只经人类页面的密钥端点读取
+    enabled: bool = True           # 停用后投递一律 404(轮询来源则停止轮询),订阅关系保留
+    kind: str = "webhook"          # webhook | github;创建后不可改
+    github: dict = field(default_factory=dict)   # kind=github 的轮询配置
+    created_at: float = field(default_factory=now)
+    updated_at: float = field(default_factory=now)
+
+    def __post_init__(self):
+        if self.kind not in WEBHOOK_SOURCE_KINDS:
+            raise ValueError("来源类型只能是 webhook 或 github")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def public_dict(self) -> dict:
+        """对外展示用:去掉密钥,其余字段同 to_dict。"""
+        data = self.to_dict()
+        data.pop("secret", None)
+        return data
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WebhookSource":
         return cls(**d)
 
 
@@ -1092,6 +1209,8 @@ class ExecutionConfig:
     # 同一鉴权/审计路径。真实 CLI Runtime 走子进程 + HTTP,不用该回调;
     # MockAdapter 用它执行 message.publish 等显式命令(如模拟主控派发)。
     agent_action: Optional[Callable[[str, dict], dict]] = None
+    # 显式续跑若已有兼容句柄，恢复失败要交回调用方，不能静默改用新会话。
+    require_session_resume: bool = False
 
     def __post_init__(self):
         # 兼容旧的 allowed_dirs 构造入口；新代码只需提供统一策略。

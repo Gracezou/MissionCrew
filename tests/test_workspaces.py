@@ -90,6 +90,41 @@ def test_create_rejects_missing_dirty_duplicate_and_disabled(seeded, tmp_path):
     assert duplicate.value.code == "already_exists"
 
 
+def test_managed_worktree_prompt_does_not_request_nested_worktree(seeded, tmp_path):
+    from missioncrew.collab.chat import (EXECUTOR_WORKFLOW, MANUAL_ONLY_WORKFLOW,
+                                         PEER_WORKFLOW, WORKTREE_INSTRUCTION)
+
+    assert WORKTREE_INSTRUCTION in EXECUTOR_WORKFLOW
+    assert WORKTREE_INSTRUCTION in PEER_WORKFLOW
+    assert WORKTREE_INSTRUCTION in MANUAL_ONLY_WORKFLOW
+    repo = _repo(tmp_path / "prompt-repo")
+    managed = _create(seeded, repo)
+    channel = seeded.get_channel(managed["channel"]["id"])
+    message = seeded.add_message(channel.id, "human", "human", "请修改代码", [])
+    chat = ChatEngine(seeded)
+    prompt = chat._assemble(channel, seeded.get_role("webshop", "dev"),
+                            seeded.get_backend("std-1"), message).prompt
+    assert "do not create a nested worktree" in prompt
+    assert "make code changes in your own git worktree" not in prompt
+
+    ordinary = seeded.get_channel("general")
+    ordinary_message = seeded.add_message(ordinary.id, "human", "human", "请修改代码", [])
+    ordinary_prompt = chat._assemble(
+        ordinary, seeded.get_role("webshop", "dev"),
+        seeded.get_backend("std-1"), ordinary_message).prompt
+    assert "make code changes in your own git worktree" in ordinary_prompt
+
+    channel.workdir = str(tmp_path / "removed-managed-worktree")
+    seeded.put_channel(channel)
+    missing_message = seeded.add_message(channel.id, "human", "human", "继续修改", [])
+    missing_prompt = chat._assemble(
+        channel, seeded.get_role("webshop", "dev"),
+        seeded.get_backend("std-1"), missing_message).prompt
+    assert "do not create a nested worktree" not in missing_prompt
+    assert "no longer exists" in missing_prompt
+    assert "make code changes in your own git worktree" in missing_prompt
+
+
 def test_create_succeeds_with_empty_git_template(seeded, tmp_path):
     repo = _empty_template_repo(tmp_path / "empty-template-repo")
     assert not (repo / ".git" / "info").exists()

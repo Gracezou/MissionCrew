@@ -3,7 +3,6 @@ import json
 import subprocess
 import sys
 import threading
-import time
 
 import pytest
 
@@ -158,9 +157,12 @@ def test_resumed_turn_ignores_stale_conversation_error(runtime):
 
 
 @pytest.mark.parametrize("scenario", ["missing", "mismatch"])
-def test_missing_conversation_fails_without_silent_retry(runtime, tmp_path, scenario):
+@pytest.mark.parametrize("strict", [False, True])
+def test_missing_conversation_fails_without_silent_retry(runtime, tmp_path, scenario, strict):
     provider, config, saved, _ = runtime
     saved.update(id="old-conversation", context="v1")
+    config.session_id = saved["id"]
+    config.require_session_resume = strict
     config.env["SCENARIO"] = scenario
     assert not provider.start(config).success
     assert saved["id"] == ""
@@ -191,24 +193,33 @@ def test_command_defaults_and_optional_parameters(runtime):
     assert "--sandbox=false" in provider._command(config, "hello")
 
 
-def test_stop_preserves_conversation_saved_before_completion(runtime):
+def test_stop_preserves_conversation_saved_before_completion(runtime, tmp_path):
     provider, config, saved, _ = runtime
     config.env["SCENARIO"] = "wait"
-    results = []
-    worker = threading.Thread(target=lambda: results.append(provider.start(config)))
-    worker.start()
-    deadline = time.monotonic() + 3
-    while not saved and time.monotonic() < deadline:
-        time.sleep(0.01)
-    try:
-        assert saved["id"] == "agy-conversation"
-        assert provider.instances(config.backend)[0].transport == "antigravity-stream-json"
-        assert provider.stop(config.backend, config.session_key) == 1
-    finally:
-        provider.shutdown()
-        worker.join(timeout=6)
-    assert not worker.is_alive() and not results[0].success
+    config.timeout = None
+    save = config.save_session
+    instances = []
+    stopped = []
+
+    # fork-divergence: 在 init 保存回调内停止真实子进程，使顺序与进程启动耗时无关。
+    def save_then_stop(sid, context, **stats):
+        save(sid, context, **stats)
+        instances.extend(provider.instances(config.backend))
+        stopped.append(provider.stop(config.backend, config.session_key))
+
+    config.save_session = save_then_stop
+    assert not provider.start(config).success
+    assert [item.transport for item in instances] == ["antigravity-stream-json"]
+    assert stopped == [1]
+    assert not provider.instances(config.backend)
     assert saved["id"] == "agy-conversation"
+
+    config.save_session = save
+    config.env["SCENARIO"] = "success"
+    assert provider.start(config).success
+    first, resumed = [json.loads(line) for line in (tmp_path / "launches").read_text().splitlines()]
+    assert "--conversation" not in first
+    assert resumed[resumed.index("--conversation") + 1] == "agy-conversation"
 
 
 def test_timeout_cleans_up_process(runtime):

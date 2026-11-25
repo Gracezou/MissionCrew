@@ -48,6 +48,27 @@ def test_pending_runtime_question_is_resolved_without_persisting_answer(store):
     assert json.loads(stored)["status"] == "resolved"
 
 
+def test_permission_request_event_redacts_saved_credentials_before_api(seeded):
+    from missioncrew.collab.credentials import save_environment
+
+    secret = "permission-request-secret"
+    save_environment(seeded, project_id="", name="GITHUB",
+                     variables=[{"name": "TOKEN", "secret": True, "value": secret}])
+    trigger = seeded.add_message("general", "human", "human", "approval", [])
+    run_id = seeded.add_chat_run("general", "dev", trigger, trigger, 0)
+    event_id = seeded.append_interaction_event(run_id, "permission_request", {
+        "details": {"command": f"curl -H 'Authorization: Bearer {secret}'"},
+    })
+    seeded.update_interaction_event(event_id, run_id, {
+        "details": {"command": f"curl -H 'Authorization: Bearer {secret}'"},
+        "status": "pending",
+    })
+    event = TestClient(create_app()).get(
+        f"/api/chat/runs/{run_id}/events").json()["events"][0]
+    assert secret not in event["content"]
+    assert "[credential:GITHUB.TOKEN]" in event["content"]
+
+
 @pytest.mark.parametrize("backend,kind,payload,result_type,summary", [
     ("claude", "permission_request", {
         "runtime": "claude", "request_type": "can_use_tool", "tool": "Bash",

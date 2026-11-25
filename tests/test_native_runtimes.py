@@ -340,6 +340,28 @@ def test_agent_user_question_round_trips_to_same_turn(
         provider.shutdown()
 
 
+def test_claude_usage_falls_back_to_stream_rate_limit_event(tmp_path):
+    provider = ClaudeRuntimeProvider(_Fallback(), _fake_command("claude_code"))
+    events: list[tuple[str, str]] = []
+    config = _config(tmp_path, "claude_code", "RATE_LIMIT", {}, events)
+    try:
+        # 还没运行过:token 认证的 /usage 只有花费统计,如实提示而非猜百分比
+        before = provider.account_usage(config.backend)
+        assert before.status == "unavailable" and not before.windows
+        assert "不含账户限额" in before.message
+
+        assert provider.start(config).success
+        snapshot = provider.account_usage(config.backend)
+    finally:
+        provider.shutdown()
+
+    assert snapshot.status == "ok" and snapshot.source == "claude_stream_rate_limit"
+    assert [(w.key, w.used_percent, w.resets_at) for w in snapshot.windows] == [
+        ("session", 42, 4102444800), ("weekly", 4, 4103049600)]
+    # 限额事件不进运行过程流
+    assert not any("rate_limit" in text for _, text in events)
+
+
 def test_claude_session_approval_echoes_native_permission_suggestion(tmp_path):
     provider = ClaudeRuntimeProvider(_Fallback(), _fake_command("claude_code"))
     requests = []
@@ -394,13 +416,32 @@ def test_claude_waits_for_background_agent_and_keeps_turn_policy_alive(
         provider.shutdown()
 
 
-def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path):
+@pytest.mark.parametrize("adapter,provider_cls,saved_id", [
+    ("codex", CodexRuntimeProvider, "replaced-thread"),
+    ("claude_code", ClaudeRuntimeProvider, "replaced-session"),
+])
+def test_explicit_resume_rejects_a_replacement_native_session(tmp_path, adapter, provider_cls, saved_id):
+    provider = provider_cls(_Fallback(), _fake_command(adapter))
+    saved = {"id": saved_id, "context": "v1"}
+    config = _config(tmp_path, adapter, "SECOND", saved, [])
+    config.require_session_resume = True
+    try:
+        result = provider.start(config)
+        assert not result.success and "指定" in result.summary
+        assert saved["id"] == ""
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path, strict):
     fallback = _Fallback()
     provider = CodexRuntimeProvider(fallback, _fake_command("codex"))
     saved = {"id": "missing-thread", "context": "v1"}
     try:
-        result = provider.start(_config(
-            tmp_path, "codex", "SECOND", saved, []))
+        config = _config(tmp_path, "codex", "SECOND", saved, [])
+        config.require_session_resume = strict
+        result = provider.start(config)
         assert not result.success
         assert "无法恢复" in result.summary and "未创建新会话" in result.summary
         assert saved["id"] == ""
@@ -409,13 +450,15 @@ def test_codex_resume_failure_is_explicit_and_does_not_start_new_thread(tmp_path
         provider.shutdown()
 
 
-def test_claude_resume_failure_is_explicit_and_does_not_start_new_session(tmp_path):
+@pytest.mark.parametrize("strict", [False, True])
+def test_claude_resume_failure_is_explicit_and_does_not_start_new_session(tmp_path, strict):
     fallback = _Fallback()
     provider = ClaudeRuntimeProvider(fallback, _fake_command("claude_code"))
     saved = {"id": "missing-session", "context": "v1"}
     try:
-        result = provider.start(_config(
-            tmp_path, "claude_code", "SECOND", saved, []))
+        config = _config(tmp_path, "claude_code", "SECOND", saved, [])
+        config.require_session_resume = strict
+        result = provider.start(config)
         assert not result.success
         assert "无法恢复" in result.summary and "未创建新会话" in result.summary
         assert saved["id"] == ""

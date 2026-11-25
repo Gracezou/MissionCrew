@@ -46,8 +46,10 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/roles")
     def save_role(body: RoleInput):
-        return as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
-                       "human", role_updated=ctx.role_usage_linkage.role_updated)
+        result = as_http(save_role_config, store, body, "project", ctx.discovered_catalog,
+                         "human", role_updated=ctx.role_usage_linkage.role_updated)
+        ctx.chat.reschedule()
+        return result
 
     @app.post("/api/roles/{role_id}/enabled")
     def set_role_enabled(role_id: str, body: RoleEnabledInput):
@@ -93,6 +95,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # fork-divergence: 旧文件未携带时不撤掉已有角色的仅人工限制。
             if "manual_only" not in item.model_fields_set and previous:
                 data["manual_only"] = previous.manual_only
+            if "max_concurrency" not in item.model_fields_set and previous:
+                data["max_concurrency"] = previous.max_concurrency
             role = Role(
                 **data,
                 project_id=project.id,
@@ -109,6 +113,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             store.put_role(role)
             ctx.role_usage_linkage.role_updated(role, previous=previous)
             imported.append(role.id)
+        ctx.chat.reschedule()
         store.audit(
             "human", "roles_imported",
             detail=(f"project={project.id} imported={','.join(imported)} "
@@ -167,6 +172,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 data["manual_only"] = previous.manual_only
             if "enabled" not in item.model_fields_set and previous:
                 data["enabled"] = previous.enabled   # 文件未携带时不改已有模板
+            if "max_concurrency" not in item.model_fields_set and previous:
+                data["max_concurrency"] = previous.max_concurrency
             role = Role(
                 **data,
                 project_id="",

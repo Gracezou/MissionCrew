@@ -590,6 +590,7 @@ function renderConfigChatThread(context, channelId, target) {
     thread.lastRenderedId = surface.lastMsgId;
   }
   syncRuns(thread.runs, { pane: root, runCards: thread.runCards });
+  syncEarlierInterruptedRuns(root, channelId, thread.earlierInterruptedBefore);
   root.classList.toggle("has-messages", Boolean(thread.entries.length));
   if (!thread.entries.length) {
     const hint = thread.loaded ? "此频道还没有消息。" : "正在加载频道记录…";
@@ -772,6 +773,7 @@ async function sendConfigChat() {
     status.textContent = "请先保存当前条目，再开始页面内对话。";
     return;
   }
+  if (!await confirmSecretInMessage(payload.content, box)) return;
   const selection = configChatSelection?.context_key === context.key
     ? configChatSelection : null;
   configChatSending = true;
@@ -783,12 +785,18 @@ async function sendConfigChat() {
   hideMentionPicker();
   try {
     const channel = await resolveConfigChatTargetChannel(context, target);
+    // 附件在发送时才上传,附件条此时已清空,进度写在状态行
     const attachments = [];
-    for (const item of files) {
-      const stored = await uploadChatFile(item.file, channel.id);
+    for (const [index, item] of files.entries()) {
+      const prefix = `正在上传附件${files.length > 1 ? ` ${index + 1}/${files.length}` : ""}：${item.display}`;
+      status.textContent = `${prefix} 0%`;
+      const stored = await uploadChatFile(item.file, channel.id, {
+        onProgress: ratio => { status.textContent = `${prefix} ${uploadProgressLabel(ratio)}`; },
+      });
       if (!stored) throw new Error(`附件上传失败：${item.display}`);
       attachments.push(stored);
     }
+    if (files.length) status.textContent = "正在发送…";
     const fileBackedPage = context.tab === "guidelines" || context.tab === "docs";
     const currentPage = fileBackedPage ? await stageConfigPage(channel, context) : null;
     const effectiveSelection = currentPage?.text_snapshot_available === false
@@ -913,6 +921,7 @@ async function pollConfigChat() {
     }
     if (agentReplied) thread.notice = "";
     thread.runs = data.runs || [];
+    thread.earlierInterruptedBefore = data.earlier_interrupted_before;
     thread.activeRuns = data.active_runs || [];
     thread.running = thread.activeRuns.some(run =>
       ["queued", "running", "waiting_user"].includes(run.status));

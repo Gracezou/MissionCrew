@@ -4,19 +4,23 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
+from uuid import uuid4
 
-from .models import (Automation, Backend, Board, BoardDataSource, Channel,
-                     Project, Resource, Role, Task, new_id, normalize_labels,
-                     with_status)
+from .models import (GITHUB_ENVIRONMENT, GITHUB_TOKEN_VARIABLE, LEGACY_GITHUB_TOKEN,
+                     LEGACY_VALUE_VARIABLE, Automation, Backend, Board, BoardDataSource,
+                     Channel, Credential, Project, Role, Task, WebhookSource,
+                     credential_id, new_id, normalize_labels, with_status)
+from .redaction import redact_text, redaction_pairs
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects  (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS backends  (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS resources (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks     (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_briefs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,8 +65,34 @@ CREATE TABLE IF NOT EXISTS chat_runs (
   model TEXT DEFAULT '', effort TEXT DEFAULT '',
   trigger_message_id INTEGER NOT NULL, root_id INTEGER NOT NULL,
   depth INTEGER DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued',
-  error TEXT DEFAULT '', created_at REAL NOT NULL, finished_at REAL
+  error TEXT DEFAULT '', created_at REAL NOT NULL, finished_at REAL,
+  owner_pid INTEGER NOT NULL DEFAULT 0, owner_instance TEXT NOT NULL DEFAULT '',
+  recovered_from_run_id INTEGER,
+  -- 排队期间被并入另一次运行(status='merged')时,指向实际执行的那次运行
+  merged_into INTEGER DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_chat_runs_finished ON chat_runs(finished_at);
+CREATE INDEX IF NOT EXISTS idx_chat_runs_chain ON chat_runs(root_id, channel);
+-- 角色登记的一次性回调:到点(fire_at)或所盯的频道/Task 有更新时,在登记的
+-- 频道(channel)以平台消息重新启动该角色。watch_kind 为空只看时间;只盯更新、
+-- 没给时间的回调到 expires_at 仍无更新就过期。baseline 是登记时的对照基线:
+-- 频道是最后一条消息 id,Task 是内容指纹。
+CREATE TABLE IF NOT EXISTS chat_callbacks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL, channel TEXT NOT NULL, role_id TEXT NOT NULL,
+  note TEXT NOT NULL, fire_at REAL NOT NULL DEFAULT 0,
+  expires_at REAL NOT NULL DEFAULT 0,
+  watch_kind TEXT NOT NULL DEFAULT '', watch_target TEXT NOT NULL DEFAULT '',
+  baseline TEXT NOT NULL DEFAULT '',
+  -- 盯 webhook 来源事件(watch_kind=event)的回调:spec 是匹配条件 JSON(事件名、动作、
+  -- 仓库、过滤脚本),progress 是检查进度 JSON(看过几条、脚本出错几次及最近的原因)
+  spec TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '',
+  origin_run_id INTEGER NOT NULL DEFAULT 0, origin_trigger INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '',
+  message_id INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL, finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_callbacks_status ON chat_callbacks(status, channel);
 CREATE TABLE IF NOT EXISTS chat_sessions (
   session_key TEXT PRIMARY KEY,
   channel TEXT NOT NULL, role_id TEXT NOT NULL,
@@ -99,6 +129,28 @@ CREATE TABLE IF NOT EXISTS automation_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_automation_runs_automation
   ON automation_runs(automation_id, id DESC);
+CREATE TABLE IF NOT EXISTS webhook_sources (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+-- 轮询来源的进度(各事件流的游标、已见事件 id、最近一次轮询结果);与来源定义分开存,
+-- 每次轮询都写,不改动来源本身的 updated_at
+CREATE TABLE IF NOT EXISTS webhook_source_state (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+-- 来源收到的每一次投递(外部 webhook 与轮询生成的都记):摘要列供列表与过滤,
+-- data 是事件全文 JSON(过大时不存正文),outcomes 是交给了哪些脚本及结果
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL, received_at REAL NOT NULL,
+  provider TEXT DEFAULT '', event TEXT DEFAULT '', action TEXT DEFAULT '',
+  repository TEXT DEFAULT '', delivery TEXT DEFAULT '',
+  transport TEXT DEFAULT 'webhook', auth TEXT DEFAULT '',
+  outcomes TEXT NOT NULL DEFAULT '[]', size INTEGER NOT NULL DEFAULT 0,
+  data TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_source
+  ON webhook_deliveries(source_id, id DESC);
+-- 凭据(环境):data 是不含保密值的元数据 JSON,保密值单独一列("变量名 -> 值"的
+-- JSON,只含 secret 变量),通用的 _get/_list 只读 data 列
+CREATE TABLE IF NOT EXISTS credentials (
+  id TEXT PRIMARY KEY, data TEXT NOT NULL, value TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS run_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
@@ -121,6 +173,65 @@ CREATE INDEX IF NOT EXISTS idx_runtime_usage_started
 """
 
 
+_PROCESS_INSTANCE = uuid4().hex
+# 所有者标识只供启动对账使用，不随频道轮询和 Agent Tool 响应返回。
+_RUN_FIELDS = (
+    "r.id,r.channel,r.role_id,r.backend_id,r.model,r.effort,r.trigger_message_id,"
+    "r.root_id,r.depth,r.status,r.error,r.created_at,r.finished_at,r.recovered_from_run_id,r.merged_into"
+)
+_RECOVERY_RUN_ID = (
+    "(SELECT child.id FROM chat_runs child WHERE child.recovered_from_run_id=r.id)"
+)
+
+
+def _process_state(pid: int) -> tuple[str, str]:
+    """一次读取 POSIX 进程状态和启动时间；受限环境仍可用 PID 判活。"""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="], capture_output=True,
+            text=True, timeout=2, env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
+        fields = result.stdout.strip().split(maxsplit=1)
+        if result.returncode == 0 and len(fields) == 2:
+            return fields[0], fields[1]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "", ""
+
+
+@lru_cache(maxsize=1)
+def _current_owner_instance(pid: int) -> str:
+    _, started = _process_state(pid)
+    return f"{started}|{_PROCESS_INSTANCE}"
+
+
+def _chat_owner_is_alive(pid: int, instance: str) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return instance == _current_owner_instance(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # 可能无权发信号；有权限读取启动时间时仍可检查 PID 重用。
+    state, current_start = _process_state(pid)
+    if state.startswith("Z"):  # 尚未被父进程 wait 的僵尸仍可收到 kill(pid, 0)。
+        return False
+    original_start = instance.partition("|")[0]
+    return not original_start or not current_start or current_start == original_start
+
+
+def _environment_secrets(raw) -> dict[str, str]:
+    """credentials.value 列里环境的保密值:JSON 对象,损坏或为空时当作没有。"""
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return ({str(key): str(value) for key, value in data.items() if value}
+            if isinstance(data, dict) else {})
+
+
 class Store:
     """线程安全:聊天引擎在后台线程池中并发读写,所有访问都过同一把锁。"""
 
@@ -132,26 +243,49 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")  # 多个进程打开旧库时串行检查和补列。
+            self._migrate_chat_runs()
+        # 旧阶段式受控资源表从未接入执行链,已由 credentials 取代
+        self._conn.execute("DROP TABLE IF EXISTS resources")
+        # 脱敏用的 (原文, 占位符) 缓存;凭据经本实例写入时作废重建
+        self._redaction: Optional[list[tuple[str, str]]] = None
         self._migrate_backend_commands()
-        self._migrate_chat_runs()
         self._migrate_automation_runs()
+        self._migrate_automation_webhooks()
         self._migrate_chat_messages()
         self._migrate_runtime_usage()
         self._migrate_chat_sessions()
         self._migrate_agent_tokens()
+        self._migrate_chat_callbacks()
         self._migrate_source_cards_to_tasks()
         self._migrate_tasks_to_issues()
         self._migrate_board_status_filters()
+        self._migrate_credentials_to_environments()
         self._conn.commit()
 
     def _migrate_chat_runs(self) -> None:
-        """旧数据库补齐 chat_runs 的执行组合列(运行卡片展示模型与推理力度)。"""
+        """旧运行保留原状态；仅服务启动时收口没有存活所有者的活动记录。"""
         columns = {row["name"] for row in self._conn.execute(
             "PRAGMA table_info(chat_runs)").fetchall()}
-        for name in ("model", "effort"):
+        for name, declaration in (
+            ("model", "TEXT DEFAULT ''"), ("effort", "TEXT DEFAULT ''"),
+            ("owner_pid", "INTEGER NOT NULL DEFAULT 0"),
+            ("owner_instance", "TEXT NOT NULL DEFAULT ''"),
+            ("recovered_from_run_id", "INTEGER"), ("merged_into", "INTEGER DEFAULT 0"),
+        ):
             if name not in columns:
                 self._conn.execute(
-                    f"ALTER TABLE chat_runs ADD COLUMN {name} TEXT DEFAULT ''")
+                    f"ALTER TABLE chat_runs ADD COLUMN {name} {declaration}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_run_recovery "
+            "ON chat_runs(recovered_from_run_id) WHERE recovered_from_run_id IS NOT NULL")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interrupted_chat_runs ON chat_runs(channel,id) "
+            "WHERE status='interrupted'")
+        # 建在迁移里而不是建表脚本里:旧库要先补上列才能建索引
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_runs_merged ON chat_runs(merged_into)")
 
     def _migrate_automation_runs(self) -> None:
         """旧数据库补齐 automation_runs.trigger_detail(webhook 事件名与投递 id)。"""
@@ -160,6 +294,112 @@ class Store:
         if "trigger_detail" not in columns:
             self._conn.execute(
                 "ALTER TABLE automation_runs ADD COLUMN trigger_detail TEXT DEFAULT ''")
+
+    def _migrate_automation_webhooks(self) -> int:
+        """旧版每个脚本自带 webhook 开关与密钥,迁成全局 webhook 来源并让脚本订阅它。
+
+        迁出的来源沿用旧投递路径 `<项目>/<脚本短 id>` 与原密钥,外部系统的配置不用改;
+        已关闭 webhook 的脚本只丢弃保留的密钥。返回改写的脚本数。
+        """
+        rows = self._conn.execute("SELECT id, data FROM automations").fetchall()
+        taken = {row["id"] for row in self._conn.execute(
+            "SELECT id FROM webhook_sources").fetchall()}
+        changed = 0
+        for row in rows:
+            data = json.loads(row["data"])
+            if "webhook" not in data and "webhook_secret" not in data:
+                continue
+            enabled = bool(data.pop("webhook", False))
+            secret = str(data.pop("webhook_secret", "") or "")
+            project_id = str(data.get("project_id", ""))
+            short = str(data.get("id", "")).removeprefix(f"{project_id}:")
+            if enabled and secret and not data.get("webhook_source"):
+                source_id, n = short, 1
+                while source_id in taken:   # 不同项目的同名脚本:加项目前缀与序号区分
+                    n += 1
+                    source_id = f"{project_id}-{short}" + (f"-{n}" if n > 2 else "")
+                taken.add(source_id)
+                source = WebhookSource(
+                    id=source_id, name=str(data.get("name") or short),
+                    description=f"由自动化脚本 {data.get('id')} 的 webhook 迁移",
+                    path=f"{project_id}/{short}", secret=secret)
+                self._conn.execute(
+                    "INSERT INTO webhook_sources(id, data) VALUES(?, ?)",
+                    (source_id, json.dumps(source.to_dict(), ensure_ascii=False)))
+                data["webhook_source"] = source_id
+            self._conn.execute("UPDATE automations SET data=? WHERE id=?",
+                               (json.dumps(data, ensure_ascii=False), row["id"]))
+            changed += 1
+        return changed
+
+    def _migrate_credentials_to_environments(self) -> int:
+        """旧版一份凭据是单个保密值,现在一律是环境(一组变量):把旧行改成只有一个
+        secret 变量的环境。返回改写的行数,已经迁过的库返回 0。
+
+        - 普通凭据 `NAME` 变成环境 `NAME`,值放进变量 `VALUE`,名字、作用域、用途、
+          待填写状态都不变,所以"项目同名覆盖全局"的结果和迁移前一样。
+        - `GITHUB_TOKEN` 是 GitHub 身份,变成环境 `GITHUB` 的变量 `TOKEN`。同一作用域
+          已经有人建了 `GITHUB` 环境时把 TOKEN 并进去;那个环境自己已有 TOKEN 时保留
+          它,旧凭据按普通规则迁成 `GITHUB_TOKEN` / `VALUE`,不丢值。
+        - 上一版已经是环境的行只去掉不再使用的字段。
+        """
+        rows = self._conn.execute("SELECT id, data, value FROM credentials").fetchall()
+        environments: dict[str, tuple[dict, dict]] = {}     # id -> (元数据, secret 值)
+        legacy: list[tuple[str, dict, str]] = []
+        dirty: set[str] = set()
+        for row in rows:
+            data, value = json.loads(row["data"]), str(row["value"] or "")
+            if "kind" not in data and "variables" in data:
+                environments[row["id"]] = (data, _environment_secrets(value))
+            elif data.get("kind") == "environment":
+                data.pop("kind", None)
+                data.pop("fingerprint", None)
+                environments[row["id"]] = (data, _environment_secrets(value))
+                dirty.add(row["id"])
+            else:
+                legacy.append((row["id"], data, value))
+        if not legacy and not dirty:
+            return 0
+        removed: set[str] = set()
+        for old_id, data, value in legacy:
+            project_id, name = str(data.get("project_id") or ""), str(data["name"])
+            environment, key = ((GITHUB_ENVIRONMENT, GITHUB_TOKEN_VARIABLE)
+                                if name == LEGACY_GITHUB_TOKEN else (name, LEGACY_VALUE_VARIABLE))
+            target = environments.get(credential_id(project_id, environment))
+            if target is not None and any(item["name"] == key
+                                          for item in target[0]["variables"]):
+                environment, key, target = name, LEGACY_VALUE_VARIABLE, None
+            variable = {"name": key, "secret": True, "has_value": bool(value),
+                        "fingerprint": str(data.get("fingerprint") or "") if value else "",
+                        "value": ""}
+            if target is None:
+                target = ({"name": environment, "project_id": project_id,
+                           "description": str(data.get("description") or ""),
+                           "has_value": True, "requested_by": "",
+                           "created_at": data.get("created_at") or time.time(),
+                           "updated_at": data.get("updated_at") or time.time(),
+                           "variables": []}, {})
+                environments[credential_id(project_id, environment)] = target
+            meta, secrets = target
+            meta["variables"].append(variable)
+            meta["has_value"] = all(item["has_value"] for item in meta["variables"])
+            if not value:
+                meta["requested_by"] = (meta.get("requested_by")
+                                        or str(data.get("requested_by") or ""))
+            else:
+                secrets[key] = value
+            removed.add(old_id)
+            dirty.add(credential_id(project_id, environment))
+        for old_id in removed - dirty:
+            self._conn.execute("DELETE FROM credentials WHERE id=?", (old_id,))
+        for id in dirty:
+            meta, secrets = environments[id]
+            self._conn.execute(
+                "INSERT INTO credentials(id, data, value) VALUES(?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data, value=excluded.value",
+                (id, json.dumps(meta, ensure_ascii=False),
+                 json.dumps(secrets, ensure_ascii=False) if secrets else ""))
+        return len(dirty)
 
     def _migrate_backend_commands(self) -> int:
         """删除旧 Backend 记录中的命令覆盖，统一回到内置 Runtime 启动方式。"""
@@ -366,7 +606,7 @@ class Store:
             "  SELECT r2.id FROM chat_runs r2 "
             "  WHERE r2.trigger_message_id=m.reply_to AND r2.role_id=m.author "
             "  ORDER BY r2.id DESC LIMIT 1"
-            ") WHERE m.author_type='agent' AND ("
+            ") WHERE m.author_type='agent' AND m.kind IS NOT 'run_recovery' AND ("
             "  m.runtime_id='' OR m.model='' OR m.effort='' OR LENGTH(m.content)=4000"
             ") ORDER BY m.id"
         ).fetchall()
@@ -460,6 +700,15 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE chat_sessions ADD COLUMN resource_state TEXT DEFAULT ''")
 
+    def _migrate_chat_callbacks(self) -> None:
+        """事件回调上线前建的库没有 spec / progress 两列。"""
+        columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(chat_callbacks)").fetchall()}
+        for column in ("spec", "progress"):
+            if column not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE chat_callbacks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+
     def _execute(self, sql: str, params: tuple = ()) -> int:
         """写操作,返回 lastrowid。"""
         with self._lock:
@@ -495,6 +744,7 @@ class Store:
             "SELECT id FROM channels WHERE json_extract(data, '$.project_id')=?"
             ")", (id, project_id))
         self.revoke_agent_tokens(project_id=project_id, role_id=id)
+        self.cancel_chat_callbacks("角色已删除", project_id=project_id, role_id=id)
         self.delete_role_usage_block(project_id, id)
         self._delete("roles", f"{project_id}:{id}")
     def delete_backend(self, id: str) -> None:
@@ -518,6 +768,7 @@ class Store:
             self._unlink_channel_from_tasks(channel)
         self._execute("DELETE FROM chat_sessions WHERE channel=?", (id,))
         self.revoke_agent_tokens(channel=id)
+        self.cancel_chat_callbacks("频道已删除", channel=id)
         self._delete("channels", id)
 
     def purge_channel_conversation(self, id: str) -> dict[str, int]:
@@ -595,7 +846,10 @@ class Store:
                 self.delete_task(task.id)
         for automation in self.list_automations(id):
             self.delete_automation(automation.id)
+        for credential in self.list_credentials(id):
+            self.delete_credential(credential.id)
         self.revoke_agent_tokens(project_id=id)
+        self.cancel_chat_callbacks("项目已删除", project_id=id)
         self._delete("projects", id)
 
     # ---- Projects / Backends / Resources / Tasks ----
@@ -613,10 +867,6 @@ class Store:
     def list_backends(self) -> list[Backend]:
         return [Backend.from_dict(d) for d in self._list("backends")]
 
-    def put_resource(self, r: Resource) -> None: self._put("resources", r.id, r.to_dict())
-    def get_resource(self, id: str) -> Optional[Resource]:
-        d = self._get("resources", id)
-        return Resource.from_dict(d) if d else None
 
     def put_task(self, t: Task) -> None:
         t.updated_at = time.time()
@@ -799,6 +1049,7 @@ class Store:
         return result
 
     def audit(self, actor: str, action: str, task_id: str = "", detail: str = "") -> None:
+        detail = self.redact_credentials(detail)
         self._execute(
             "INSERT INTO audit(ts, actor, action, task_id, detail) VALUES(?,?,?,?,?)",
             (time.time(), actor, action, task_id, detail),
@@ -1134,6 +1385,202 @@ class Store:
                 (automation.id,
                  json.dumps(automation.to_dict(), ensure_ascii=False)),
             )
+    # ---- 全局 webhook 来源 ----
+    def put_webhook_source(self, source: WebhookSource) -> None:
+        source.updated_at = time.time()
+        self._put("webhook_sources", source.id, source.to_dict())
+
+    def get_webhook_source(self, id: str) -> Optional[WebhookSource]:
+        d = self._get("webhook_sources", id)
+        return WebhookSource.from_dict(d) if d else None
+
+    def list_webhook_sources(self) -> list[WebhookSource]:
+        items = [WebhookSource.from_dict(d) for d in self._list("webhook_sources")]
+        return sorted(items, key=lambda item: (item.created_at, item.id))
+
+    def find_webhook_source_by_path(self, path: str) -> Optional[WebhookSource]:
+        rows = self._query(
+            "SELECT data FROM webhook_sources WHERE json_extract(data, '$.path')=?",
+            (path,))
+        return WebhookSource.from_dict(json.loads(rows[0]["data"])) if rows else None
+
+    def delete_webhook_source(self, id: str) -> None:
+        self._delete("webhook_sources", id)
+        self._delete("webhook_source_state", id)
+        self._execute("DELETE FROM webhook_deliveries WHERE source_id=?", (id,))
+
+    # ---- webhook 投递记录 ----
+    _DELIVERY_COLUMNS = ("id, source_id, received_at, provider, event, action, repository, "
+                         "delivery, transport, auth, outcomes, size")
+
+    def add_webhook_delivery(self, source_id: str, *, received_at: float, provider: str,
+                             event: str, action: str, repository: str, delivery: str,
+                             transport: str, auth: str, outcomes: list,
+                             data: str, size: int, keep: int) -> int:
+        """记一次投递并返回记录 id。data 是事件全文 JSON,入库前同样脱敏(外部系统
+        送来的正文里也可能带着已保存的凭据);keep 是每个来源保留的条数上限,每
+        100 条顺手清一次更早的。"""
+        new_id = self._execute(
+            "INSERT INTO webhook_deliveries(source_id, received_at, provider, event, action, "
+            "repository, delivery, transport, auth, outcomes, size, data) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (source_id, received_at, provider, event, action, repository, delivery,
+             transport, auth, json.dumps(outcomes, ensure_ascii=False), size,
+             self.redact_credentials(data)))
+        if new_id % 100 == 0:
+            self._execute(
+                "DELETE FROM webhook_deliveries WHERE source_id=? AND id NOT IN "
+                "(SELECT id FROM webhook_deliveries WHERE source_id=? "
+                "ORDER BY id DESC LIMIT ?)", (source_id, source_id, keep))
+        return new_id
+
+    @staticmethod
+    def _delivery_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["outcomes"] = json.loads(item.get("outcomes") or "[]")
+        return item
+
+    def list_webhook_deliveries(self, source_id: str, limit: int = 50, before_id: int = 0,
+                                event: str = "", action: str = "",
+                                repository: str = "", after_id: int = -1) -> list[dict]:
+        """按 id 倒序列出投递摘要(不含事件正文);event/action 精确匹配,repository
+        不区分大小写,before_id>0 时只取更早的,用于向前翻页。给了 after_id(>=0)
+        则改为只取更新的并按 id 正序,供事件回调从游标往后逐条检查。"""
+        conditions, params = ["source_id=?"], [source_id]
+        if before_id > 0:
+            conditions.append("id<?")
+            params.append(before_id)
+        if after_id >= 0:
+            conditions.append("id>?")
+            params.append(after_id)
+        for column, value in (("event", event), ("action", action)):
+            if value:
+                conditions.append(f"{column}=?")
+                params.append(value)
+        if repository:
+            conditions.append("LOWER(repository)=?")
+            params.append(repository.lower())
+        params.append(max(1, min(int(limit), 200)))
+        rows = self._query(
+            f"SELECT {self._DELIVERY_COLUMNS} FROM webhook_deliveries "
+            f"WHERE {' AND '.join(conditions)} "
+            f"ORDER BY id {'ASC' if after_id >= 0 else 'DESC'} LIMIT ?", tuple(params))
+        return [self._delivery_row(row) for row in rows]
+
+    def last_webhook_delivery_id(self, source_id: str) -> int:
+        rows = self._query(
+            "SELECT MAX(id) AS last FROM webhook_deliveries WHERE source_id=?", (source_id,))
+        return int(rows[0]["last"] or 0)
+
+    def get_webhook_delivery(self, delivery_id: int) -> Optional[dict]:
+        """单条记录,`event_data` 是事件全文(正文过大没存时其中 payload 为 null)。"""
+        rows = self._query(
+            f"SELECT {self._DELIVERY_COLUMNS}, data FROM webhook_deliveries WHERE id=?",
+            (delivery_id,))
+        if not rows:
+            return None
+        item = self._delivery_row(rows[0])
+        item["event_data"] = json.loads(item.pop("data") or "null")
+        return item
+
+    def count_webhook_deliveries(self, source_id: str) -> int:
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM webhook_deliveries WHERE source_id=?", (source_id,))
+        return int(rows[0]["n"]) if rows else 0
+
+    def prune_webhook_deliveries(self, cutoff: float) -> None:
+        self._execute("DELETE FROM webhook_deliveries WHERE received_at<?", (cutoff,))
+
+    def get_webhook_source_state(self, id: str) -> dict:
+        return self._get("webhook_source_state", id) or {}
+
+    def put_webhook_source_state(self, id: str, state: dict) -> None:
+        self._put("webhook_source_state", id, state)
+
+    def delete_webhook_source_state(self, id: str) -> None:
+        self._delete("webhook_source_state", id)
+
+    # ---- 凭据(环境;全局 + 项目,保密值与元数据分列存放) ----
+    def put_credential(self, credential: Credential,
+                       secrets: Optional[dict[str, str]] = None) -> None:
+        """保存元数据;secrets 不为 None 时一并整份替换保密值("secret 变量名 -> 值",
+        空字典 = 清空)。"""
+        credential.updated_at = time.time()
+        value = None if secrets is None else (
+            json.dumps(secrets, ensure_ascii=False) if secrets else "")
+        with self._lock:
+            if value is None:
+                self._execute(
+                    "INSERT INTO credentials(id, data) VALUES(?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                    (credential.id, json.dumps(credential.to_dict(), ensure_ascii=False)))
+            else:
+                self._execute(
+                    "INSERT INTO credentials(id, data, value) VALUES(?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET data=excluded.data, value=excluded.value",
+                    (credential.id, json.dumps(credential.to_dict(), ensure_ascii=False),
+                     value))
+            self._redaction = None
+
+    def get_credential(self, project_id: str, name: str) -> Optional[Credential]:
+        d = self._get("credentials", credential_id(project_id, name))
+        return Credential.from_dict(d) if d else None
+
+    def list_credentials(self, project_id: Optional[str] = None) -> list[Credential]:
+        """project_id 为 None 列出全部;空串只列全局;否则只列该项目自己的。"""
+        items = [Credential.from_dict(d) for d in self._list("credentials")]
+        if project_id is not None:
+            items = [item for item in items if item.project_id == project_id]
+        return sorted(items, key=lambda item: (item.project_id, item.name))
+
+    def credential_secrets(self, project_id: str, name: str) -> dict[str, str]:
+        """环境里 secret 变量的值(变量名 -> 值);环境不存在时返回空字典。"""
+        rows = self._query("SELECT value FROM credentials WHERE id=?",
+                           (credential_id(project_id, name),))
+        return _environment_secrets(rows[0]["value"]) if rows else {}
+
+    def delete_credential(self, id: str) -> None:
+        with self._lock:
+            self._delete("credentials", id)
+            self._redaction = None
+
+    def _redaction_pairs(self) -> list[tuple[str, str]]:
+        with self._lock:
+            if self._redaction is None:
+                rows = self._query(
+                    "SELECT data, value FROM credentials WHERE value != ''")
+                # 只有 secret 变量的值在这一列,占位符写成 <环境>.<变量>
+                self._redaction = redaction_pairs(
+                    (f"{json.loads(row['data'])['name']}.{variable}", value)
+                    for row in rows
+                    for variable, value in _environment_secrets(row["value"]).items())
+            return self._redaction
+
+    def redact_credentials(self, text: str) -> str:
+        """把文本里出现的 secret 变量原文换成 [credential:<环境>.<变量>],供各写入口
+        落库前调用。"""
+        pairs = self._redaction_pairs()
+        return redact_text(text, pairs) if pairs and text else text
+
+    def _redact_message(self, content: str,
+                        spans: list[dict]) -> tuple[str, list[dict]]:
+        """消息正文脱敏。提及范围是正文里的码点偏移,替换会改变长度,所以只替换
+        提及之间的片段,再按新长度平移各提及范围。"""
+        if not self._redaction_pairs() or not content:
+            return content, spans
+        ordered = sorted(spans, key=lambda item: item.get("start", 0))
+        if not all(type(item.get("start")) is int and type(item.get("end")) is int
+                   for item in ordered):
+            return self.redact_credentials(content), spans
+        out, shifted, cursor = "", [], 0
+        for span in ordered:
+            out += self.redact_credentials(content[cursor:span["start"]])
+            start = len(out)
+            out += content[span["start"]:span["end"]]
+            shifted.append({**span, "start": start, "end": len(out)})
+            cursor = span["end"]
+        out += self.redact_credentials(content[cursor:])
+        return out, shifted
 
     def touch_automation_run_state(self, id: str, status: str) -> None:
         """只更新最近运行状态字段，不覆盖脚本内容的并发编辑。"""
@@ -1170,10 +1617,12 @@ class Store:
                               exit_code: Optional[int] = None,
                               stdout: str = "", stderr: str = "",
                               error: str = "") -> None:
+        redact = self.redact_credentials
         self._execute(
             "UPDATE automation_runs SET status=?, exit_code=?, stdout=?, "
             "stderr=?, error=?, finished_at=? WHERE id=?",
-            (status, exit_code, stdout, stderr, error, time.time(), run_id),
+            (status, exit_code, redact(stdout), redact(stderr), redact(error),
+             time.time(), run_id),
         )
 
     def get_automation_run(self, run_id: int) -> Optional[dict]:
@@ -1207,6 +1656,7 @@ class Store:
                     kind: str = "message",
                     mention_spans: Optional[list[dict]] = None,
                     context: Optional[dict] = None) -> int:
+        content, mention_spans = self._redact_message(content, mention_spans or [])
         msg_id = self._execute(
             "INSERT INTO messages(channel, author, author_type, content, mentions, "
             "mention_spans, context, runtime_id, model, effort, kind, reply_to, root_id, "
@@ -1255,27 +1705,124 @@ class Store:
     # ---- 聊天:执行记录 ----
     def add_chat_run(self, channel: str, role_id: str, trigger_message_id: int,
                      root_id: int, depth: int) -> int:
+        pid = os.getpid()
         return self._execute(
             "INSERT INTO chat_runs(channel, role_id, trigger_message_id, root_id, depth, "
-            "status, created_at) VALUES(?,?,?,?,?,'queued',?)",
-            (channel, role_id, trigger_message_id, root_id, depth, time.time()),
+            "owner_pid, owner_instance, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (channel, role_id, trigger_message_id, root_id, depth,
+             pid, _current_owner_instance(pid), time.time()),
         )
+
+    def reconcile_chat_runs(self) -> int:
+        """仅由服务启动调用。旧 Run 收为中断，失效的待答事件与令牌同时收口。"""
+        active = "status IN ('queued','running','waiting_user')"
+        owners = self._query(
+            f"SELECT DISTINCT owner_pid,owner_instance FROM chat_runs WHERE {active}")
+        changed = 0
+        for owner in owners:
+            pid, instance = owner["owner_pid"], owner["owner_instance"]
+            if _chat_owner_is_alive(pid, instance):
+                continue
+            with self._lock, self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                runs = self._conn.execute(
+                    "SELECT r.id,r.channel,r.status,json_extract(c.data,'$.project_id') AS project_id "
+                    f"FROM chat_runs r LEFT JOIN channels c ON c.id=r.channel WHERE {active} "
+                    "AND owner_pid=? AND owner_instance=?", (pid, instance)).fetchall()
+                now = time.time()
+                for run in runs:
+                    run_id = run["id"]
+                    self._conn.execute(
+                        "UPDATE chat_runs SET status='interrupted',error=?,finished_at=? WHERE id=?",
+                        ("服务重启时原执行进程已结束，本次运行已中断。", now, run_id))
+                    self._conn.execute(
+                        "UPDATE run_events SET content=json_set(content,'$.status','interrupted',"
+                        "'$.resolved_at',?) WHERE run_id=? AND kind IN "
+                        "('permission_request','user_input_request') AND json_valid(content) "
+                        "AND json_extract(content,'$.status')='pending'", (now, run_id))
+                    self._conn.execute(
+                        "UPDATE agent_tokens SET revoked_at=? WHERE run_id=? AND revoked_at IS NULL",
+                        (now, run_id))
+                    self._conn.execute(
+                        "INSERT INTO audit(ts,actor,action,detail) "
+                        "VALUES(?,'platform','chat_run_interrupted',?)",
+                        (now, f"project={run['project_id'] or ''} channel={run['channel']} run={run_id} "
+                              f"previous_status={run['status']}"))
+                changed += len(runs)
+        return changed
+
+    def create_chat_run_recovery(
+            self, source_run_id: int, actor: str, *, root_id: Optional[int] = None,
+            depth: int = 0, max_chain_runs: Optional[int] = None,
+            origin_run_id: Optional[int] = None) -> tuple[int, bool]:
+        """一次事务建立确认消息和关联 Run；重复确认返回首次创建的 Run。"""
+        pid = os.getpid()
+        instance = _current_owner_instance(pid)
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            source = self._conn.execute(
+                "SELECT * FROM chat_runs WHERE id=?", (source_run_id,)).fetchone()
+            if source is None:
+                raise KeyError(source_run_id)
+            if source["status"] != "interrupted":
+                raise ValueError("只能显式续跑已中断的运行")
+            existing = self._conn.execute(
+                "SELECT id FROM chat_runs WHERE recovered_from_run_id=?",
+                (source_run_id,)).fetchone()
+            if existing is not None:
+                return existing["id"], False
+            if origin_run_id is not None and not self.chat_run_is_active(origin_run_id):
+                raise ValueError("发起续跑的主控运行已经结束")
+            channel, role_id = source["channel"], source["role_id"]
+            current = self.get_channel(channel)
+            if current is None or current.archived:
+                raise ValueError("运行所属频道不存在或已归档")
+            if source["trigger_message_id"] <= current.context_start_message_id:
+                raise ValueError("频道已清除这次运行的上下文，请重新发起任务")
+            if (root_id is not None and max_chain_runs is not None
+                    and self.count_chain_runs(root_id) >= max_chain_runs):
+                raise ValueError("本条协作链执行数已达上限，无法续跑")
+            now = time.time()
+            content = (f"显式续跑 Run #{source_run_id}：请先核对已完成的工作，"
+                       "仅继续尚未完成且可以确认的部分。操作结果不明时先报告。")
+            author_type = "agent" if actor.startswith("role:") else "human"
+            message = self._conn.execute(
+                "INSERT INTO messages(channel,author,author_type,content,mentions,kind,"
+                "reply_to,root_id,depth,created_at) VALUES(?,?,?,?,?,'run_recovery',?,?,?,?)",
+                (channel, actor.removeprefix("role:"), author_type, content,
+                 json.dumps([role_id], ensure_ascii=False),
+                 source["trigger_message_id"], root_id, depth, now))
+            message_id = message.lastrowid
+            if root_id is None:
+                root_id = message_id
+                self._conn.execute(
+                    "UPDATE messages SET root_id=? WHERE id=?", (root_id, message_id))
+            recovery = self._conn.execute(
+                "INSERT INTO chat_runs(channel,role_id,trigger_message_id,root_id,depth,"
+                "created_at,owner_pid,owner_instance,recovered_from_run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                (channel, role_id, message_id, root_id, depth, now, pid, instance, source_run_id))
+            self._conn.execute(
+                "INSERT INTO audit(ts,actor,action,detail) "
+                "VALUES(?,?,'chat_run_recovery_created',?)",
+                (now, actor, f"project={current.project_id or ''} channel={channel} "
+                             f"run={recovery.lastrowid} source_run={source_run_id}"))
+            return int(recovery.lastrowid), True
 
     def update_chat_run(self, run_id: int, status: str, backend_id: str = "",
                         error: str = "", model: str = "",
                         effort: str = "") -> bool:
-        """更新未被用户停止的运行，避免迟到结果覆盖 ``stopped`` 终态。
+        """更新运行，避免迟到的结果覆盖已停止、中断或合并的终态。
 
         model/effort 只在传入非空时覆盖:转入 running 时盖章执行组合,
         终态更新不回传就保留原值。
         """
-        finished = time.time() if status in ("done", "failed", "stopped") else None
+        finished = time.time() if status in ("done", "failed", "stopped", "interrupted") else None
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE chat_runs SET status=?, backend_id=?, error=?, finished_at=?, "
                 "model=CASE WHEN ?='' THEN model ELSE ? END, "
                 "effort=CASE WHEN ?='' THEN effort ELSE ? END "
-                "WHERE id=? AND status!='stopped'",
+                "WHERE id=? AND status NOT IN ('stopped','interrupted','merged')",
                 (status, backend_id, error, finished,
                  model, model, effort, effort, run_id),
             )
@@ -1312,14 +1859,41 @@ class Store:
         return bool(rows)
 
     def get_chat_run(self, run_id: int) -> Optional[dict]:
-        rows = self._query("SELECT * FROM chat_runs WHERE id=?", (run_id,))
+        rows = self._query(f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id "
+                           "FROM chat_runs r WHERE r.id=?", (run_id,))
         return dict(rows[0]) if rows else None
+
+    def get_chat_run_recovery(self, run_id: int) -> Optional[dict]:
+        rows = self._query(f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id "
+                           "FROM chat_runs r WHERE r.recovered_from_run_id=?", (run_id,))
+        return dict(rows[0]) if rows else None
+
+    def interrupted_chat_runs(self, channel: str, *, pending_only: bool = False,
+                              after_message_id: int = 0, before_run_id: Optional[int] = None,
+                              limit: Optional[int] = None) -> list[dict]:
+        """默认按时间正序；分页时从最新 Run 向前取，使用上一页末尾的 Run id。"""
+        pending = f"AND {_RECOVERY_RUN_ID} IS NULL " if pending_only else ""
+        sql = (
+            f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id FROM chat_runs r "
+            "WHERE r.channel=? AND r.status='interrupted' AND r.trigger_message_id>? "
+            + pending)
+        params = (channel, after_message_id)
+        if before_run_id is not None:
+            sql += "AND r.id<? "
+            params += (before_run_id,)
+        if limit is None:
+            sql += "ORDER BY r.id"
+        else:
+            sql += "ORDER BY r.id DESC LIMIT ?"
+            params += (max(0, limit),)
+        return [dict(row) for row in self._query(sql, params)]
 
     def stop_active_chat_runs(self, channel: str) -> list[dict]:
         """原子地把频道内全部活动运行改为终态，并返回停止前的快照。"""
-        with self._lock:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             rows = self._conn.execute(
-                "SELECT * FROM chat_runs WHERE channel=? "
+                f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE channel=? "
                 "AND status IN ('queued','running','waiting_user') ORDER BY id",
                 (channel,),
             ).fetchall()
@@ -1331,14 +1905,14 @@ class Store:
                 "WHERE channel=? AND status IN ('queued','running','waiting_user')",
                 (now, channel),
             )
-            self._conn.commit()
             return [dict(row) for row in rows]
 
     def stop_chat_run(self, run_id: int) -> Optional[dict]:
         """原子地停止单个活动运行，返回停止前的快照;已结束返回 None。"""
-        with self._lock:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
-                "SELECT * FROM chat_runs WHERE id=? "
+                f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE id=? "
                 "AND status IN ('queued','running','waiting_user')",
                 (run_id,),
             ).fetchone()
@@ -1348,12 +1922,30 @@ class Store:
                 "UPDATE chat_runs SET status='stopped', error='', finished_at=? "
                 "WHERE id=?", (time.time(), run_id),
             )
-            self._conn.commit()
             return dict(row)
+
+    def queued_chat_runs(self, channel: str, role_id: str) -> list[dict]:
+        """本进程在该频道为角色创建的排队运行，按创建顺序。"""
+        pid = os.getpid()
+        return [dict(r) for r in self._query(
+            f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE channel=? AND role_id=? "
+            "AND status='queued' AND owner_pid=? AND owner_instance=? ORDER BY id",
+            (channel, role_id, pid, _current_owner_instance(pid)))]
+
+    def merge_queued_chat_runs(self, run_id: int, absorbed_ids: list[int]) -> None:
+        """把仍在排队的运行并入 ``run_id``:它们各自的触发消息改由那次运行一轮
+        处理,自己以 ``merged`` 终态结束、不再单独执行。"""
+        if not absorbed_ids:
+            return
+        marks = ",".join("?" * len(absorbed_ids))
+        self._execute(
+            "UPDATE chat_runs SET status='merged', merged_into=?, finished_at=? "
+            f"WHERE id IN ({marks}) AND status='queued'",
+            (run_id, time.time(), *absorbed_ids))
 
     def active_chat_runs(self, channel: str) -> list[dict]:
         return [dict(r) for r in self._query(
-            "SELECT * FROM chat_runs WHERE channel=? "
+            f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE channel=? "
             "AND status IN ('queued','running','waiting_user') "
             "ORDER BY id", (channel,))]
 
@@ -1371,8 +1963,156 @@ class Store:
     def chat_runs_for_trigger(self, message_id: int) -> list[dict]:
         """由某条消息直接触发的运行,用于回报派发实际启动情况。"""
         rows = self._query(
-            "SELECT * FROM chat_runs WHERE trigger_message_id=?", (message_id,))
+            f"SELECT {_RUN_FIELDS} FROM chat_runs r WHERE trigger_message_id=?", (message_id,))
         return [dict(row) for row in rows]
+
+    def finished_chat_chains(self, since: float, until: float) -> list[dict]:
+        """``(since, until]`` 内整条结束的协作链,供浏览器"任务结束"通知增量拉取。
+
+        协作链 = 同一频道里同一 root 消息引发的全部运行(主控派发、结果交回都沿用
+        root)。引擎先发布回复(可能顺带派发下一轮)再把本轮标成终态,所以链上
+        只要还有排队/运行/等待用户的运行就没结束;最后一次结束时刻落在窗口内的
+        链只会被报告一次。status/error 取链上最后结束的那次运行。
+
+        排队时并入其他运行(``merged``)的运行不计入 runs;一条链若以它收尾,说明
+        后续工作由承接的那次运行所在的链继续,这条链不单独报告。
+        """
+        rows = self._query(
+            "SELECT r.channel, r.root_id, r.role_id, r.status, r.error, r.finished_at "
+            "FROM chat_runs r WHERE (r.root_id, r.channel) IN ("
+            "  SELECT root_id, channel FROM chat_runs "
+            "  WHERE finished_at > ? AND finished_at <= ?) "
+            "AND NOT EXISTS (SELECT 1 FROM chat_runs a "
+            "  WHERE a.root_id=r.root_id AND a.channel=r.channel "
+            "  AND a.status IN ('queued','running','waiting_user')) "
+            "ORDER BY r.finished_at, r.id",
+            (since, until))
+        chains: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            chain = chains.setdefault((row["channel"], row["root_id"]), {
+                "channel": row["channel"], "root_id": row["root_id"],
+                "roles": [], "runs": 0, "failed": 0})
+            if row["status"] == "merged":
+                chain.update(status="merged", error="",
+                             finished_at=row["finished_at"])
+                continue
+            chain["runs"] += 1
+            chain["failed"] += row["status"] == "failed"
+            if row["role_id"] not in chain["roles"]:
+                chain["roles"].append(row["role_id"])
+            chain.update(status=row["status"], error=row["error"] or "",
+                         finished_at=row["finished_at"])
+        return [chain for chain in chains.values()
+                if chain["finished_at"] <= until and chain["status"] != "merged"]
+
+    def last_chain_reply(self, channel: str, root_id: int) -> Optional[dict]:
+        """协作链里最后一条 Agent 回复,作为"任务结束"通知的正文。"""
+        rows = self._query(
+            "SELECT author, content FROM messages WHERE channel=? AND root_id=? "
+            "AND author_type='agent' ORDER BY id DESC LIMIT 1", (channel, root_id))
+        return dict(rows[0]) if rows else None
+
+    # ---- 聊天:角色登记的一次性回调 ----
+    def add_chat_callback(self, *, project_id: str, channel: str, role_id: str,
+                          note: str, fire_at: float = 0.0, expires_at: float = 0.0,
+                          watch_kind: str = "", watch_target: str = "",
+                          baseline: str = "", spec: str = "", origin_run_id: int = 0,
+                          origin_trigger: int = 0) -> int:
+        note = self.redact_credentials(note)
+        return self._execute(
+            "INSERT INTO chat_callbacks(project_id,channel,role_id,note,fire_at,"
+            "expires_at,watch_kind,watch_target,baseline,spec,origin_run_id,"
+            "origin_trigger,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+            (project_id, channel, role_id, note, fire_at, expires_at, watch_kind,
+             watch_target, baseline, self.redact_credentials(spec), origin_run_id,
+             origin_trigger, time.time()))
+
+    def get_chat_callback(self, callback_id: int) -> Optional[dict]:
+        rows = self._query("SELECT * FROM chat_callbacks WHERE id=?", (callback_id,))
+        return dict(rows[0]) if rows else None
+
+    def list_chat_callbacks(self, *, project_id: str = "", channel: str = "",
+                            role_id: str = "", status: str = "pending",
+                            limit: int = 200) -> list[dict]:
+        clauses, params = [], []
+        for column, value in (("project_id", project_id), ("channel", channel),
+                              ("role_id", role_id), ("status", status)):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        return [dict(row) for row in self._query(
+            f"SELECT * FROM chat_callbacks {where}ORDER BY id DESC LIMIT ?",
+            (*params, max(1, min(int(limit), 1000))))]
+
+    def pending_chat_callback_counts(self) -> dict[str, int]:
+        """按频道汇总等待中的回调数;侧栏一次查询即可标记哪些频道在等回调。"""
+        return {row["channel"]: int(row["n"]) for row in self._query(
+            "SELECT channel, COUNT(*) AS n FROM chat_callbacks "
+            "WHERE status='pending' GROUP BY channel")}
+
+    def finish_chat_callback(self, callback_id: int, status: str, reason: str = "",
+                             message_id: int = 0) -> bool:
+        """把仍在等待的回调记为 fired/cancelled/expired;已结束的不改,返回是否命中。"""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE chat_callbacks SET status=?, reason=?, message_id=?, "
+                "finished_at=? WHERE id=? AND status='pending'",
+                (status, reason, message_id, time.time(), callback_id))
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def cancel_chat_callbacks(self, reason: str, *, project_id: str = "",
+                              channel: str = "", role_id: str = "") -> list[int]:
+        """按归属批量取消等待中的回调(停止频道 Agent、删除频道/角色/项目)。"""
+        clauses, params = ["status='pending'"], []
+        for column, value in (("project_id", project_id), ("channel", channel),
+                              ("role_id", role_id)):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        if len(clauses) == 1:
+            raise ValueError("取消回调必须限定项目、频道或角色")
+        where = " AND ".join(clauses)
+        with self._lock:
+            ids = [int(row["id"]) for row in self._conn.execute(
+                f"SELECT id FROM chat_callbacks WHERE {where}", params).fetchall()]
+            if ids:
+                self._conn.execute(
+                    f"UPDATE chat_callbacks SET status='cancelled', reason=?, "
+                    f"finished_at=? WHERE {where}", (reason, time.time(), *params))
+                self._conn.commit()
+        return ids
+
+    def set_chat_callback_message(self, callback_id: int, message_id: int) -> None:
+        self._execute("UPDATE chat_callbacks SET message_id=? WHERE id=?",
+                      (message_id, callback_id))
+
+    def rebase_chat_callback(self, callback_id: int, baseline: str) -> None:
+        self._execute(
+            "UPDATE chat_callbacks SET baseline=? WHERE id=? AND status='pending'",
+            (baseline, callback_id))
+
+    def advance_chat_callback(self, callback_id: int, baseline: str, progress: str) -> None:
+        """事件回调看完一批投递后推进游标并记下检查进度。"""
+        self._execute(
+            "UPDATE chat_callbacks SET baseline=?, progress=? WHERE id=? AND status='pending'",
+            (baseline, self.redact_credentials(progress), callback_id))
+
+    def last_message_id(self, channel: str) -> int:
+        rows = self._query("SELECT MAX(id) AS last FROM messages WHERE channel=?", (channel,))
+        return int(rows[0]["last"] or 0)
+
+    def first_update_message(self, channel: str, after_id: int,
+                             exclude_role: str = "") -> Optional[dict]:
+        """频道里 after_id 之后第一条"有内容的更新":人类、Agent、自动化脚本的
+        消息;平台回执与通知不算,登记者自己的消息也不算。"""
+        rows = self._query(
+            "SELECT * FROM messages WHERE channel=? AND id>? "
+            "AND author_type IN ('human','agent','automation') "
+            "AND NOT (author_type='agent' AND author=?) ORDER BY id LIMIT 1",
+            (channel, after_id, exclude_role))
+        return dict(rows[0]) if rows else None
 
     # ---- 聊天:Runtime 持久会话 ----
     def get_chat_session(self, session_key: str) -> Optional[dict]:
@@ -1441,6 +2181,30 @@ class Store:
             self._conn.commit()
             return cursor.rowcount
 
+    def clear_channel_chat_context(self, channel_id: str) -> tuple[Channel, int, int]:
+        """与恢复互斥提交上下文边界、分隔消息和会话删除。"""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                raise ValueError(f"频道不存在: {channel_id}")
+            if self.active_chat_runs(channel_id):
+                raise ValueError("频道仍有 Agent 正在运行，请先停止或等待本轮结束后再清除上下文")
+            cleared = self._conn.execute(
+                "DELETE FROM chat_sessions WHERE channel=?", (channel_id,)).rowcount
+            marker = self._conn.execute(
+                "INSERT INTO messages(channel,author,author_type,content,kind,created_at) "
+                "VALUES(?,'platform','platform',?,'context_boundary',?)",
+                (channel_id, "上下文已清除 · 后续消息将启动全新的 Runtime 会话", time.time()))
+            marker_id = marker.lastrowid
+            assert marker_id is not None
+            self._conn.execute("UPDATE messages SET root_id=? WHERE id=?", (marker_id, marker_id))
+            self._conn.execute(
+                "UPDATE channels SET data=json_set(data,'$.context_start_message_id',?) WHERE id=?",
+                (marker_id, channel_id))
+            channel.context_start_message_id = marker_id
+            return channel, marker_id, cleared
+
     # ---- 聊天:执行过程事件(实时运行输出) ----
     # 同类连续事件合并进同一行(追加文本),避免逐 chunk/逐行插入把表撑爆;
     # 换 kind 或单行超过上限时另起物理行,读取时再恢复为逻辑事件。
@@ -1452,6 +2216,7 @@ class Store:
     def append_run_event(self, run_id: int, kind: str, text: str) -> Optional[int]:
         if not text:
             return None
+        text = self.redact_credentials(text)
         # JSON 事件必须保持一行一个对象；相邻权限/用量事件不能字符串拼接。
         if kind in self.RUN_EVENT_STRUCTURED_KINDS:
             return self._execute(
@@ -1468,9 +2233,10 @@ class Store:
                 if last and last["kind"] == kind and last["n"] < self.RUN_EVENT_MAX:
                     capacity = self.RUN_EVENT_MAX - last["n"]
                     chunk, remaining = remaining[:capacity], remaining[capacity:]
-                    self._execute(
-                        "UPDATE run_events SET content = content || ? WHERE id=?",
-                        (chunk, last["id"]))
+                    if not self._append_redacted_across_boundary(int(last["id"]), chunk):
+                        self._execute(
+                            "UPDATE run_events SET content = content || ? WHERE id=?",
+                            (chunk, last["id"]))
                     event_id = int(last["id"])
                 else:
                     chunk, remaining = (remaining[: self.RUN_EVENT_MAX],
@@ -1481,22 +2247,44 @@ class Store:
                         (run_id, kind, chunk, time.time()))
         return event_id
 
+    def _append_redacted_across_boundary(self, event_id: int, chunk: str) -> bool:
+        """流式文本按增量追加,一个凭据值可能被拆在相邻几次追加里,单看新片段认不出。
+        把行尾最多 (最长原文 - 1) 个字符与新片段拼起来再查;命中时连同行尾一起
+        改写并返回 True,否则返回 False 交给调用方普通追加。"""
+        pairs = self._redaction_pairs()
+        if not pairs:
+            return False
+        overlap = max(len(secret) for secret, _ in pairs) - 1
+        tail = str(self._query(
+            "SELECT substr(content, -?) AS tail FROM run_events WHERE id=?",
+            (overlap, event_id))[0]["tail"] or "")
+        merged = tail + chunk
+        redacted = redact_text(merged, pairs)
+        if redacted == merged:
+            return False
+        self._execute(
+            "UPDATE run_events SET content = substr(content, 1, length(content) - ?) || ? "
+            "WHERE id=?", (len(tail), redacted, event_id))
+        return True
+
     def append_interaction_event(self, run_id: int, kind: str,
                                  payload: dict) -> int:
         """交互请求必须独占一行，不能与相邻 JSON 事件拼接。"""
+        content = self.redact_credentials(json.dumps(payload, ensure_ascii=False))
         return self._execute(
             "INSERT INTO run_events(run_id, kind, content, created_at) "
             "VALUES(?,?,?,?)",
-            (run_id, kind, json.dumps(payload, ensure_ascii=False), time.time()),
+            (run_id, kind, content, time.time()),
         )
 
     def update_interaction_event(self, event_id: int, run_id: int,
                                  payload: dict) -> bool:
         """只更新指定 run 的交互行，避免跨运行猜测 request id。"""
+        content = self.redact_credentials(json.dumps(payload, ensure_ascii=False))
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE run_events SET content=? WHERE id=? AND run_id=?",
-                (json.dumps(payload, ensure_ascii=False), event_id, run_id),
+                (content, event_id, run_id),
             )
             self._conn.commit()
             return cursor.rowcount == 1
@@ -1574,11 +2362,15 @@ class Store:
         """频道最近的执行记录(含已结束)。
 
         events_size 是事件内容总长度:合并式追加不改行数,前端用它判断
-        过程输出是否有增量、要不要重新拉取事件。
+        过程输出是否有增量、要不要重新拉取事件。merged_count 是排队时并入
+        这次运行的其他运行数,运行卡片据此标出"合并处理了几条消息"。
         """
         rows = self._query(
-            "SELECT r.*, (SELECT COALESCE(SUM(LENGTH(e.content)), 0) "
-            "FROM run_events e WHERE e.run_id = r.id) AS events_size "
+            f"SELECT {_RUN_FIELDS}, {_RECOVERY_RUN_ID} AS recovery_run_id, "
+            "(SELECT COALESCE(SUM(LENGTH(e.content)), 0) "
+            "FROM run_events e WHERE e.run_id = r.id) AS events_size, "
+            "(SELECT COUNT(*) FROM chat_runs a WHERE a.merged_into = r.id) "
+            "AS merged_count "
             "FROM chat_runs r WHERE r.channel=? ORDER BY r.id DESC LIMIT ?",
             (channel, limit))
         return [dict(r) for r in reversed(rows)]

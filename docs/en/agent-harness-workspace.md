@@ -13,7 +13,7 @@ Therefore, the fact that the source repository uses `docs/` does not mean the ru
 
 Each run involves two locations at the same time:
 
-1. `workdir` is the actual working directory. When the channel is bound to a code repository, it is usually that repository, and business source code and deliverables should be modified here.
+1. `workdir` is the actual working directory. When the channel is bound to a code repository, it is usually that repository, where agents read code and run commands. Several roles and humans may be changing the same repository at the same time, so the prompt requires an agent to create its own git worktree before changing code (following the repository's convention if it has one, otherwise at `<repository>/.worktrees/<name>`, which stays inside the authorized directories), to edit, build, and commit on a new branch there, and to state the worktree path and branch in its final reply; when the working directory is already a worktree created for the task, the agent works in it directly, and reading code or running checks that change no files needs no worktree. Committing, merging back, and cleanup follow the task brief and the project guidelines; details are in section 3 of `manual.md`.
 2. `MISSIONCREW_WORKSPACE` points to a separate `.missioncrew/` in the platform data directory. It holds the project materials, task views, history, and run records provided by MissionCrew, and never enters the business source code or business Git commits.
 
 Chat workspaces are isolated and reused per `project × channel × role`. Different roles do not share the same `channel-history.json` or Agent Tool token, but `.missioncrew/documents/` links to the same project document library, so project documents are shared among the roles permitted to run.
@@ -77,12 +77,56 @@ Channels, tasks, dashboards, guidelines, skills, and documents use the same set 
 | Skill / file inside a skill | `/resources/<project>/skills/<skill-id>[/<relative-path>]` |
 | Project document | `/resources/<project>/documents/<relative-path>` |
 | Project recycle bin | `/resources/<project>/recycle-bin` |
+| Project settings (optionally a section, such as the credentials form `settings/credentials`) | `/resources/<project>/settings[/<section>]` |
 
 `channel-id` and `board-id` use short IDs within the project; the URL does not expose the `<project>:<id>` namespace used by the database. `dashboards` is the public resource type for dashboards; when the Web reads an old-style `boards`, `dashboard`, or `panels` address, it normalizes it to `dashboards`. Real directories are only for runtime tool calls and cannot be used in place of these Web URLs.
 
 ### `platform-docs/`
 
 `platform-docs/` links to `platform-docs/` in the data directory; its content is a copy of the source repository's English docs, `docs/en/*.md`, shared by all projects and all roles. Each time the platform assembles a workspace, it compares the copy with the source, rewrites only the files whose content differs, and deletes extra files, so any changes an agent makes to it are reverted at the next assembly. `README.md` is the index and describes each document's content and when to use it; `manual.md` only contains the agent's behavior rules, while the complete description of platform mechanisms is here, for agents to look up as needed.
+
+### `credentials/`
+
+Credentials humans save for agents are kept as **environments**: an environment is a group of variables that are used together (address + user name + password, or just one token), each marked as secret or not. `credentials/` links to the project-level credential directory `projects/<project>/runtime-context/credentials/` (directory mode 0700). Each environment is a subdirectory of it (0700) with one file (0600) per variable that has a value, named after the variable, such as `credentials/STAGING_ADMIN/PASSWORD` or `credentials/SENTRY/TOKEN`. The file content is the value itself: a single-line value has no trailing newline, and a multi-line value (such as a PEM private key) keeps its trailing newline. `index.json` lists each environment's name, purpose, scope (`global` / `project`) and variable table (`variables`: each variable's `name`, `secret`, `available`), without secret values.
+
+The environments available to a project are the global environments plus the project's own, and a project environment replaces a global one of the same name **as a whole**: variables are not merged one by one, so a variable that exists in the global one but not in the project one cannot be read in that project. After a human saves, edits or deletes an environment in Global settings or Project settings, the platform rewrites the directories of the affected projects immediately (a global environment affects every project), so the next command of a long-lived session already reads the new value.
+
+The two kinds of variable differ only in how they are protected:
+
+| | Secret variable | Plain variable |
+| --- | --- | --- |
+| Where the value is stored | The value column of the credential table, apart from metadata | In the metadata |
+| Page and API | Write-only, only the last 4 characters are shown | Shown as is, editable |
+| `index.json` | Only `name`, `secret`, `available` | Also `value` |
+| Redaction of stored text | Replaced with `[credential:<environment>.<variable>]` | Not replaced |
+
+When a human saves an environment they submit the complete variable list, and every variable must have a value; turning a saved secret into a plain variable requires entering the value again, since keeping it would reveal the secret on the page. A plain value is at most 4 KB, a secret value at most 64 KB, and an environment holds at most 50 variables.
+
+An agent reads a secret variable only inline in the command that needs it (for example `NPM_TOKEN="$(cat "$MISSIONCREW_CREDENTIALS_DIR/NPM/TOKEN")" npm publish`), never prints it and never copies it into other files or messages; when a variable is missing it calls `credential.request` to register an environment or add variables to an existing one, so a human fills it in under Project settings, instead of asking for it in chat. When registering, plain variables may carry values the agent already knows, and these appear in the directory immediately; secret variables wait for a human and are marked `available: false` in `index.json`, and an environment none of whose variables has a value does not appear in the directory. Secret values never enter the prompt, Agent Tool results or the response of any Web endpoint. Before messages, run logs, automation run output, Agent Tool arguments and text files published with publish-file are stored, the platform replaces any secret value (and its URL-encoded form) found in them with `[credential:<environment>.<variable>]`; values shorter than 8 characters are not replaced, to avoid mangling ordinary text. This is only a safety net against accidental leaks: it cannot recognize a value that was split up or re-encoded, and it is not isolation against malicious local processes.
+
+**Upgrading from earlier versions**: a credential used to be a single secret value in the file `credentials/<name>`. When the service starts these are migrated to environments automatically: credential `NAME` becomes an environment of the same name whose value moves into the secret variable `VALUE` (the read path changes from `credentials/NAME` to `credentials/NAME/VALUE`), while its name, scope, purpose and to-be-filled-in state stay the same. `GITHUB_TOKEN` is the exception: it becomes the `TOKEN` of the `GITHUB` environment described below. After the migration, related environments can be regrouped into one on the page. Old paths hard-coded in automation scripts must be changed to the new ones.
+
+### GitHub identity (the `TOKEN` of the `GITHUB` environment)
+
+The secret variable `TOKEN` of the environment `GITHUB` is the project's identity on GitHub: its value is a personal access token (PAT), either classic (`ghp_…`) or fine-grained (`github_pat_…`). Like any environment it has a global and a project layer, and a project's `GITHUB` environment replaces the global one as a whole: when a project has its own `GITHUB` environment without a `TOKEN`, that project has no GitHub identity and does not fall back to the global token. `TOKEN` must be a secret, and saving it as a plain variable is rejected; the `GITHUB` environment may hold other variables, which the platform does not use. Once the token is saved, `gh` and `git` in agents and automation scripts work as this identity without being passed the token, as if `gh auth login` and `gh auth setup-git` had been run on the machine:
+
+- **gh**: the platform generates a gh configuration in `projects/<project>/runtime-context/github-cli/` (`hosts.yml`, directory mode 0700, file 0600) and injects `GH_CONFIG_DIR` pointing at it. `GH_TOKEN` and `GITHUB_TOKEN` environment variables already present in the host environment are blanked, because gh prefers them and they would otherwise override the project identity.
+- **git**: through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` the platform configures a credential helper for `https://github.com` and `https://gist.github.com` that reads `credentials/GITHUB/TOKEN` whenever git needs a credential; it also clears the helpers the host already has for those two hosts, so git never falls back to the account of the user who started the service. This only affects HTTPS remotes and changes no repository or user git configuration file; SSH remotes (`git@github.com:…`) keep using the machine's own SSH keys.
+
+Both the gh configuration and the helper read the files on every call, so after the token is replaced the next command of a long-lived session already uses the new value. The environment variables are injected when a Runtime process starts: a long-lived session started before the token was first saved does not have them and can read the file inline instead (`GH_TOKEN="$(cat "$MISSIONCREW_CREDENTIALS_DIR/GITHUB/TOKEN")" gh pr list`), while sessions started afterwards get them automatically. Without this variable the platform injects nothing, and `gh` and git keep using the login of the user who started MissionCrew.
+
+The "GitHub identity" (GitHub 身份) row at the top of the credential section of the settings pages shows the result of a check: the platform calls GitHub's `GET /user` with the token and lists the account, the token type, its permissions (the scopes of a classic PAT; the permissions of a fine-grained PAT cannot be read from the API), the expiry time, and whether the notifications API is available. The result is cached in the service process for 10 minutes, and "Check again" (重新核对) checks again immediately. `GET /api/github` (the global one) and `GET /api/projects/<project>/github` (the one in effect for the project) return the same content, without the token.
+
+How the two kinds of PAT differ:
+
+| | classic PAT | fine-grained PAT |
+| --- | --- | --- |
+| Authorization | By scope, for every repository the account can access | By selected repositories and permissions |
+| Reading and writing code, issues and PRs | `repo` (`public_repo` is enough for public repositories only) | Contents, Issues, Pull requests and other permissions set to read and write as needed |
+| Notifications API (`/notifications`) | Available, needs `notifications` or `repo` | Not available |
+| Repository events API (`/repos/<owner>/<repo>/events`) | Available | Available, needs Metadata read (included once repositories are selected) |
+
+The platform also uses this token to query GitHub's repository events and account notifications on a schedule and hands new events to the subscribed automation scripts; see "GitHub polling sources" in [Scheduled automation and automatic task handling](automation.md).
 
 ### `tasks/`
 
@@ -104,6 +148,7 @@ The status is free text; the built-in board uses `待处理` (to do), `处理中
 | Guideline | Guideline worktree + Git history + Project index | Project-level live view of enabled guidelines | The index and the atomic mirror have both been refreshed; all workspaces read the same version |
 | Skill | Project skill package directory + Git history + Project index | Project-level live view of enabled skills | The package version, content, and list of enabled members have all been refreshed |
 | Task | SQLite task + status brief records | Role workspace Markdown generated at each assembly | Tool changes refresh the calling role's snapshot; content edits use `snapshot_updated_at`, and appending a brief does not overwrite history |
+| Credentials (environments) | SQLite credential table (secret values stored apart from metadata) | Project-level credential directory | The credential directory and index of every affected project (all projects for a global environment) have been rewritten |
 
 "Returns success" here means the Agent Tool or Web API has completed the entire sync chain. If any step among Git, the index, or the live view fails, the call returns a structured error instead of success; the guideline view is replaced using a temp file in the same directory, so readers only ever see the complete old version or the complete new version, never a half-written body. A prompt already sent to the runtime is not modified retroactively during the turn, but the file paths given in the prompt point to the new version in real time; the next assembly recomputes the shared context version and sends the new summary to the reused session.
 
@@ -130,6 +175,9 @@ The history file in a chat workspace is structured JSON that the agent reads pro
 | `MISSIONCREW_TASKS_DIR` | Directory of project task Markdown files |
 | `MISSIONCREW_MANUAL` | The agent manual `manual.md` |
 | `MISSIONCREW_PLATFORM_DOCS_DIR` | The copy of MissionCrew's own docs, `platform-docs/` |
+| `MISSIONCREW_CREDENTIALS_DIR` | The directory of credentials available to the project, `credentials/`, one subdirectory per environment and one file per variable |
+| `GH_CONFIG_DIR` | Only when the project has a GitHub identity (the `TOKEN` of the `GITHUB` environment): the gh configuration directory generated by the platform, which signs `gh` in as the project's GitHub identity |
+| `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` | Only when the project has a GitHub identity: configure the git credential helper that reads that token file for HTTPS remotes on github.com, appended after any such configuration already in the environment |
 | `MISSIONCREW_CHANNEL_HISTORY` | The channel history file visible to the current role; chat runs only |
 | `MISSIONCREW_CHANNEL_ID` | The current channel id |
 | `MISSIONCREW_SESSION_KEY` | The runtime session key of the current channel×role |
@@ -141,13 +189,13 @@ The history file in a chat workspace is structured JSON that the agent reads pro
 | `MISSIONCREW_AGENT_TOKEN_FILE` | Bearer capability file whose path is stable and whose content is atomically rotated per run |
 | `MISSIONCREW_AGENT_TOOL_PYTHON` | Python interpreter that can run the Agent Tool CLI module |
 
-The three Agent Tool variables above are injected both in chat runs and in automation scripts; an automation script's token file is at `automations/<project>/<id>/.agent-tool-token`, and the script additionally gets `MISSIONCREW_PROJECT_ID` and `MISSIONCREW_AUTOMATION_ID`.
+The three Agent Tool variables above are injected both in chat runs and in automation scripts; an automation script's token file is at `automations/<project>/<id>/.agent-tool-token`, and the script additionally gets `MISSIONCREW_PROJECT_ID` and `MISSIONCREW_AUTOMATION_ID`; a script's `MISSIONCREW_CREDENTIALS_DIR` points directly at the project-level credential directory.
 
 The runtime's actual `PWD` is still `workdir`. Adapters that support native multi-directory authorization convert the allowed directories into the corresponding command-line arguments; other runtimes can also learn these paths from the environment variables and the prompt context. For the Agent Tool's identity, scope, action, and error contracts, see [MissionCrew Agent Tool API](agent-tool-api.md).
 
 ## Platform-internal data boundary
 
-Project databases, secrets, document Git metadata, the raw channel history stored by the platform, and other roles' history views are outside the agent's authorized scope. The agent only gets the business directories the current run needs and its own harness workspace.
+Project databases, webhook secrets, document Git metadata, the raw channel history stored by the platform, and other roles' history views are outside the agent's authorized scope; credentials humans save for agents are provided only through `credentials/`. The agent only gets the business directories the current run needs and its own harness workspace.
 
 ## Development constraints
 

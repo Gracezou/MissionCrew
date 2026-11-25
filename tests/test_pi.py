@@ -134,6 +134,51 @@ def test_pi_launch_loads_bash_timeout_guard_extension(tmp_path):
         provider.shutdown()
 
 
+@pytest.mark.parametrize("strict", [True, False])
+def test_pi_missing_session_on_explicit_and_ordinary_turns(tmp_path, strict):
+    provider = PiRuntimeProvider(_Fallback(), [sys.executable, FAKE_PI])
+    saved = {"id": str(tmp_path / "missing.jsonl"), "context": "v1"}
+    config = _config(tmp_path, "CONTINUE", saved, [])
+    config.require_session_resume = strict
+    try:
+        result = provider.start(config)
+        if strict:
+            assert not result.success and "原会话文件已不存在" in result.summary
+            assert _launches(tmp_path) == []
+        else:
+            assert result.success and len(_launches(tmp_path)) == 1
+            assert "--session" not in _launches(tmp_path)[0]
+            assert Path(saved["id"]).is_file()
+    finally:
+        provider.shutdown()
+
+
+def test_pi_rejects_replaced_session_file_before_prompt(tmp_path, monkeypatch):
+    provider = PiRuntimeProvider(_Fallback(), [sys.executable, FAKE_PI])
+    session_file = tmp_path / "original.jsonl"
+    session_file.touch()
+    saved = {"id": str(session_file), "context": "v1"}
+    events = []
+    config = _config(tmp_path, "CONTINUE", saved, events)
+    config.require_session_resume = True
+    original = pi_mod._PiRpcClient.request
+
+    def request(self, method, *args, **kwargs):
+        response = original(self, method, *args, **kwargs)
+        if method == "get_state":
+            response["sessionFile"] = str(tmp_path / "different.jsonl")
+        return response
+
+    monkeypatch.setattr(pi_mod._PiRpcClient, "request", request)
+    try:
+        result = provider.start(config)
+        assert not result.success and "未打开指定的原会话" in result.summary
+        assert saved["id"] == str(session_file)
+        assert not any(kind == "input" for kind, _ in events)
+    finally:
+        provider.shutdown()
+
+
 def test_pi_ephemeral_run_uses_no_session(tmp_path):
     provider = PiRuntimeProvider(_Fallback(), [sys.executable, FAKE_PI])
     events: list[tuple[str, str]] = []

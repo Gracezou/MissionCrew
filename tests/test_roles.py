@@ -108,6 +108,11 @@ def test_role_crud_api(client):
     assert roles["writer"]["description"] == "自由文本人格"
     assert roles["writer"]["enabled"] is True
     assert roles["writer"]["usage_linkage_enabled"] is False
+    assert roles["writer"]["max_concurrency"] == 0          # 默认不限
+    assert client.post("/api/roles", json={**body, "max_concurrency": 3}).status_code == 200
+    assert client.post("/api/roles", json={**body, "max_concurrency": -1}).status_code == 422
+    roles = {r["id"]: r for r in client.get("/api/roles").json()}
+    assert roles["writer"]["max_concurrency"] == 3
     assert client.delete("/api/roles/writer?project_id=webshop").status_code == 200
     assert "writer" not in {r["id"] for r in client.get("/api/roles").json()}
 
@@ -534,10 +539,13 @@ vm.runInContext(`
   for (const withEnabled of [false, true]) {
     const legacy = roleFileItem({id: "dev", enabled: false}, withEnabled);
     if ("manual_only" in legacy) throw new Error("legacy file fabricated manual_only");
+    if ("max_concurrency" in legacy) throw new Error("legacy file fabricated max_concurrency");
     for (const manual_only of [true, false]) {
       const item = roleFileItem({id: "dev", manual_only}, withEnabled);
       if (item.manual_only !== manual_only) throw new Error("explicit flag lost");
     }
+    const limited = roleFileItem({id: "dev", max_concurrency: 3}, withEnabled);
+    if (limited.max_concurrency !== 3) throw new Error("explicit concurrency lost");
   }
   const marked = roleTransferRows([{id: "manual", enabled: false, manual_only: true}]);
   if (!marked.includes(">仅人工</span>") || !marked.includes(">默认停用</span>"))
@@ -958,7 +966,9 @@ def test_automation_ui_uses_sidebar_and_full_detail_view(client):
     assert 'openFormDialog(automation ? `编辑脚本' not in automations
     assert '<textarea id="af-desc" class="automation-description-input"' in automations
     assert "crontab(五段;留空 = 不定时)" in automations
-    assert 'id="af-webhook"' in automations   # 定时与 webhook 两种触发可同时开启
+    # 定时与 webhook 两种触发可同时开启;webhook 选择全局来源,不在脚本里管密钥
+    assert 'id="af-webhook-source"' in automations
+    assert "/webhook/secret" not in automations
     assert 'class="automation-trigger-editor"' in automations
     assert automations.index('class="automation-trigger-editor"') > automations.index("<h3>配置</h3>")
     assert all(label in automations for label in
@@ -1684,6 +1694,7 @@ const context = {
   projObj: () => ({ orchestrator_role_id: "dev" }),
   traitMeta: { abilities: { coding: "代码执行", web_search: "联网检索" } },
   roleDisabledReason: () => "",
+  roleConcurrencyPill: () => "",
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(markdownJs, "utf8"), context);
@@ -1745,3 +1756,39 @@ def test_manual_only_role_round_trips_and_cannot_be_orchestrator(client, seeded)
         assert "manual_only" in client.get(f"/assets/js/{name}").text, name
     assert ("!role.manual_only || role.id === selectedId"
             in client.get("/assets/js/settings-project.js").text)
+
+
+def test_role_save_reschedules_waiting_channels(monkeypatch, seeded):
+    calls = []
+    monkeypatch.setattr(ChatEngine, "reschedule", lambda self: calls.append(self))
+    client = TestClient(create_app())
+    body = seeded.get_role("webshop", "dev").to_dict()
+    body["max_concurrency"] = 5
+    response = client.post("/api/roles", json=body)
+    assert response.status_code == 200, response.text
+    assert calls
+
+
+def test_role_import_keeps_omitted_max_concurrency(seeded):
+    client = TestClient(create_app())
+    dev = seeded.get_role("webshop", "dev")
+    dev.max_concurrency = 4
+    seeded.put_role(dev)
+    template = seeded.get_role_template("dev")
+    template.max_concurrency = 6
+    seeded.put_role_template(template)
+
+    project_import = client.post("/api/roles/import", json={
+        "project_id": "webshop",
+        "roles": [{"id": "dev", "runtime_id": "std-1", "model": "pro"}],
+        "overwrite_ids": ["dev"],
+    })
+    assert project_import.status_code == 200, project_import.text
+    assert seeded.get_role("webshop", "dev").max_concurrency == 4
+
+    template_import = client.post("/api/role-templates/import", json={
+        "roles": [{"id": "dev", "runtime_id": "std-1", "model": "pro"}],
+        "overwrite_ids": ["dev"],
+    })
+    assert template_import.status_code == 200, template_import.text
+    assert seeded.get_role_template("dev").max_concurrency == 6

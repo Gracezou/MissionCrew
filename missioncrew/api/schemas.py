@@ -66,9 +66,39 @@ class AutomationInput(BaseModel):
     script: Optional[str] = None
     cron: Optional[str] = None           # 五段 crontab;空字符串 = 不定时
     enabled: Optional[bool] = None       # 只管定时触发
-    webhook: Optional[bool] = None       # 是否接受专用 webhook 端口的投递
+    # 订阅的全局 webhook 来源 id;空字符串 = 不接受 webhook,None = 保留现值
+    webhook_source: Optional[str] = None
+    # 订阅 GitHub 轮询来源时:要哪些仓库(owner/repo)的事件、只要哪些事件名;None = 保留现值
+    github_repos: Optional[list[str]] = None
+    github_events: Optional[list[str]] = None
     actions: Optional[list[str]] = None  # None = 保留现值
     timeout_seconds: Optional[int] = Field(None, ge=1)
+
+
+class WebhookSourceInput(BaseModel):
+    id: str = Field(max_length=100)
+    name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    path: Optional[str] = Field(None, max_length=210)   # /hooks/ 之后的部分;空 = 同 id
+    enabled: Optional[bool] = None
+    kind: Optional[str] = Field(None, max_length=20)    # webhook(默认)| github;只在新建时生效
+    # kind=github 的轮询配置(notifications/participating/project_id/interval_seconds),
+    # 整份替换;None = 保留现值。仓库由订阅脚本的 github_repos 声明
+    github: Optional[dict] = None
+
+
+class CredentialVariableInput(BaseModel):
+    name: str = Field(max_length=64)
+    secret: bool = True
+    value: Optional[str] = Field(None, max_length=70000)   # None = 保留原值;secret 只写不读
+
+
+class CredentialInput(BaseModel):
+    """一个环境:variables 是保存后的完整变量列表,不在其中的旧变量被删除。"""
+    name: str = Field(max_length=64)
+    description: Optional[str] = Field(None, max_length=2000)
+    variables: list[CredentialVariableInput] = Field(max_length=50)
+    create: bool = False     # True = 只新建:同名环境已存在时拒绝,不整份覆盖它
 
 
 class MessageInput(BaseModel):
@@ -119,6 +149,7 @@ class ContentChannelInput(BaseModel):
     content_kind: str = Field(pattern=r"^(docs|guidelines|skills|custom)$")
     content_key: str = Field(min_length=1, max_length=1000)
     label: str = Field(default="", max_length=1000)
+
 
 
 class RoleReorder(BaseModel):
@@ -215,7 +246,6 @@ class ProjectInput(BaseModel):
     max_chain_runs: Optional[int] = Field(None, ge=1)
     guidelines: Optional[list[dict]] = None
     skills: Optional[list[dict | str]] = None
-    resources: Optional[list[str]] = None
     required_env: Optional[str] = None
     task_auto_rules: Optional[list[dict]] = None      # None = 保留现值
     # 内置任务看板锁定状态列之后的自定义筛选列;None = 保留现值

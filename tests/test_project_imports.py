@@ -1,6 +1,7 @@
 """准则、Skill 与自动化的跨项目复制。"""
 from __future__ import annotations
 
+from dataclasses import fields
 import os
 import shutil
 import subprocess
@@ -142,17 +143,24 @@ def test_cross_project_import_copies_all_resources_without_mutating_source(seede
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
-def test_cross_project_import_automation_never_inherits_webhook_identity(seeded, overwrite):
-    from missioncrew.collab.webhooks import WebhookRejected, accept_webhook
+def test_cross_project_import_automation_clears_global_source_subscription(seeded, overwrite):
+    from missioncrew.collab.webhooks import (WebhookRejected, accept_webhook,
+                                             fan_out_event, save_webhook_source,
+                                             source_subscribers)
 
     client = TestClient(create_app())
     _create_target(client)
+    webhook_source, _ = save_webhook_source(
+        seeded, id="shared-hook", kind="github", github={"project_id": "webshop"})
     source, _ = save_automation(
-        seeded, "webshop", id="hooked", script="echo source", webhook=True)
+        seeded, "webshop", id="hooked", script="echo source",
+        webhook_source="shared-hook", github_repos=["owner/repo"],
+        github_events=["issues"])
     original = source.to_dict()
-    assert source.webhook_secret
     if overwrite:
-        save_automation(seeded, "target", id="hooked", script="echo old", webhook=True)
+        save_automation(seeded, "target", id="hooked", script="echo old",
+                        webhook_source="shared-hook", github_repos=["old/repo"],
+                        github_events=["pull_request"])
 
     response = _import(client, "automation", ["hooked"], strategy="overwrite")
 
@@ -161,15 +169,89 @@ def test_cross_project_import_automation_never_inherits_webhook_identity(seeded,
         "overwritten" if overwrite else "copied")
     copied = seeded.get_automation("target:hooked")
     assert copied.enabled is False
-    assert copied.webhook is False
-    assert copied.webhook_secret == ""
+    assert copied.webhook_source == ""
+    assert copied.github_repos == [] and copied.github_events == []
     assert seeded.get_automation(source.id).to_dict() == original
-    assert source.webhook_secret not in response.text
-    # 不启动进程：新目标连 webhook 验签/触发阶段都不应进入。
+    assert webhook_source.secret not in response.text
+    assert seeded.get_webhook_source("shared-hook").secret == webhook_source.secret
+
+    class RecordingService:
+        def __init__(self):
+            self.triggered = []
+
+        def trigger_webhook(self, automation, event):
+            self.triggered.append(automation.id)
+            return len(self.triggered)
+
+    service = RecordingService()
+    delivery = {"source": webhook_source.id, "provider": "github",
+                "event": "issues", "action": "opened", "repository": "owner/repo",
+                "delivery": "delivery-1", "transport": "poll"}
+    fanout = fan_out_event(seeded, service, webhook_source, delivery, auth="poll")
+    assert fanout["targets"] == 1
+    assert service.triggered == ["webshop:hooked"]
+    assert [item.id for item in source_subscribers(seeded, "shared-hook")] == [
+        "webshop:hooked"]
+    # 来源是全局 GitHub 轮询资源：即使用它的有效路径，外部 POST 仍被拒绝。
     with pytest.raises(WebhookRejected) as rejected:
-        accept_webhook(seeded, None, "target", "hooked",
-                       {"authorization": f"Bearer {source.webhook_secret}"}, b"{}")
+        accept_webhook(seeded, service, webhook_source.path, {}, b"{}")
     assert rejected.value.status == 404
+
+
+def test_automation_copy_accounts_for_every_model_field():
+    from missioncrew.core.models import Automation
+
+    preserved = project_imports.AUTOMATION_COPY_PRESERVED_FIELDS
+    reset = project_imports.AUTOMATION_COPY_RESET_FIELDS
+    names = {item.name for item in fields(Automation)}
+    assert preserved.isdisjoint(reset)
+    assert preserved | reset == names
+
+
+def test_automation_copy_resets_every_declared_field(seeded):
+    from missioncrew.collab.webhooks import save_webhook_source
+
+    client = TestClient(create_app())
+    _create_target(client)
+    save_webhook_source(seeded, id="shared-hook", kind="github",
+                        github={"project_id": "webshop"})
+    automation, _ = save_automation(
+        seeded, "webshop", id="reset-me", script="echo source", enabled=True,
+        webhook_source="shared-hook", github_repos=["owner/repo"],
+        github_events=["issues"], created_by_role_id="lead")
+    automation.last_run_at = 123.0
+    automation.last_status = "succeeded"
+    automation.created_at = 1.0
+    automation.updated_at = 2.0
+    seeded.put_automation(automation)
+
+    response = _import(client, "automation", ["reset-me"])
+
+    assert response.status_code == 200
+    copied = seeded.get_automation("target:reset-me")
+    assert (copied.id, copied.project_id) == ("target:reset-me", "target")
+    assert copied.enabled is False and copied.webhook_source == ""
+    assert copied.github_repos == [] and copied.github_events == []
+    assert copied.created_by_role_id == ""
+    assert copied.last_run_at == 0 and copied.last_status == ""
+    assert copied.created_at != 1.0 and copied.updated_at != 2.0
+
+
+def test_automation_copy_uses_only_the_preserve_field_list(seeded, monkeypatch):
+    client = TestClient(create_app())
+    _create_target(client)
+    source, _ = save_automation(
+        seeded, "webshop", id="field-list", script="echo source",
+        description="source description")
+    assert source.description == "source description"
+    monkeypatch.setattr(
+        project_imports, "AUTOMATION_COPY_PRESERVED_FIELDS",
+        project_imports.AUTOMATION_COPY_PRESERVED_FIELDS - {"description"})
+
+    response = _import(client, "automation", ["field-list"])
+
+    assert response.status_code == 200
+    assert seeded.get_automation("target:field-list").description == ""
 
 
 def test_cross_project_import_skip_and_overwrite_conflicts(seeded):

@@ -319,10 +319,12 @@ class _PiSession:
     def _ensure_client(self, config: ExecutionConfig) -> None:
         resume_file = self.session_file or config.session_id
         if resume_file and not Path(resume_file).is_file():
-            # 会话文件被清理(或记录来自其他机器):明确降级为新会话。
+            # 普通轮次可降级为新会话；已确认续接指定会话时中止本轮。
             adapters._clear_session(config)
             resume_file = ""
             self.session_file = ""
+            if config.require_session_resume:
+                raise RuntimeProtocolError("pi 的原会话文件已不存在，未发送续跑请求")
         command = self._command(config, resume_file)
         # 签名只含静态启动形态:--session/--model/--thinking 是动态参数,
         # 存活进程内经 resume 记录与 set_model/set_thinking_level 对齐,
@@ -352,6 +354,12 @@ class _PiSession:
         self.client.connect()
         state = self.client.request("get_state", timeout=30)
         self._remember_session_file(state)
+        if config.require_session_resume and (
+                not state.get("sessionFile") or
+                Path(self.session_file).resolve() != Path(config.session_id).resolve()):
+            self.close()
+            self.session_file = ""
+            raise RuntimeProtocolError("pi 未打开指定的原会话文件，未发送续跑请求")
         safe_emit(config.emit, "status",
                   f"pi 会话已{'恢复' if resume_file else '启动'}"
                   f" model={self._state_model(state)}\n")
@@ -398,7 +406,8 @@ class _PiSession:
         with self._run_lock:
             if config.cancellation_requested():
                 return RunResult(False, "执行已停止")
-            adapters._refresh_session(config)
+            if failure := adapters._refresh_session(config, self.session_file):
+                return failure
             if self.session_file and not config.session_id:
                 # 持久记录被显式清理:不再续用仅存于内存的旧会话。
                 self.close()

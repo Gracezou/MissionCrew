@@ -18,7 +18,7 @@ from .base import (RuntimeCapabilities, RuntimeExecutionInfo, RuntimeInstance,
                    RuntimeProvider, RuntimeUsageSnapshot)
 from .native import (OutputAssembler, RuntimeProtocolError, build_usage, emit_json,
                      safe_emit, usage_section)
-from .usage import probe_claude_usage
+from .usage import parse_claude_rate_limit, probe_claude_usage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -251,9 +251,11 @@ def _answer_values(response: dict, question_id: str, index: int) -> list[str]:
 
 class _ClaudeSession:
     def __init__(self, command: list[str], backend_id: str,
-                 session_key: str, workdir: str, persistent: bool):
+                 session_key: str, workdir: str, persistent: bool,
+                 on_rate_limit: Optional[Callable[[str, dict], None]] = None):
         self.command = command
         self.backend_id = backend_id
+        self._on_rate_limit = on_rate_limit
         self.session_key = session_key
         self.workdir = str(Path(workdir).expanduser().resolve())
         self.persistent = persistent
@@ -398,7 +400,8 @@ class _ClaudeSession:
                     self._turn_condition.wait(0.1)
                 if config.cancellation_requested():
                     return RunResult(False, "执行已停止")
-                adapters._refresh_session(config)
+                if failure := adapters._refresh_session(config, self.session_id):
+                    return failure
                 if self.session_id and not config.session_id:
                     self.close()
                     self.session_id = ""
@@ -524,6 +527,17 @@ class _ClaudeSession:
                 safe_emit(self._emit(), "stdout", raw)
                 continue
             message_type = message.get("type")
+            config = self._active_config
+            if (config and config.require_session_resume and process is self.process
+                    and message_type == "system" and message.get("subtype") == "init"
+                    and message.get("session_id") != config.session_id):
+                self.session_id = ""
+                adapters._clear_session(config)
+                self._result = {"subtype": "error_during_execution", "is_error": True,
+                                "error": "Claude 未恢复指定的原会话"}
+                self._result_ready.set()
+                adapters._kill_process_group(process)
+                break
             if message_type == "control_request":
                 threading.Thread(
                     target=self._handle_control_request,
@@ -838,6 +852,12 @@ class _ClaudeSession:
 
     def _handle_message(self, message: dict) -> None:
         message_type = message.get("type")
+        if message_type == "rate_limit_event":
+            # 账户限额随每次 API 响应下发,与当前 turn 无关:只交给 provider 记录
+            info = message.get("rate_limit_info")
+            if self._on_rate_limit and isinstance(info, dict):
+                self._on_rate_limit(self.backend_id, info)
+            return
         # 空闲时收到模型活动 => CLI 的自唤醒 turn(后台任务结束后自动汇报)。
         # 裸 result 不开启唤醒:真正的自唤醒 turn 一定先有 init/assistant
         # 事件;超时后迟到的运行 result 不能被误包装成唤醒汇报。
@@ -1201,6 +1221,8 @@ class ClaudeRuntimeProvider(RuntimeProvider):
         self.command = command
         self._sessions: dict[str, _ClaudeSession] = {}
         self._guard = threading.Lock()
+        # backend_id -> (采样时刻, 最近一次 rate_limit_event 的 rate_limit_info)
+        self._rate_limits: dict[str, tuple[float, dict]] = {}
 
     def _command(self, backend: Backend) -> list[str]:
         return list(self.command or [backend.binary_path or "claude"])
@@ -1217,7 +1239,8 @@ class ClaudeRuntimeProvider(RuntimeProvider):
             if not session:
                 session = _ClaudeSession(
                     self._command(config.backend), config.backend.id, key,
-                    config.workdir, persistent=not ephemeral)
+                    config.workdir, persistent=not ephemeral,
+                    on_rate_limit=self._record_rate_limit)
                 self._sessions[key] = session
         try:
             return session.run(config)
@@ -1268,9 +1291,24 @@ class ClaudeRuntimeProvider(RuntimeProvider):
     def list_models(self, backend: Backend, timeout: int = 25) -> list[str]:
         return self.fallback.list_models(backend, timeout)
 
+    def _record_rate_limit(self, backend_id: str, info: dict) -> None:
+        with self._guard:
+            self._rate_limits[backend_id] = (time.time(), info)
+
     def account_usage(self, backend: Backend,
                       timeout: int = 15) -> RuntimeUsageSnapshot:
-        return probe_claude_usage(backend, self._command(backend), timeout)
+        snapshot = probe_claude_usage(backend, self._command(backend), timeout)
+        if snapshot.windows:
+            return snapshot
+        # token 认证(CLAUDE_CODE_OAUTH_TOKEN)下 /usage 只报本次会话花费、不含账户
+        # 限额;退回角色运行时从 stream-json 记下的最近一次 rate_limit_event。
+        with self._guard:
+            observed = self._rate_limits.get(backend.id)
+        if observed:
+            sampled = parse_claude_rate_limit(backend, observed[1], observed[0])
+            if sampled.windows:
+                return sampled
+        return snapshot
 
     def instances(self, backend: Backend) -> list[RuntimeInstance]:
         with self._guard:

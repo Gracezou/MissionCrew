@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import time
@@ -41,6 +43,40 @@ def _call(chat, identity, run_id, action, arguments=None):
 def _receipts(store, action):
     return [m for m in store.list_messages("general")
             if m["kind"] == "agent_tool" and f"`{action}`" in m["content"]]
+
+
+def test_grouped_argument_labels_are_help_text_only(seeded):
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    for action, label in (
+        ("task.update", "title/summary/body/status/labels/channel_ids/url/meta/"
+                        "external_id/external_updated_at"),
+        ("document.publish", "content or content_base64"),
+    ):
+        assert label in actions[action]["arguments"]
+        with pytest.raises(AgentToolError) as invalid:
+            _call(chat, identity, run_id, action, {label: "payload"})
+        assert invalid.value.code == "invalid_arguments"
+        assert f"未知参数: {label}" in invalid.value.message
+
+
+def test_unlisted_save_arguments_remain_scoped_to_their_actions(seeded):
+    chat = ChatEngine(seeded)
+    identity, run_id = _identity(seeded, chat)
+    actions = chat.agent_tools.capabilities(identity)["actions"]
+    assert "mode" not in actions["dashboard.save"]["arguments"]
+    skill_fields = {"name": "Review", "description": "Review changes",
+                    "instructions": "Inspect the diff."}
+    assert skill_fields.keys().isdisjoint(actions["skill.save"]["arguments"])
+
+    with pytest.raises(AgentToolError) as missing:
+        _call(chat, identity, run_id, "dashboard.save", {"id": "missing", "mode": "update"})
+    assert missing.value.code == "not_found"
+    skill = _call(chat, identity, run_id, "skill.save", {"id": "review", **skill_fields})["skill"]
+    assert {key: skill[key] for key in skill_fields} == skill_fields
+    with pytest.raises(AgentToolError, match="未知参数: mode"):
+        _call(chat, identity, run_id, "skill.save", {"id": "review", "mode": "update"})
 
 
 def test_channel_update_changes_fields_within_project_repos(seeded, tmp_path):
@@ -503,9 +539,14 @@ const rows = () => context.channelSidebarHtml(channels).split('<div class="side-
       marker ? !/\bhidden\b/.test(marker[1]) : null,
     ];
   });
-const collapsed = rows();
+// 等待回调标记亮着的条目(频道 id 或收起的分组名)
+const waiting = () => [...context.channelSidebarHtml(channels).matchAll(
+    /<span class="channel-callback-marker" data-channel-(?:id|group)="([^"]*)"([^>]*)>/g)]
+  .filter(match => !/\bhidden\b/.test(match[2])).map(match => match[1]);
+const collapsed = rows(), collapsedWaiting = waiting();
 context.expandChannelGroupOf("webshop:ops-deploy");
 process.stdout.write(JSON.stringify({ collapsed, expanded: rows(),
+                                      collapsedWaiting, expandedWaiting: waiting(),
                                       stored: stored["mc.channelGroupsCollapsed"] }));
 """
 
@@ -517,9 +558,10 @@ def test_sidebar_groups_channels_by_slash_in_name():
     channels = [
         {"id": "webshop:general", "name": "general"},
         {"id": "webshop:backend-api", "name": "backend/api"},
-        {"id": "webshop:misc", "name": "misc"},
+        {"id": "webshop:misc", "name": "misc", "pending_callback_count": 2},
         {"id": "webshop:backend-db", "name": " backend / db"},
-        {"id": "webshop:ops-deploy", "name": "ops/deploy", "active_run_count": 1},
+        {"id": "webshop:ops-deploy", "name": "ops/deploy", "active_run_count": 1,
+         "pending_callback_count": 1},
         {"id": "webshop:docs-x", "name": "文档 · design/arch.md",
          "content_kind": "docs", "content_key": "design/arch.md"},
         {"id": "webshop:edge", "name": "/edge"},
@@ -551,6 +593,43 @@ def test_sidebar_groups_channels_by_slash_in_name():
         ["webshop:ops-deploy", "deploy", ["channel-subitem", "selected"], None, True],
     ] + tail
     assert json.loads(data["stored"]) == []
+    # 有回调在等的频道带等待标记;收起的分组把组内的汇总到标题上
+    assert data["collapsedWaiting"] == ["webshop:misc", "ops"]
+    assert data["expandedWaiting"] == ["webshop:misc", "webshop:ops-deploy"]
+
+
+# 回调时间由服务端写成 UTC 文本,页面换成浏览器时区:从 sidebar.js 取出相关的三段定义单独执行
+_LOCAL_TIME_SCRIPT = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1] + "/sidebar.js", "utf8");
+const pick = pattern => source.match(pattern)[0];
+eval([pick(/function fmtMessageTime\(date\) \{[\s\S]*?\n\}/),
+      pick(/const UTC_TIME_TEXT = .*/).replace("const", "var"),
+      pick(/function localizeUtcTimes\(text\) \{[\s\S]*?\n\}/)].join("\n"));
+process.stdout.write(JSON.stringify({
+  text: localizeUtcTimes(process.argv[2]),
+  expected: [fmtMessageTime(new Date("2026-11-09T07:22:00Z")),
+             fmtMessageTime(new Date("2026-11-09T23:05:00Z"))],
+}));
+"""
+
+
+def test_callback_times_render_in_browser_timezone():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the browser renderers")
+    result = subprocess.run(
+        [node, "-e", _LOCAL_TIME_SCRIPT,
+         str(Path(__file__).resolve().parents[1] / "missioncrew" / "web" / "js"),
+         "频道 #ops 有新消息 或 2026-11-09 07:22 UTC 到点（最晚等到 2026-11-09 23:05 UTC），UTC 之外原样"],
+        env={**os.environ, "TZ": "Asia/Shanghai"},
+        text=True, capture_output=True, check=True)
+    data = json.loads(result.stdout)
+    first, second = data["expected"]
+    assert data["text"] == f"频道 #ops 有新消息 或 {first} 到点（最晚等到 {second}），UTC 之外原样"
+    # 东八区:07:22 UTC 是当天 15:22,23:05 UTC 跨到次日 07:05
+    assert re.search(r"(15|0?3):22", first) and "07:22" not in first
+    assert "10" in second and re.search(r"0?7:05", second)
 
 
 def test_document_history_lists_versions_and_reads_old_content(seeded):

@@ -1,7 +1,7 @@
 /* 运行过程卡片:Agent 运行的实时状态与过程事件(命令/思考/工具/用量/权限交互),
    内联在触发消息之后,可折叠、实时刷新。频道聊天(sidebar.js)与项目配置聊天
    (project-configs.js)通过 syncRuns 共用这套渲染,须在两者之前加载。 */
-const runCards = new Map();   // run_id -> {el, key, userToggled}
+const runCards = new Map();   // run_id -> 该消息面板的运行卡片
 const RUN_EVENT_META = {
   command:     { label: "命令", cls: "re-command" },
   input:       { label: "输入", cls: "re-input" },
@@ -21,10 +21,23 @@ const RUN_EVENT_META = {
   stderr:      { label: "日志", cls: "re-log" },
   status:      { label: "状态", cls: "re-status" },
 };
+function runStatusLabel(status) {
+  return { queued: "排队中", running: "运行中", waiting_user: "等待用户",
+    done: "已完成", failed: "失败", stopped: "已停止", interrupted: "已中断" }[status] || status;
+}
+
+const isLiveRun = run => ["queued", "running", "waiting_user"].includes(run.status);
+
 function runSummary(run) {
-  const st = { queued: "排队中", running: "运行中", waiting_user: "等待用户",
-               done: "已完成", failed: "失败", stopped: "已停止" }[run.status] || run.status;
-  const live = ["queued", "running", "waiting_user"].includes(run.status);
+  // 排队时并入另一次运行的记录:自己没有执行过程,只说明去向并可跳到那次运行
+  if (run.status === "merged")
+    return `<span class="rc-dot merged">●</span>
+      <b style="color:${roleColor[run.role_id] || "var(--muted)"}">@${esc(run.role_id)}</b>
+      <span class="muted">排队时已合并,与其他消息在同一轮处理</span>
+      ${run.merged_into ? `<button class="rc-jump" data-run-id="${run.merged_into}"
+        onclick="jumpToRunCard(event, this)">查看那一轮</button>` : ""}`;
+  const st = runStatusLabel(run.status);
+  const live = isLiveRun(run);
   const secs = run.finished_at ? ` · ${Math.max(1, Math.round(run.finished_at - run.created_at))}s` : "";
   // 执行组合:runtime · model(/effort);旧记录没盖章时只显示 runtime
   const combo = [
@@ -33,10 +46,99 @@ function runSummary(run) {
   ].filter(Boolean).join(" · ");
   return `<span class="rc-dot ${live ? "live" : run.status}">●</span>
     <b style="color:${roleColor[run.role_id] || "var(--muted)"}">@${esc(run.role_id)}</b>
-    <span class="muted">${combo} · ${st}${secs}</span>
-    ${run.error ? `<span class="rc-err">${esc(run.error).slice(0, 120)}</span>` : ""}
+    <span class="muted">${combo} · ${esc(st)}${secs}${run.merged_count ? ` · 合并处理 ${Number(run.merged_count) + 1} 条消息` : ""}${run.recovered_from_run_id ? ` · 续跑自 #${Number(run.recovered_from_run_id)}` : ""}</span>
+    ${run.error ? `<span class="rc-err" title="${esc(run.error)}">${esc(run.error.slice(0, 120))}</span>` : ""}
+    ${run.status === "interrupted" ? `<button type="button" class="rc-recover" data-run-id="${run.id}"
+      onclick="reviewChatRunRecovery(event, this)">${run.recovery_run_id ? `查看续跑 #${Number(run.recovery_run_id)}` : "查看恢复"}</button>` : ""}
     ${live ? `<button class="rc-stop" data-run-id="${run.id}" title="停止本次运行并终止其 Runtime 进程(原生会话保留)"
       onclick="stopChatRun(event, this.dataset.runId)">停止</button>` : ""}`;
+}
+
+async function reviewChatRunRecovery(event, button) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = button.dataset.runId;
+  button.disabled = true;
+  try {
+    const d = await api("GET", `/api/chat/runs/${id}/recovery`);
+    const trigger = d.trigger;
+    const last = d.last_event;
+    const lines = [
+      d.reason || "运行因服务中断而结束。",
+      trigger ? `原触发消息 #${trigger.id} · ${trigger.author}\n${trigger.content}` : "原触发消息已不可用",
+      last ? `最后事件 · ${RUN_EVENT_META[last.kind]?.label || last.kind}\n${last.content}` : "尚无过程事件",
+      d.session_available ? "已保存兼容的原生会话，可尝试续接。" : "当前没有兼容的原生会话。",
+    ];
+    if (d.recovery_run) {
+      const child = d.recovery_run;
+      lines.push(`续跑 #${child.id} · ${runStatusLabel(child.status)}${child.error ? "\n" + child.error : ""}`);
+    } else if (d.unavailable_reason) {
+      lines.push(`当前无法续跑：${d.unavailable_reason}`);
+    } else {
+      lines.push("确认后将创建关联的新运行。角色会根据频道历史核对上轮已完成的工作，避免重复执行原指令。");
+      if (await uiConfirm(lines.join("\n\n"), `续跑 @${d.role_id} 的运行 #${id}？`)) {
+        const result = await api("POST", `/api/chat/runs/${id}/recover`);
+        button.textContent = `查看续跑 #${result.run_id}`;
+        toast(`续跑 #${result.run_id}${result.created ? " 已创建" : " 已存在"}`, "success");
+        await pollMessages();
+        if (typeof pollConfigChat === "function") await pollConfigChat();
+      }
+      return;
+    }
+    await uiAlert(lines.join("\n\n"), `中断运行 #${id}`);
+  } catch (_) { /* api() 已提示错误 */ }
+  finally { button.disabled = false; }
+}
+
+function syncEarlierInterruptedRuns(pane, channelId, before) {
+  const existing = pane.querySelector(".rc-earlier");
+  if (existing?.dataset.before === String(before)) return;
+  existing?.remove();
+  if (!before) return;
+  const group = document.createElement("details");
+  group.className = "rc-earlier";
+  group.dataset.before = before;
+  const summary = document.createElement("summary");
+  summary.textContent = "查看更早中断的运行";
+  const list = document.createElement("div");
+  const more = document.createElement("button");
+  more.type = "button";
+  more.textContent = "加载更早的中断运行";
+  more.onclick = async () => {
+    more.disabled = true;
+    try {
+      const page = await api("GET", `/api/chat/${encodeURIComponent(channelId)}/interrupted-runs?before=${before}`);
+      for (const run of page.runs) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.runId = run.id;
+        button.textContent = `#${run.id} · @${run.role_id} · 查看恢复`;
+        button.onclick = event => reviewChatRunRecovery(event, button);
+        list.insertBefore(button, more);
+      }
+      before = page.next_before;
+      if (!before) more.remove();
+    } catch (_) { /* api() 已提示错误 */ }
+    finally { more.disabled = false; }
+  };
+  list.append(more);
+  group.append(summary, list);
+  group.ontoggle = () => {
+    if (group.open && !more.disabled && list.firstElementChild === more) more.click();
+  };
+  pane.prepend(group);
+}
+
+// 从并入记录跳到实际执行的那次运行;卡片不在已加载的消息范围内时给出提示
+function jumpToRunCard(event, button) {
+  event.preventDefault();
+  const pane = button.closest(".run-card")?.parentElement;
+  const target = pane?.querySelector(`.run-card[data-run-id="${button.dataset.runId}"]`);
+  if (!target) { toast("那次运行不在当前已加载的消息里", "info"); return; }
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.remove("rc-flash");
+  void target.offsetWidth;   // 重新触发高亮动画
+  target.classList.add("rc-flash");
 }
 
 async function stopChatRun(event, runId) {
@@ -97,7 +199,7 @@ function renderPermissionRequest(run, event, payload) {
 function permissionStatusLabel(status, payload = {}) {
   return { pending: "等待决定", auto_approved: "MissionCrew YOLO 已自动批准",
     denied: "已按策略拒绝", resolved: `已处理：${payload.decision || ""}`,
-    timeout: "等待超时，已取消", stopped: "频道运行已停止" }[status] || status;
+    timeout: "等待超时，已取消", stopped: "频道运行已停止", interrupted: "运行已中断" }[status] || status;
 }
 
 /* scope 区分渲染面(card=过程卡片 / live=实时输出框):同一提问在两处各有一份表单,
@@ -123,7 +225,7 @@ function renderUserInputRequest(run, event, payload, scope = "card") {
     <button class="action" onclick="submitRuntimeAnswers(${run.id},'${esc(payload.request_id)}',this)">提交回答</button>
     <button onclick="sendRuntimeInteraction(${run.id},'${esc(payload.request_id)}','cancel')">取消</button>
   </div>` : `<div class="ri-status ${esc(status)}">${{
-    timeout: "等待超时，已取消", stopped: "频道运行已停止",
+    timeout: "等待超时，已取消", stopped: "频道运行已停止", interrupted: "运行已中断",
   }[status] || "回答已提交"}</div>`;
   return `${questions}${actions}`;
 }
@@ -298,7 +400,7 @@ function renderRunEvent(run, event, openEventId) {
     const payload = parseStructuredRunEvent(event);
     if (payload) {
       content = renderUserInputRequest(run, event, payload);
-      preview = payload.status === "pending" ? "提问待答" : `已处理 · ${payload.status}`;
+      preview = payload.status === "pending" ? "提问待答" : permissionStatusLabel(payload.status, payload);
     }
   } else if (event.kind === "usage") {
     const payload = parseStructuredRunEvent(event);
@@ -336,7 +438,7 @@ async function sendRuntimeInteraction(runId, requestId, decision, answers = {}) 
   try {
     await api("POST", `/api/chat/runs/${runId}/interactions/${encodeURIComponent(requestId)}`,
       { decision, answers });
-    if (card) card.key = null;
+    if (card) card.loadedKey = null;
     await pollMessages();
     if (typeof pollConfigChat === "function") await pollConfigChat();
   } catch (error) {
@@ -385,8 +487,7 @@ function syncRunLiveOutput(run, card, pane, events, liveOutput) {
   const existing = pane.querySelector(`.run-live-output[data-run-id="${run.id}"]`);
   // 以 card 上同步记录的最新状态为准:事件请求在途时运行可能已经结束,
   // 晚到的回调不能按调用时捕获的旧状态把刚移除的实时框重新建回来
-  const live = ["queued", "running", "waiting_user"]
-    .includes(card.runStatus || run.status);
+  const live = isLiveRun(card.run);
   // 优先用接口全量拼接的 live_output:过程事件窗口只保留最近 N 行,
   // 长运行里最早的输出段会被挤出窗口,按事件拼接会丢开头
   const text = !live ? ""
@@ -425,13 +526,14 @@ function syncRunLiveOutput(run, card, pane, events, liveOutput) {
   }
 }
 
-async function renderRunEvents(run, card, pane = document.getElementById("msgs")) {
-  // 静默拉取(不弹 toast,服务重启间隙下轮重试);成功才返回 true,
-  // 调用方据此提交 card.key,失败时下轮按 key 未变化重试
+async function renderRunEvents(run, card, pane) {
   try {
-    const r = await fetch(`/api/chat/runs/${run.id}/events`);
+    const query = isLiveRun(run) ? "" : "?include_live_output=false";
+    const r = await fetch(`/api/chat/runs/${run.id}/events${query}`);
     if (!r.ok) return false;
     const d = await r.json();
+    // 请求在途时已结束的 Run 要以终态快照显示，旧请求里可能还有已失效的审批按钮。
+    if (isLiveRun(run) && !isLiveRun(card.run)) return false;
     const outerNear = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120;
     const body = card.el.querySelector(".rc-events");
     const innerNear = !body.childElementCount ||
@@ -466,58 +568,92 @@ async function renderRunEvents(run, card, pane = document.getElementById("msgs")
   } catch (_) { return false; }
 }
 
+async function refreshRunEvents(card, pane) {
+  const run = card.run;
+  const key = card.eventsKey;
+  if (run.status === "merged" || card.fetching || card.loadedKey === key) return;
+  if (isLiveRun(run) ? !run.events_size : !card.el.open) return;
+  card.fetching = true;
+  const ok = await renderRunEvents(run, card, pane);
+  card.fetching = false;
+  if (ok) card.loadedKey = key;
+  // 同一版本失败交给下次轮询重试；若已有新的快照则立即按最新展开状态决定是否取日志。
+  if (card.eventsKey !== key) void refreshRunEvents(card, pane);
+}
+
 function syncRuns(runs, surface = null) {
   const pane = surface?.pane || document.getElementById("msgs");
   const cards = surface?.runCards || runCards;
   const nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120;
+  const incoming = new Set(runs.map(run => run.id));
+  for (const [id, card] of cards) {
+    if (card.waitingForAnchor && !incoming.has(id)) {
+      card.el.remove();
+      cards.delete(id);
+    }
+  }
   for (const run of runs) {
     let card = cards.get(run.id);
+    // 老任务的触发消息可能已超出首屏历史。保留可操作的中断卡，翻到
+    // 原消息后再把同一张卡归位；其他运行沿用已有的内联定位。
+    let anchor = !card || card.waitingForAnchor
+      ? pane.querySelector(`[data-msg-id="${run.trigger_message_id}"]`) : null;
     if (!card) {
-      // 内联定位:触发消息之后、同触发的更早卡片之后。触发消息还没加载
-      // (增量未拉到,或更早历史尚未向上翻页)时先不建卡,消息就位后再挂
-      let anchor = pane.querySelector(`[data-msg-id="${run.trigger_message_id}"]`);
-      if (!anchor) continue;
+      if (!anchor && (run.status !== "interrupted" || run.recovery_run_id)) continue;
       const el = document.createElement("details");
       el.className = "run-card";
       el.id = `run-card-${run.id}`;
       el.dataset.trigger = run.trigger_message_id;
       el.dataset.runId = run.id;
       el.innerHTML = `<summary></summary><div class="rc-events"></div>`;
-      card = { el, key: null, userToggled: false, fetching: false,
+      card = { el, userToggled: false, fetching: false,
                latestEventId: "", openEventId: undefined,
-               runStatus: run.status };
+               waitingForAnchor: !anchor };
       el.querySelector("summary").addEventListener("click", () => { card.userToggled = true; });
       el.addEventListener("toggle", () => {   // 展开时过程流贴底显示最新
-        if (el.open) { const b = el.querySelector(".rc-events"); b.scrollTop = b.scrollHeight; }
+        if (el.open) {
+          void refreshRunEvents(card, pane);
+          const b = el.querySelector(".rc-events");
+          b.scrollTop = b.scrollHeight;
+        }
       });
+      if (!anchor) pane.prepend(el);
+      cards.set(run.id, card);
+    }
+    if (anchor) {
       // 更早运行的卡片连同其实时输出框一起越过,保持按 run id 排序
       while ((anchor.nextElementSibling?.classList?.contains("run-card")
               || anchor.nextElementSibling?.classList?.contains("run-live-output"))
              && Number(anchor.nextElementSibling.dataset.runId) < run.id)
         anchor = anchor.nextElementSibling;
-      anchor.after(el);
-      cards.set(run.id, card);
+      anchor.after(card.el);
+      card.waitingForAnchor = false;
     }
-    const live = ["queued", "running", "waiting_user"].includes(run.status);
-    card.runStatus = run.status;
+    const live = isLiveRun(run);
+    if (card.run && live !== isLiveRun(card.run)) {
+      // 在终态之后抵达的旧频道轮询不能重新打开已结束的运行。
+      if (live) continue;
+      // 终态日志要等展开才读取；此前显示的审批或提问控件应立即移除。
+      card.el.querySelector(".rc-events").innerHTML = "";
+    }
+    card.run = run;
     // 运行结束在同步路径立即移除实时输出框:与本轮 appendMessages 挂上的
     // 正式消息同一渲染周期完成交接,不闪重复,也不依赖事件请求成功
     if (!live)
       pane.querySelector(`.run-live-output[data-run-id="${run.id}"]`)?.remove();
-    const key = `${run.status}:${run.events_size}`;
-    if (card.key !== key && !card.fetching) {
+    card.eventsKey = `${run.status}:${run.events_size}`;
+    const summaryKey = `${card.eventsKey}:${run.recovery_run_id || ""}:${run.merged_count || 0}`;
+    if (card.summaryKey !== summaryKey) {
+      card.summaryKey = summaryKey;
       card.el.querySelector("summary").innerHTML = runSummary(run);
       if (!card.userToggled) card.el.open = live;   // 运行中自动展开,结束自动收起
-      if (run.events_size > 0 || !live) {
-        card.fetching = true;
-        renderRunEvents(run, card, pane).then(ok => {
-          card.fetching = false;
-          if (ok) card.key = key;
-        });
-      } else {
-        card.key = key;
+      if (run.status === "merged") {
+        // 并入的运行没有过程事件,不必请求
+        card.el.querySelector(".rc-events").innerHTML = `<div class="re re-status">这条消息到达时 @${
+          esc(run.role_id)} 还在处理上一轮;轮到它时,排队的几条消息合并成了一轮,过程与回复都在那一轮里。</div>`;
       }
     }
+    void refreshRunEvents(card, pane);
   }
   if (nearBottom) pane.scrollTop = pane.scrollHeight;
 }

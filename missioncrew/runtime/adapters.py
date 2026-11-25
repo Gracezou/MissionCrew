@@ -247,14 +247,20 @@ def _clear_session(cfg: ExecutionConfig) -> None:
             pass
 
 
-def _refresh_session(cfg: ExecutionConfig) -> None:
+def _refresh_session(cfg: ExecutionConfig, live_session_id: str = "") -> Optional[RunResult]:
     """会话锁内重读持久状态，覆盖线程池排队期间形成的陈旧快照。"""
+    if cfg.require_session_resume and live_session_id and live_session_id != cfg.session_id:
+        return RunResult(False, "当前 Runtime 已切换原生会话，未发送续跑请求")
     if not cfg.load_session:
         return
     try:
         session_id, accepted_context, reinject_due = cfg.load_session()
-    except Exception:
+    except Exception as exc:
+        if cfg.require_session_resume:
+            return RunResult(False, f"无法读取续跑所需的原生会话: {exc}")
         return
+    if cfg.require_session_resume and session_id != cfg.session_id:
+        return RunResult(False, "续跑所需的原生会话已变更，未发送本轮请求")
     cfg.session_id = session_id
     cfg.context_changed = bool(
         session_id and accepted_context != cfg.context_version)
@@ -637,7 +643,8 @@ class MockAdapter:
             with _named_session_lock(cfg.session_key):
                 if cfg.cancellation_requested():
                     return RunResult(False, "执行已停止")
-                _refresh_session(cfg)
+                if failure := _refresh_session(cfg):
+                    return failure
                 return self._chat(cfg)
         if cfg.cancellation_requested():
             return RunResult(False, "执行已停止")
@@ -747,7 +754,8 @@ class AcpAdapter:
                 cfg.emit("command", "$ " + shlex.join(cmd) + "\n")
             except Exception:
                 pass
-        _refresh_session(cfg)
+        if failure := _refresh_session(cfg):
+            return failure
         # 实际用哪份输入(复用 or 恢复)由协议层决定,这里推迟到发送时再上报模式
         current_prompt, current_mode = _session_input(
             cfg, recovery=False, announce=False)
@@ -758,6 +766,7 @@ class AcpAdapter:
             model=cfg.backend.model, timeout=cfg.timeout, emit=cfg.emit,
             session_key=cfg.session_key, session_id=cfg.session_id,
             recovery_prompt=recovery_prompt, save_session=cfg.save_session,
+            require_session_resume=cfg.require_session_resume,
             prompt_mode=current_mode, recovery_mode=recovery_mode,
             mode_labels=_INJECTION_LABELS,
             context_version=cfg.context_version, runtime_id=cfg.backend.id,
@@ -921,11 +930,13 @@ class _GenericJsonState:
     terminal_texts: list[str] = field(default_factory=list)
 
 
-def _extract_session_id(line: str) -> str:
+def _extract_session_id(line: str, *, envelope_only: bool = False) -> str:
     """从 CLI 的 JSON 事件或可读头部提取原生会话 id。"""
     try:
         data = json.loads(line)
     except json.JSONDecodeError:
+        if envelope_only:
+            return ""
         match = re.search(
             r"(?:session|thread|conversation)(?:\s+id)?\s*[:=]\s*"
             r"([A-Za-z0-9][A-Za-z0-9._:-]{5,})", line, re.I)
@@ -937,11 +948,13 @@ def _extract_session_id(line: str) -> str:
                 found = value.get(key)
                 if isinstance(found, str) and found:
                     return found
+            if envelope_only:
+                return ""
             for nested in value.values():
                 found = _walk(nested)
                 if found:
                     return found
-        elif isinstance(value, list):
+        elif not envelope_only and isinstance(value, list):
             for nested in value:
                 found = _walk(nested)
                 if found:
@@ -1137,7 +1150,8 @@ class CliAdapter:
             with _named_session_lock(cfg.session_key):
                 if cfg.cancellation_requested():
                     return RunResult(False, "执行已停止")
-                _refresh_session(cfg)
+                if failure := _refresh_session(cfg):
+                    return failure
                 return self._run(cfg)
         if cfg.cancellation_requested():
             return RunResult(False, "执行已停止")
@@ -1211,6 +1225,7 @@ class CliAdapter:
         text_acc: list[str] = []              # stream-json 的文本块(无 result 时兜底)
         generic_state = _GenericJsonState()
         captured_sessions: list[str] = []
+        session_mismatch = False
 
         def parse_emit(kind, text):
             if kind == "text":
@@ -1221,14 +1236,22 @@ class CliAdapter:
         codex_err = _CodexStderrParser(emit) if self.adapter_name == "codex" else None
 
         def _drain(pipe, kind):
+            nonlocal session_mismatch
+            check_id = cfg.require_session_resume and structured_json and kind == "stdout"
             for raw in pipe:
                 line = raw.rstrip("\n")
                 if not line.strip():
                     continue
-                found_session = _extract_session_id(line)
-                if found_session:
-                    captured_sessions.append(found_session)
                 (out_tail if kind == "stdout" else err_tail).append(line)
+                # 只有协议事件顶层的句柄能证明 CLI 切换了会话；工具参数和
+                # 回复正文里也可能出现其他任务的 session id。
+                found_session = _extract_session_id(line, envelope_only=check_id)
+                if found_session:
+                    if check_id and found_session != native_session_id:
+                        session_mismatch = True
+                        _kill_process_group(proc)
+                        return
+                    captured_sessions.append(found_session)
                 if kind == "stdout" and not stream_json and not structured_json:
                     out_full.append(line)
                 elif kind == "stderr":
@@ -1272,6 +1295,11 @@ class CliAdapter:
             return RunResult(False, f"执行超时({cfg.timeout}s)")
         for r in readers:
             r.join(timeout=5)
+        if session_mismatch:
+            _clear_session(cfg)
+            _untrack_process(proc)
+            _write_log()
+            return RunResult(False, "Runtime 返回了不同的原生会话，已停止续跑")
         if any(r.is_alive() for r in readers):
             # 子进程已退出但孙进程仍握着管道:结束进程组促成 EOF,
             # 避免回复被后续输出污染、事件在 run 结束后继续增长
@@ -1331,7 +1359,7 @@ def _role_from_prompt(prompt: str) -> str:
 
 
 def _trigger_from_prompt(prompt: str) -> str:
-    m = re.search(r"# Trigger Message[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.S)
+    m = re.search(r"^# Trigger Message[^\n]*\n(.*?)(?:\n# |\Z)", prompt, re.M | re.S)
     if not m:
         return ""
     raw = m.group(1).strip()
@@ -1341,6 +1369,9 @@ def _trigger_from_prompt(prompt: str) -> str:
         return raw
     if isinstance(message, dict):
         return str(message.get("content", ""))
+    if isinstance(message, list):   # 排队合并的一轮:多条触发消息
+        return "\n".join(str(item.get("content", "")) for item in message
+                         if isinstance(item, dict))
     return raw
 
 

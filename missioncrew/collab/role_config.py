@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..core.models import MENTION_ID_RE, ROLE_ABILITIES, Role
 from ..runtime import runtime_manager
@@ -24,6 +24,7 @@ class RoleTemplateInput(BaseModel):
     preference: str = ""
     color: str = ""
     sort_order: int | None = None
+    max_concurrency: int = Field(default=0, ge=0)
 
 
 class RoleInput(RoleTemplateInput):
@@ -100,6 +101,8 @@ def save_role_config(store, body, scope: str, discovered_catalog: Callable,
     # fork-divergence: 旧请求省略限制字段时保留现值。
     if "manual_only" not in body.model_fields_set and existing:
         data["manual_only"] = existing.manual_only
+    if "max_concurrency" not in body.model_fields_set and existing:
+        data["max_concurrency"] = existing.max_concurrency
     if data["sort_order"] is None:
         data["sort_order"] = existing.sort_order if existing else 10 + max(
             (role.sort_order for role in siblings), default=0)
